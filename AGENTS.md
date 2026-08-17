@@ -17,6 +17,7 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 - **Tech Stack**: Python ≥ 3.14 / FastAPI / SQLite. Embedded inference in-process via MLX (primary, Apple Silicon) with a llama-cpp-python fallback. See `docs/architecture/blueprint.md` for the full rationale and the OpenClaw comparison this design departs from.
 
 ## Layer 2: Directory Layout
+- `Makefile`: dev-workflow entry point — bootstraps `uv` (Astral installer, macOS/Linux) if missing, wraps `sync`/`lint`/`format`/`typecheck`/`test`/`check`/`clean`.
 - `src/ansina/`: Core application source code (src-layout package, `py.typed` marker for downstream type-checking).
 - `tests/unit/`: Mirrors `src/ansina/` 1:1. `tests/e2e/`: black-box, launches `python -m ansina` as a subprocess.
 - `docs/architecture/`: `blueprint.md` — architecture rationale and roadmap.
