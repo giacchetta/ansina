@@ -17,11 +17,13 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 - **Tech Stack**: Python ≥ 3.14 / FastAPI / SQLite. Embedded inference in-process via MLX (primary, Apple Silicon) with a llama-cpp-python fallback. See `docs/architecture/blueprint.md` for the full rationale and the OpenClaw comparison this design departs from.
 
 ## Layer 2: Directory Layout
-- `src/`: Core application source code.
+- `src/ansina/`: Core application source code (src-layout package, `py.typed` marker for downstream type-checking).
+- `tests/unit/`: Mirrors `src/ansina/` 1:1. `tests/e2e/`: black-box, launches `python -m ansina` as a subprocess.
+- `docs/architecture/`: `blueprint.md` — architecture rationale and roadmap.
 - `.agents/`: Synced central prompts, guardrails, and protocols.
 
 ## Layer 3: Data Flow & Entry Points
-- Primary entry point: `src/index.ts` (or `main.py`)
+- No entry point exists yet. `[project.scripts] ansina` and `python -m ansina` (`src/ansina/__main__.py`) are added by issue #4 (REST API skeleton) — do not assume either works before then.
 
 ## Layer 4: External Integrations
 - [List databases, third-party APIs, or external services]
