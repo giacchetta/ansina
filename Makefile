@@ -15,7 +15,8 @@ uv: ## Install uv (Astral installer) if not already on PATH — macOS and Linux
 	else \
 		echo "uv not found, installing via astral.sh..."; \
 		curl -LsSf https://astral.sh/uv/install.sh | sh; \
-		echo "Installed to $(UV_INSTALL_DIR). Open a new shell (or 'source $(UV_INSTALL_DIR)/env') to update PATH."; \
+		echo "Installed to $(UV_INSTALL_DIR). 'make' targets in this session already work (they call uv by full path)."; \
+		echo "For 'uv' to work directly in your shell, open a new terminal or source your shell's rc file (e.g. 'source ~/.zshrc' / 'source ~/.bashrc')."; \
 	fi
 
 .PHONY: sync
