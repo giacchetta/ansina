@@ -2,6 +2,9 @@
 .agents
 openclaw-main/
 
+# Local config (see ansina.example.toml)
+ansina.toml
+
 # Python
 .venv/
 __pycache__/

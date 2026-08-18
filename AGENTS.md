@@ -19,6 +19,8 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 ## Layer 2: Directory Layout
 - `Makefile`: dev-workflow entry point — bootstraps `uv` (Astral installer, macOS/Linux) if missing, wraps `sync`/`lint`/`format`/`typecheck`/`test`/`check`/`clean`.
 - `src/ansina/`: Core application source code (src-layout package, `py.typed` marker for downstream type-checking).
+- `src/ansina/config/`: Typed `Settings` (pydantic-settings). Layering: defaults → `ansina.toml` → `ANSINA_*` env vars. Load via `load_settings()`, never `os.getenv()` directly. Secrets are env-only — a `SecretStr` field set in the TOML file is a startup error.
+- `ansina.example.toml`: documents the config file shape; copy to `ansina.toml` (gitignored) to use.
 - `tests/unit/`: Mirrors `src/ansina/` 1:1. `tests/e2e/`: black-box, launches `python -m ansina` as a subprocess.
 - `docs/architecture/`: `blueprint.md` — architecture rationale and roadmap.
 - `.agents/`: Synced central prompts, guardrails, and protocols.
