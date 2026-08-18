@@ -27,17 +27,17 @@ from pydantic_settings import (
 )
 from pydantic_settings.exceptions import SettingsError
 
+from ansina.errors import ConfigurationError
+
 _ENV_PREFIX = "ANSINA_"
 _DEFAULT_CONFIG_FILE = Path("ansina.toml")
 _MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True)
 
 
-class ConfigError(Exception):
-    """Raised when configuration fails to load, with one aggregated, readable report.
+class ConfigError(ConfigurationError):
+    """Raised when configuration fails to load, with one aggregated, readable report."""
 
-    Note for issue #3: once ``AnsinaError`` (stable ``code`` taxonomy) lands, this
-    should be re-parented to it rather than staying a plain ``Exception``.
-    """
+    code = "ansina.config.invalid"
 
 
 class ServerSettings(BaseModel):

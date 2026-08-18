@@ -21,6 +21,8 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 - `src/ansina/`: Core application source code (src-layout package, `py.typed` marker for downstream type-checking).
 - `src/ansina/config/`: Typed `Settings` (pydantic-settings). Layering: defaults → `ansina.toml` → `ANSINA_*` env vars. Load via `load_settings()`, never `os.getenv()` directly. Secrets are env-only — a `SecretStr` field set in the TOML file is a startup error.
 - `ansina.example.toml`: documents the config file shape; copy to `ansina.toml` (gitignored) to use.
+- `src/ansina/errors.py`: `AnsinaError` base exception with a stable, machine-readable `code` (`ClassVar[str]`); every subclass must declare its own `code` or class creation raises. `ansina.config.ConfigError` subclasses it.
+- `src/ansina/logging/`: JSON structured logging via `logging.config.dictConfig`. Redaction runs inside `JsonFormatter`, not at call sites — never bypass it by formatting log strings yourself. Request/correlation ids via `contextvars` (`request_id_scope()`). Boot with `configure_logging(load_settings())`, then use `get_logger(__name__)` everywhere else, never bare `logging.getLogger()`.
 - `tests/unit/`: Mirrors `src/ansina/` 1:1. `tests/e2e/`: black-box, launches `python -m ansina` as a subprocess.
 - `docs/architecture/`: `blueprint.md` — architecture rationale and roadmap.
 - `.agents/`: Synced central prompts, guardrails, and protocols.
