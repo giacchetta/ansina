@@ -17,11 +17,18 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 - **Tech Stack**: Python ≥ 3.14 / FastAPI / SQLite. Embedded inference in-process via MLX (primary, Apple Silicon) with a llama-cpp-python fallback. See `docs/architecture/blueprint.md` for the full rationale and the OpenClaw comparison this design departs from.
 
 ## Layer 2: Directory Layout
-- `src/`: Core application source code.
+- `Makefile`: dev-workflow entry point — bootstraps `uv` (Astral installer, macOS/Linux) if missing, wraps `sync`/`lint`/`format`/`typecheck`/`test`/`check`/`clean`.
+- `src/ansina/`: Core application source code (src-layout package, `py.typed` marker for downstream type-checking).
+- `src/ansina/config/`: Typed `Settings` (pydantic-settings). Layering: defaults → `ansina.toml` → `ANSINA_*` env vars. Load via `load_settings()`, never `os.getenv()` directly. Secrets are env-only — a `SecretStr` field set in the TOML file is a startup error.
+- `ansina.example.toml`: documents the config file shape; copy to `ansina.toml` (gitignored) to use.
+- `src/ansina/errors.py`: `AnsinaError` base exception with a stable, machine-readable `code` (`ClassVar[str]`); every subclass must declare its own `code` or class creation raises. `ansina.config.ConfigError` subclasses it.
+- `src/ansina/logging/`: JSON structured logging via `logging.config.dictConfig`. Redaction runs inside `JsonFormatter`, not at call sites — never bypass it by formatting log strings yourself. Request/correlation ids via `contextvars` (`request_id_scope()`). Boot with `configure_logging(load_settings())`, then use `get_logger(__name__)` everywhere else, never bare `logging.getLogger()`.
+- `tests/unit/`: Mirrors `src/ansina/` 1:1. `tests/e2e/`: black-box, launches `python -m ansina` as a subprocess.
+- `docs/architecture/`: `blueprint.md` — architecture rationale and roadmap.
 - `.agents/`: Synced central prompts, guardrails, and protocols.
 
 ## Layer 3: Data Flow & Entry Points
-- Primary entry point: `src/index.ts` (or `main.py`)
+- No entry point exists yet. `[project.scripts] ansina` and `python -m ansina` (`src/ansina/__main__.py`) are added by issue #4 (REST API skeleton) — do not assume either works before then.
 
 ## Layer 4: External Integrations
 - [List databases, third-party APIs, or external services]

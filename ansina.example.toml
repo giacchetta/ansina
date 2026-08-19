@@ -1,0 +1,22 @@
+# Example Ansina configuration file.
+#
+# Copy this to `ansina.toml` (gitignored — never commit machine-specific config) and
+# edit as needed. Every value shown below is already the built-in default, so this
+# file exists purely to document the shape of the config; Ansina runs fine without it.
+#
+# Precedence, lowest to highest: built-in defaults -> ansina.toml -> ANSINA_* env vars.
+# `ANSINA_CONFIG_FILE` points at a different file than the default `./ansina.toml`.
+
+[server]
+host = "127.0.0.1"
+port = 8000
+
+[logging]
+level = "INFO"
+
+[database]
+path = "ansina.db"
+
+# Secrets (e.g. the API bearer token) are never read from this file — setting one
+# here is a hard startup error. Set it via the environment instead, e.g.:
+#   ANSINA_SECURITY__API_TOKEN=...

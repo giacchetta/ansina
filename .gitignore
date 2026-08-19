@@ -1,3 +1,19 @@
 .envrc
 .agents
 openclaw-main/
+
+# Local config (see ansina.example.toml)
+ansina.toml
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/

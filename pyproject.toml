@@ -1,0 +1,59 @@
+[project]
+name = "ansina"
+dynamic = ["version"]
+description = "Self-owned AI agent: an always-on in-process Heart plus a remote Brain, exposed over a single internal REST API."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+authors = [
+    { name = "Luciano Giacchetta", email = "ldgiacchetta@gmail.com" },
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "httpx>=0.27",
+    "pre-commit>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/ansina/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ansina"]
+
+[tool.ruff]
+target-version = "py314"
+src = ["src", "tests"]
+extend-exclude = ["openclaw-main"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "ANN", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+files = ["src", "tests"]
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=src/ansina --cov-report=term-missing"
