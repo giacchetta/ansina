@@ -1,0 +1,38 @@
+name: Post on Merge
+
+# Thin caller for the reusable post-on-merge pipeline hosted in
+# giacchetta/giacchetta.github.io. One merged PR == one post: the pipeline
+# gathers this PR + its closing issues, generates a LinkedIn-style post, and
+# opens a PR on the site repo under src/content/blog/<slug>.md.
+#
+# This repo owns the trigger and the merged==true gate only. All scripts and
+# prompts live upstream — see giacchetta.github.io/.github/post-on-merge.md.
+
+on:
+  pull_request:
+    types: [closed]
+
+  # Manual backfill: regenerate a post from any past merged PR.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to generate a post from"
+        required: true
+        type: string
+
+# Reading this repo's PR/issues is all GITHUB_TOKEN needs to do; the
+# cross-repo push uses posts_pat.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  post:
+    # Only merged PRs (or a manual dispatch) produce a post.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    uses: giacchetta/giacchetta.github.io/.github/workflows/post-on-merge.yml@main
+    with:
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+    secrets:
+      copilot_token: ${{ secrets.GC_COPILOT_TOKEN }}
+      posts_pat: ${{ secrets.GC_TOKEN }}
