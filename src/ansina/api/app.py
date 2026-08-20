@@ -1,9 +1,10 @@
 """`create_app()` — the FastAPI application factory. See issue #4.
 
 Boots with zero business logic: health/readiness/version routes, request-id middleware,
-and an error spine that maps every failure (`AnsinaError`, HTTP errors, validation
-errors, unhandled exceptions) to `application/problem+json`. Every later endpoint plugs
-into this shape rather than growing its own.
+an error spine that maps every failure (`AnsinaError`, HTTP errors, validation errors,
+unhandled exceptions) to `application/problem+json`, and the SQLite connection +
+migration lifecycle from issue #6. Every later endpoint plugs into this shape rather
+than growing its own.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from ansina.api.routes.health import router as health_router
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
 from ansina.logging import get_logger
+from ansina.storage import Database, run_migrations
 
 logger = get_logger(__name__)
 
@@ -40,6 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
+    db = Database(resolved_settings.database.path)
 
     if resolved_settings.security.api_token is None:
         logger.warning(
@@ -50,11 +53,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.info("ansina starting up")
+        db.connect()
+        run_migrations(db)
+        readiness.register("database", db.is_healthy)
         readiness.register("startup", lambda: True)
         try:
             yield
         finally:
             logger.info("ansina shutting down")
+            db.close()
 
     app = FastAPI(
         title="Ansina",
@@ -63,6 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
     app.state.readiness = readiness
+    app.state.db = db
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware

@@ -5,6 +5,11 @@ openclaw-main/
 # Local config (see ansina.example.toml)
 ansina.toml
 
+# SQLite database + WAL sidecar files (see src/ansina/storage/)
+*.db
+*.db-wal
+*.db-shm
+
 # Python
 .venv/
 __pycache__/

@@ -15,6 +15,11 @@ port = 8000
 level = "INFO"
 
 [database]
+# A relative path resolves against the process's working directory at startup — fine
+# when launched from the repo root, ambiguous once Ansina runs as a service. Prefer an
+# absolute path (or "~/..." — "~" is expanded) once the database needs to live
+# somewhere else, e.g. a larger disk. WAL mode creates "<path>-wal" and "<path>-shm"
+# sidecar files next to it; move all three together.
 path = "ansina.db"
 
 # Secrets (e.g. the API bearer token) are never read from this file — setting one

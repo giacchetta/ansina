@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -31,9 +33,16 @@ def _free_port() -> int:
         return port
 
 
+@contextmanager
 def _launch_server(
     tmp_path: Path, *, env: dict[str, str] | None = None
 ) -> Iterator[str]:
+    """Launch `python -m ansina` against `tmp_path`'s config, yielding its base URL.
+
+    A `@contextmanager` rather than a bare generator so a test can start, stop, and
+    restart the server against the *same* `tmp_path` — e.g. to prove a migration
+    applied on the first boot is not re-applied on the second.
+    """
     port = _free_port()
     (tmp_path / "ansina.toml").write_text(
         f'[server]\nhost = "127.0.0.1"\nport = {port}\n'
@@ -83,13 +92,17 @@ def _launch_server(
 @pytest.fixture
 def server(tmp_path: Path) -> Iterator[str]:
     """No ANSINA_SECURITY__API_TOKEN — auth disabled, every route reachable."""
-    yield from _launch_server(tmp_path)
+    with _launch_server(tmp_path) as base_url:
+        yield base_url
 
 
 @pytest.fixture
 def authed_server(tmp_path: Path) -> Iterator[str]:
     """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced."""
-    yield from _launch_server(tmp_path, env={"ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN})
+    with _launch_server(
+        tmp_path, env={"ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN}
+    ) as base_url:
+        yield base_url
 
 
 def test_healthz(server: str) -> None:
@@ -103,7 +116,9 @@ def test_readyz(server: str) -> None:
     response = httpx.get(f"{server}/readyz")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ready"
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["checks"]["database"] is True
 
 
 def test_version(server: str) -> None:
@@ -158,3 +173,31 @@ def test_authed_protected_route_accepts_valid_token(authed_server: str) -> None:
 
     assert response.status_code == 200
     assert response.json()["name"] == "ansina"
+
+
+def test_migration_survives_a_restart(tmp_path: Path) -> None:
+    """A real, black-box run of issue #6's acceptance criteria: on first boot the
+    database file is created and migrated, and a second boot against the same file
+    does not re-apply migration 0001 — checked from outside the process, via a plain
+    `sqlite3` connection to the file the server wrote.
+    """
+    with _launch_server(tmp_path) as base_url:
+        response = httpx.get(f"{base_url}/readyz")
+        assert response.json()["checks"]["database"] is True
+
+    db_path = tmp_path / "ansina.db"
+    assert db_path.exists()
+    with sqlite3.connect(db_path) as conn:
+        (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
+        assert journal_mode.lower() == "wal"
+        rows = conn.execute("SELECT version FROM schema_version").fetchall()
+        assert rows == [(1,)]
+
+    # Boot again against the same tmp_path (same ansina.toml, same db file).
+    with _launch_server(tmp_path) as base_url:
+        response = httpx.get(f"{base_url}/readyz")
+        assert response.json()["checks"]["database"] is True
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT version FROM schema_version").fetchall()
+        assert rows == [(1,)]  # still exactly one row — 0001 was not re-applied

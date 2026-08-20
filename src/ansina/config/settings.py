@@ -25,6 +25,7 @@ from pydantic import (
     Field,
     SecretStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from pydantic_settings import (
@@ -68,9 +69,26 @@ class LoggingSettings(BaseModel):
 class DatabaseSettings(BaseModel):
     """SQLite location, consumed by issue #6's persistence foundation."""
 
-    model_config = _MODEL_CONFIG
+    # `validate_default=True` (unlike the shared `_MODEL_CONFIG`) so the *default*
+    # path goes through `_resolve_path` too, not just an explicitly configured one —
+    # otherwise the unconfigured case would stay relative to whatever the process's
+    # CWD is, the exact ambiguity this validator exists to remove.
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
     path: Path = Path("ansina.db")
+
+    @field_validator("path")
+    @classmethod
+    def _resolve_path(cls, value: Path) -> Path:
+        """Expand `~` and anchor a relative path to the CWD, once, at load time.
+
+        Without this, `~/data/ansina.db` stays literal (SQLite would create a
+        directory named `~`) and a relative path silently tracks wherever the
+        process happens to be launched from — fine from the repo root, wrong the
+        moment Ansina runs as a service. Every consumer downstream sees one
+        already-absolute path.
+        """
+        return value.expanduser().resolve()
 
 
 class SecuritySettings(BaseModel):

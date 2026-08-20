@@ -13,7 +13,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.server.host == "127.0.0.1"
     assert settings.server.port == 8000
     assert settings.logging.level == "INFO"
-    assert settings.database.path == Path("ansina.db")
+    assert settings.database.path == tmp_cwd / "ansina.db"
     assert settings.security.api_token is None
 
 
@@ -205,3 +205,34 @@ def test_settings_is_frozen(clean_env: None, tmp_cwd: Path) -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         settings.server = settings.server
+
+
+def test_database_path_expands_user_home(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DATABASE__PATH", "~/ansina-data/ansina.db")
+
+    settings = load_settings()
+
+    assert settings.database.path == Path.home() / "ansina-data" / "ansina.db"
+
+
+def test_database_path_resolves_relative_to_cwd(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DATABASE__PATH", "nested/ansina.db")
+
+    settings = load_settings()
+
+    assert settings.database.path == tmp_cwd / "nested" / "ansina.db"
+
+
+def test_database_path_absolute_is_unchanged(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    absolute = tmp_cwd / "elsewhere" / "ansina.db"
+    monkeypatch.setenv("ANSINA_DATABASE__PATH", str(absolute))
+
+    settings = load_settings()
+
+    assert settings.database.path == absolute

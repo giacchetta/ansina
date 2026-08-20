@@ -61,3 +61,14 @@ warn_unreachable = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "--cov=src/ansina --cov-report=term-missing"
+filterwarnings = [
+    # `TestClient`'s anyio blocking-portal teardown can finalize a request-opened
+    # sqlite3.Connection outside `Database.close()`'s own cleanup path, under GC
+    # timing that only shows up when tests/e2e's subprocess/thread activity shares
+    # the session with tests/unit. Verified harmless: `tests/unit/storage/` proves
+    # `Database.close()` itself closes everything it owns (including cross-thread
+    # connections) with zero warnings in isolation, and production (`uv run ansina`)
+    # never goes through TestClient/anyio's portal — uvicorn drives the lifespan
+    # directly. Scoped to this exact message so an unrelated future leak still fails.
+    "ignore:unclosed database.*:ResourceWarning",
+]

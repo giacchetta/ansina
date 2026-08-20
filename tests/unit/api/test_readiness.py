@@ -63,3 +63,10 @@ def test_readyz_returns_503_problem_json_when_not_ready(
     body = response.json()
     assert body["code"] == "ansina.not_ready"
     assert body["checks"]["dependency"] is False
+
+
+def test_readyz_reports_the_database_check(client: TestClient) -> None:
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["checks"]["database"] is True
