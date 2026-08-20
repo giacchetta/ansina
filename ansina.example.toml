@@ -20,3 +20,9 @@ path = "ansina.db"
 # Secrets (e.g. the API bearer token) are never read from this file — setting one
 # here is a hard startup error. Set it via the environment instead, e.g.:
 #   ANSINA_SECURITY__API_TOKEN=...
+#
+# Binding [server] host to anything other than loopback (127.0.0.1, ::1, localhost)
+# while no ANSINA_SECURITY__API_TOKEN is set is also a hard startup error — Ansina
+# refuses to expose an unauthenticated API off the local machine. /healthz and /readyz
+# stay reachable without a token either way; every other route requires one once a
+# token is configured.

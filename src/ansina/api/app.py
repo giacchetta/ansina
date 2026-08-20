@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ansina import __version__
+from ansina.api.auth import BearerAuthMiddleware
 from ansina.api.exception_handlers import (
     ansina_error_handler,
     http_exception_handler,
@@ -40,6 +41,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
 
+    if resolved_settings.security.api_token is None:
+        logger.warning(
+            "ansina starting with no api_token configured — every route except "
+            "/healthz and /readyz is reachable with no authentication"
+        )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.info("ansina starting up")
@@ -57,6 +64,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.readiness = readiness
 
+    # `add_middleware` inserts at the front of the stack, so registration order is
+    # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
+    # goes first (innermost) and RequestIdMiddleware last (outermost) so a rejected
+    # request still gets a request id bound in context — a 401's `problem+json` body
+    # carries a real `request_id`, the response still echoes `X-Request-ID`, and the
+    # "request completed" access-log line still fires for it.
+    app.add_middleware(BearerAuthMiddleware, token=resolved_settings.security.api_token)
     app.add_middleware(RequestIdMiddleware)
 
     app.add_exception_handler(AnsinaError, ansina_error_handler)

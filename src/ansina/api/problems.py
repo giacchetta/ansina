@@ -26,6 +26,7 @@ CODE_NOT_FOUND = "ansina.not_found"
 CODE_METHOD_NOT_ALLOWED = "ansina.method_not_allowed"
 CODE_INTERNAL_ERROR = "ansina.internal_error"
 CODE_NOT_READY = "ansina.not_ready"
+CODE_UNAUTHORIZED = "ansina.unauthorized"
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
@@ -64,11 +65,13 @@ def problem_response(
     title: str,
     detail: str,
     extra: Mapping[str, Any] | None = None,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     """Build a `problem+json` response.
 
     `request_id` is always read from context here — never accepted as a parameter, so a
-    handler can't accidentally report the wrong one.
+    handler can't accidentally report the wrong one. `headers` is for response headers
+    that aren't part of the problem body itself — e.g. `WWW-Authenticate` on a 401.
     """
     problem = Problem(
         type=f"urn:ansina:error:{code}",
@@ -83,4 +86,5 @@ def problem_response(
         status_code=status,
         content=problem.model_dump(exclude_none=True),
         media_type=PROBLEM_MEDIA_TYPE,
+        headers=dict(headers) if headers else None,
     )

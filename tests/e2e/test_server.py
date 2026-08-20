@@ -6,6 +6,7 @@ Never imports `ansina.api` internals (blueprint §5) — this is the gate that a
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -19,6 +20,9 @@ import pytest
 _STARTUP_TIMEOUT_S = 15.0
 _POLL_INTERVAL_S = 0.1
 
+# Long enough to clear `SecuritySettings.api_token`'s `min_length=16`.
+_E2E_TOKEN = "e2e-test-token-0123456789"
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -27,8 +31,9 @@ def _free_port() -> int:
         return port
 
 
-@pytest.fixture
-def server(tmp_path: Path) -> Iterator[str]:
+def _launch_server(
+    tmp_path: Path, *, env: dict[str, str] | None = None
+) -> Iterator[str]:
     port = _free_port()
     (tmp_path / "ansina.toml").write_text(
         f'[server]\nhost = "127.0.0.1"\nport = {port}\n'
@@ -43,6 +48,7 @@ def server(tmp_path: Path) -> Iterator[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env={**os.environ, **(env or {})},
     )
     try:
         deadline = time.monotonic() + _STARTUP_TIMEOUT_S
@@ -72,6 +78,18 @@ def server(tmp_path: Path) -> Iterator[str]:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+
+
+@pytest.fixture
+def server(tmp_path: Path) -> Iterator[str]:
+    """No ANSINA_SECURITY__API_TOKEN — auth disabled, every route reachable."""
+    yield from _launch_server(tmp_path)
+
+
+@pytest.fixture
+def authed_server(tmp_path: Path) -> Iterator[str]:
+    """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced."""
+    yield from _launch_server(tmp_path, env={"ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN})
 
 
 def test_healthz(server: str) -> None:
@@ -116,3 +134,27 @@ def test_unknown_path_is_problem_json(server: str) -> None:
     assert response.status_code == 404
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["code"] == "ansina.not_found"
+
+
+def test_authed_healthz_reachable_without_token(authed_server: str) -> None:
+    response = httpx.get(f"{authed_server}/healthz")
+
+    assert response.status_code == 200
+
+
+def test_authed_protected_route_rejects_missing_token(authed_server: str) -> None:
+    response = httpx.get(f"{authed_server}/version")
+
+    assert response.status_code == 401
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_authed_protected_route_accepts_valid_token(authed_server: str) -> None:
+    response = httpx.get(
+        f"{authed_server}/version",
+        headers={"Authorization": f"Bearer {_E2E_TOKEN}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "ansina"

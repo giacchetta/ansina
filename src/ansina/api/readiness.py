@@ -1,9 +1,10 @@
 """A tiny named-check registry backing `GET /readyz`.
 
-Each milestone that adds a real dependency (issue #5's auth store, #6's SQLite
-connection) registers its own check here instead of editing the `/readyz` route — the
-route only ever asks "is everything registered currently true," never what those things
-are.
+Each milestone that adds a real dependency (issue #6's SQLite connection) registers its
+own check here instead of editing the `/readyz` route — the route only ever asks "is
+everything registered currently true," never what those things are. Issue #5's auth is a
+static token, not a dependency with its own state, so it has no readiness check of its
+own.
 """
 
 from __future__ import annotations
