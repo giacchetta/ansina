@@ -19,6 +19,8 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 ## Layer 2: Directory Layout
 - `Makefile`: dev-workflow entry point — bootstraps `uv` (Astral installer, macOS/Linux) if missing, wraps `sync`/`lint`/`format`/`typecheck`/`test`/`check`/`clean`.
 - `src/ansina/`: Core application source code (src-layout package, `py.typed` marker for downstream type-checking).
+- `src/ansina/__main__.py`: Process entry point (`python -m ansina` / the `ansina` console script). Loads config, configures logging, builds the app via `create_app()`, hands it to uvicorn.
+- `src/ansina/api/`: REST API surface (issue #4). `create_app()` in `api/app.py` is the FastAPI factory. `api/middleware.py` assigns/echoes the request id and feeds `logging`'s correlation-id contextvar. `api/problems.py` + `api/exception_handlers.py` map every error door (`AnsinaError`, HTTP errors, validation errors, unhandled exceptions) to RFC 9457 `application/problem+json`. `api/readiness.py` is a named-check registry backing `GET /readyz`; later milestones register their own checks there instead of editing the route. `api/routes/health.py` holds the only routes M0 ships: `/healthz`, `/readyz`, `/version`.
 - `src/ansina/config/`: Typed `Settings` (pydantic-settings). Layering: defaults → `ansina.toml` → `ANSINA_*` env vars. Load via `load_settings()`, never `os.getenv()` directly. Secrets are env-only — a `SecretStr` field set in the TOML file is a startup error.
 - `ansina.example.toml`: documents the config file shape; copy to `ansina.toml` (gitignored) to use.
 - `src/ansina/errors.py`: `AnsinaError` base exception with a stable, machine-readable `code` (`ClassVar[str]`); every subclass must declare its own `code` or class creation raises. `ansina.config.ConfigError` subclasses it.
@@ -28,7 +30,9 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 - `.agents/`: Synced central prompts, guardrails, and protocols.
 
 ## Layer 3: Data Flow & Entry Points
-- No entry point exists yet. `[project.scripts] ansina` and `python -m ansina` (`src/ansina/__main__.py`) are added by issue #4 (REST API skeleton) — do not assume either works before then.
+- Entry points: `python -m ansina` and the `ansina` console script (`[project.scripts]`), both resolving to `src/ansina/__main__.py:main`.
+- Boot sequence: `load_settings()` → `configure_logging(settings)` → `create_app(settings)` (`src/ansina/api/app.py`) → `uvicorn.run(...)`. A `ConfigError` during boot prints the aggregated report to stderr and exits non-zero, never a traceback.
+- Request flow: `RequestIdMiddleware` binds/echoes a request id (feeding `logging`'s correlation-id contextvar) → route → response, or an exception mapped to `application/problem+json` by the handlers in `api/exception_handlers.py`.
 
 ## Layer 4: External Integrations
 - [List databases, third-party APIs, or external services]

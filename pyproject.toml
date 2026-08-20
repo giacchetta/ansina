@@ -15,6 +15,9 @@ dependencies = [
     "pydantic-settings>=2.6",
 ]
 
+[project.scripts]
+ansina = "ansina.__main__:main"
+
 [dependency-groups]
 dev = [
     "ruff>=0.8",
