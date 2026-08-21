@@ -1,5 +1,7 @@
 # 🚀 [App Name]
 
+[![CI](https://github.com/giacchetta/ansina/actions/workflows/ci.yml/badge.svg)](https://github.com/giacchetta/ansina/actions/workflows/ci.yml)
+
 > [Short 1-sentence tagline describing the project]
 
 ```mermaid

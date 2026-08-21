@@ -4,6 +4,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -158,16 +159,16 @@ def test_connect_raises_storage_error_when_wal_unavailable(
     class _RollbackJournalConnection(sqlite3.Connection):
         """Pretends `PRAGMA journal_mode=WAL` was rejected by SQLite."""
 
-        def execute(self, sql: str, *args: object) -> sqlite3.Cursor:  # type: ignore[override]
+        def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
             if sql == "PRAGMA journal_mode=WAL":
                 return super().execute("SELECT 'delete'")
-            return super().execute(sql, *args)
+            return super().execute(sql, parameters)
 
     real_connect = sqlite3.connect
 
-    def _fake_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+    def _fake_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         kwargs["factory"] = _RollbackJournalConnection
-        return real_connect(*args, **kwargs)  # type: ignore[arg-type]
+        return cast(sqlite3.Connection, real_connect(*args, **kwargs))
 
     monkeypatch.setattr("ansina.storage.database.sqlite3.connect", _fake_connect)
 

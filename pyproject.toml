@@ -56,6 +56,11 @@ strict = true
 python_version = "3.14"
 files = ["src", "tests"]
 warn_unreachable = true
+# tests/unit/**/conftest.py collide by module name (e.g. api/conftest.py vs
+# logging/conftest.py) since tests/ has no __init__.py files; these two
+# settings resolve modules by file path instead of requiring unique names.
+mypy_path = "src"
+explicit_package_bases = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -29,6 +29,7 @@ Before reading user requests or modifying ANY file, you MUST follow this exact e
 - `tests/unit/`: Mirrors `src/ansina/` 1:1. `tests/e2e/`: black-box, launches `python -m ansina` as a subprocess.
 - `docs/architecture/`: `blueprint.md` — architecture rationale and roadmap.
 - `.agents/`: Synced central prompts, guardrails, and protocols.
+- `.github/workflows/ci.yml`: CI gate (issue #7) — `check` (ruff / ruff-format / mypy --strict / `pytest tests/unit`) then `e2e` (`needs: check`), both on `ubuntu-latest` × `macos-26` (Apple Silicon, mirroring the M4 deployment target; the arm64 leg is required, not optional), Python 3.14 via `uv sync --locked`. `.pre-commit-config.yaml` runs the identical checks through `uv run`, so the pinned tool versions come from `uv.lock` for both — never pin a linter separately in the pre-commit config.
 
 ## Layer 3: Data Flow & Entry Points
 - Entry points: `python -m ansina` and the `ansina` console script (`[project.scripts]`), both resolving to `src/ansina/__main__.py:main`.
