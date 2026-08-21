@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from ansina.config import ConfigError, load_settings
+from ansina.config.settings import ServerSettings, _unwrap_model
 
 
 def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
@@ -236,3 +237,34 @@ def test_database_path_absolute_is_unchanged(
     settings = load_settings()
 
     assert settings.database.path == absolute
+
+
+def test_unwrap_model_returns_none_for_a_non_model_annotation() -> None:
+    """`int` contains no nested `BaseModel` anywhere in its args — the recursive walk
+    bottoms out and reports "nothing found" rather than a model.
+    """
+    assert _unwrap_model(int) is None
+
+
+def test_unwrap_model_finds_a_model_nested_inside_a_union() -> None:
+    """None of Ansina's own fields wrap a `BaseModel` in a `Union` (only `SecretStr`
+    fields do that, via `SecretStr | None`), so nothing in `load_settings` exercises
+    `_unwrap_model`'s recursive branch — this drives it directly with `X | None`.
+    """
+    assert _unwrap_model(ServerSettings | None) is ServerSettings
+
+
+def test_env_var_with_unparseable_value_for_nested_model_raises_config_error(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting the *whole-section* env var (not a `__`-nested leaf) to a non-JSON
+    value makes pydantic-settings itself raise `SettingsError` while parsing the env
+    source — a different failure mode than a `ValidationError` on a leaf field, and
+    `load_settings` must wrap it in the same `ConfigError` report either way.
+    """
+    monkeypatch.setenv("ANSINA_SERVER", "not-json")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "server" in str(exc_info.value)

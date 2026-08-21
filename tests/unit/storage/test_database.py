@@ -103,6 +103,24 @@ def test_is_healthy_true_when_connected(db: Database) -> None:
     assert db.is_healthy() is True
 
 
+def test_is_healthy_false_when_query_raises(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`is_healthy()` is a `Readiness` check (api/readiness.py) — it must report
+    `False` on a `sqlite3.Error`, never let it propagate as a caller-visible exception.
+    `sqlite3.Connection` is a C extension type whose methods can't be monkeypatched
+    directly, so this stubs the connection `Database` hands back instead.
+    """
+
+    class _FailingConnection:
+        def execute(self, *_: Any) -> sqlite3.Cursor:
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "connection", lambda: _FailingConnection())
+
+    assert db.is_healthy() is False
+
+
 def test_transaction_commits_on_success(db: Database) -> None:
     db.connection().execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
 

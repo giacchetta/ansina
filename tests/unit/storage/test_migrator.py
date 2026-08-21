@@ -135,6 +135,20 @@ def test_ignores_files_that_do_not_match_the_naming_pattern(tmp_path: Path) -> N
     assert [m.version for m in migrations] == [1]
 
 
+def test_ignores_subdirectories(tmp_path: Path) -> None:
+    """A stray subdirectory under `migrations/` (e.g. `__pycache__`) is skipped by the
+    `is_file()` check rather than blowing up on `read_text()`.
+    """
+    migrations_dir = tmp_path / "migrations"
+    migrations_dir.mkdir()
+    _write(migrations_dir, "0001_init.sql", "CREATE TABLE t (id INTEGER);")
+    (migrations_dir / "0002_not_a_file").mkdir()
+
+    migrations = _discover_migrations(migrations_dir)
+
+    assert [m.version for m in migrations] == [1]
+
+
 def test_rejects_applied_versions_with_a_gap(db: Database, tmp_path: Path) -> None:
     migrations_dir = tmp_path / "migrations"
     migrations_dir.mkdir()

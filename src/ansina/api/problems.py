@@ -42,7 +42,9 @@ def status_for_error(exc: AnsinaError) -> int:
     for cls in type(exc).__mro__:
         if issubclass(cls, AnsinaError) and cls in _STATUS_BY_ERROR_TYPE:
             return _STATUS_BY_ERROR_TYPE[cls]
-    return 500
+    return 500  # unreachable: AnsinaError itself is always in _STATUS_BY_ERROR_TYPE,
+    # and it's always in every subclass's __mro__, so the loop above always returns
+    # first. Kept only because mypy --strict requires a return on every path.
 
 
 class Problem(BaseModel):

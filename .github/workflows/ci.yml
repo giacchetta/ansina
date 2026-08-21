@@ -53,8 +53,9 @@ jobs:
           cache-dependency-glob: uv.lock
           python-version: "3.14"
       - run: uv sync --locked --all-groups
-      # --no-cov: this suite drives `python -m ansina` as a real subprocess,
-      # so in-process coverage instrumentation would report a misleading
-      # near-zero number here. #16 decides whether/how to combine coverage
-      # across jobs before adding a --cov-fail-under threshold.
+      # --no-cov: this suite drives `python -m ansina` as a real subprocess, so
+      # in-process coverage instrumentation would report a misleading near-zero
+      # number here. Resolved by #16: this is a boot gate, not a coverage
+      # source — the 100% coverage threshold (pyproject.toml) is enforced on
+      # `tests/unit` only, via `check`'s `pytest tests/unit` above.
       - run: uv run pytest tests/e2e --no-cov

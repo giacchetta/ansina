@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from ansina.api.readiness import Readiness
 
 
@@ -39,34 +36,3 @@ def test_checks_are_evaluated_fresh_each_time() -> None:
     assert readiness.is_ready is False
     state["ok"] = True
     assert readiness.is_ready is True
-
-
-def test_readyz_returns_200_when_ready(client: TestClient) -> None:
-    response = client.get("/readyz")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "ready"
-    assert body["checks"]["startup"] is True
-
-
-def test_readyz_returns_503_problem_json_when_not_ready(
-    app: FastAPI, client: TestClient
-) -> None:
-    readiness: Readiness = app.state.readiness
-    readiness.register("dependency", lambda: False)
-
-    response = client.get("/readyz")
-
-    assert response.status_code == 503
-    assert response.headers["content-type"] == "application/problem+json"
-    body = response.json()
-    assert body["code"] == "ansina.not_ready"
-    assert body["checks"]["dependency"] is False
-
-
-def test_readyz_reports_the_database_check(client: TestClient) -> None:
-    response = client.get("/readyz")
-
-    assert response.status_code == 200
-    assert response.json()["checks"]["database"] is True

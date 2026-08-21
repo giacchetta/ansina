@@ -7,6 +7,7 @@ Never imports `ansina.api` internals (blueprint §5) — this is the gate that a
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -14,6 +15,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -33,11 +35,24 @@ def _free_port() -> int:
         return port
 
 
+@dataclass
+class Server:
+    """A launched `python -m ansina` subprocess, still healthy when yielded.
+
+    Carries the raw `Popen` (not just the base URL) so a test can inspect the exit
+    code and captured output after shutdown — e.g. to prove a clean SIGTERM shutdown,
+    not just that the process eventually dies.
+    """
+
+    base_url: str
+    process: subprocess.Popen[str]
+
+
 @contextmanager
 def _launch_server(
     tmp_path: Path, *, env: dict[str, str] | None = None
-) -> Iterator[str]:
-    """Launch `python -m ansina` against `tmp_path`'s config, yielding its base URL.
+) -> Iterator[Server]:
+    """Launch `python -m ansina` against `tmp_path`'s config, yielding its `Server`.
 
     A `@contextmanager` rather than a bare generator so a test can start, stop, and
     restart the server against the *same* `tmp_path` — e.g. to prove a migration
@@ -79,7 +94,7 @@ def _launch_server(
             process.kill()
             raise TimeoutError(f"ansina never became healthy: {last_error}")
 
-        yield base_url
+        yield Server(base_url=base_url, process=process)
     finally:
         process.terminate()
         try:
@@ -92,8 +107,8 @@ def _launch_server(
 @pytest.fixture
 def server(tmp_path: Path) -> Iterator[str]:
     """No ANSINA_SECURITY__API_TOKEN — auth disabled, every route reachable."""
-    with _launch_server(tmp_path) as base_url:
-        yield base_url
+    with _launch_server(tmp_path) as srv:
+        yield srv.base_url
 
 
 @pytest.fixture
@@ -101,8 +116,8 @@ def authed_server(tmp_path: Path) -> Iterator[str]:
     """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced."""
     with _launch_server(
         tmp_path, env={"ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN}
-    ) as base_url:
-        yield base_url
+    ) as srv:
+        yield srv.base_url
 
 
 def test_healthz(server: str) -> None:
@@ -181,8 +196,8 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     does not re-apply migration 0001 — checked from outside the process, via a plain
     `sqlite3` connection to the file the server wrote.
     """
-    with _launch_server(tmp_path) as base_url:
-        response = httpx.get(f"{base_url}/readyz")
+    with _launch_server(tmp_path) as srv:
+        response = httpx.get(f"{srv.base_url}/readyz")
         assert response.json()["checks"]["database"] is True
 
     db_path = tmp_path / "ansina.db"
@@ -194,10 +209,28 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         assert rows == [(1,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
-    with _launch_server(tmp_path) as base_url:
-        response = httpx.get(f"{base_url}/readyz")
+    with _launch_server(tmp_path) as srv:
+        response = httpx.get(f"{srv.base_url}/readyz")
         assert response.json()["checks"]["database"] is True
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         assert rows == [(1,)]  # still exactly one row — 0001 was not re-applied
+
+
+def test_shuts_down_cleanly(tmp_path: Path) -> None:
+    """Issue #16's M0 E2E coverage list includes "the process shuts down cleanly" —
+    unlike every other test here, this one inspects the subprocess itself (exit code,
+    captured output) rather than just its HTTP responses, since a stuck or crashing
+    shutdown wouldn't show up in any response the server sent while still running.
+    """
+    with _launch_server(tmp_path) as srv:
+        response = httpx.get(f"{srv.base_url}/healthz")
+        assert response.status_code == 200
+        process = srv.process
+
+    # By the time `_launch_server`'s `finally` block returns control here, it has
+    # already sent SIGTERM (`Popen.terminate()`) and waited for exit.
+    assert process.returncode == -signal.SIGTERM
+    output = process.stdout.read() if process.stdout else ""
+    assert "Traceback" not in output

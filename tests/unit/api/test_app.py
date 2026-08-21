@@ -4,7 +4,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ansina import __version__
 from ansina.config import Settings
 from ansina.errors import StorageError
 from ansina.storage import Database
@@ -31,25 +30,3 @@ def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
     # Outside the `with` block, lifespan shutdown has run — the database is closed.
     with pytest.raises(StorageError, match="after close"):
         app.state.db.connection()
-
-
-def test_healthz_ok_with_no_dependencies(client: TestClient) -> None:
-    response = client.get("/healthz")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-
-def test_version_matches_package_version(client: TestClient) -> None:
-    response = client.get("/version")
-
-    assert response.status_code == 200
-    assert response.json() == {"name": "ansina", "version": __version__}
-
-
-def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> None:
-    response = client.get("/openapi.json")
-
-    assert response.status_code == 200
-    paths = response.json()["paths"]
-    assert set(paths) == {"/healthz", "/readyz", "/version"}

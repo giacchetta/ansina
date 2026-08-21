@@ -44,7 +44,7 @@ test: ## Run the full test suite (unit + e2e)
 	$(UV) run pytest
 
 .PHONY: test-unit
-test-unit: ## Run only the unit test suite
+test-unit: ## Run only the unit test suite (100% coverage enforced — for a single-file run, call `uv run pytest <path> --no-cov` directly)
 	$(UV) run pytest tests/unit
 
 .PHONY: test-e2e

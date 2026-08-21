@@ -62,10 +62,18 @@ warn_unreachable = true
 mypy_path = "src"
 explicit_package_bases = true
 
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = [
+    'if __name__ == "__main__":',
+    "# unreachable",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=src/ansina --cov-report=term-missing"
+addopts = "--cov=src/ansina"
 filterwarnings = [
     # `TestClient`'s anyio blocking-portal teardown can finalize a request-opened
     # sqlite3.Connection outside `Database.close()`'s own cleanup path, under GC
