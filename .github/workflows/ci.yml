@@ -1,0 +1,61 @@
+name: CI
+
+# Two required legs on every push/PR: lint + strict types + unit tests
+# (`check`), then a black-box boot-and-serve gate (`e2e`) gated on `check`
+# succeeding first.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to a PR makes the in-flight run for the old commit obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.14"
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest tests/unit
+
+  e2e:
+    # Black-box gate: only worth burning runners on once `check` is green.
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.14"
+      - run: uv sync --locked --all-groups
+      # --no-cov: this suite drives `python -m ansina` as a real subprocess, so
+      # in-process coverage instrumentation would report a misleading near-zero
+      # number here. Resolved by #16: this is a boot gate, not a coverage
+      # source — the 100% coverage threshold (pyproject.toml) is enforced on
+      # `tests/unit` only, via `check`'s `pytest tests/unit` above.
+      - run: uv run pytest tests/e2e --no-cov

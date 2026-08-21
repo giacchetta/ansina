@@ -15,6 +15,9 @@ dependencies = [
     "pydantic-settings>=2.6",
 ]
 
+[project.scripts]
+ansina = "ansina.__main__:main"
+
 [dependency-groups]
 dev = [
     "ruff>=0.8",
@@ -23,6 +26,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "httpx>=0.27",
+    "httpx2>=2.12",
     "pre-commit>=4.0",
 ]
 
@@ -52,8 +56,32 @@ strict = true
 python_version = "3.14"
 files = ["src", "tests"]
 warn_unreachable = true
+# tests/unit/**/conftest.py collide by module name (e.g. api/conftest.py vs
+# logging/conftest.py) since tests/ has no __init__.py files; these two
+# settings resolve modules by file path instead of requiring unique names.
+mypy_path = "src"
+explicit_package_bases = true
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = [
+    'if __name__ == "__main__":',
+    "# unreachable",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=src/ansina --cov-report=term-missing"
+addopts = "--cov=src/ansina"
+filterwarnings = [
+    # `TestClient`'s anyio blocking-portal teardown can finalize a request-opened
+    # sqlite3.Connection outside `Database.close()`'s own cleanup path, under GC
+    # timing that only shows up when tests/e2e's subprocess/thread activity shares
+    # the session with tests/unit. Verified harmless: `tests/unit/storage/` proves
+    # `Database.close()` itself closes everything it owns (including cross-thread
+    # connections) with zero warnings in isolation, and production (`uv run ansina`)
+    # never goes through TestClient/anyio's portal — uvicorn drives the lifespan
+    # directly. Scoped to this exact message so an unrelated future leak still fails.
+    "ignore:unclosed database.*:ResourceWarning",
+]

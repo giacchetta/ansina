@@ -1,18 +1,38 @@
-# Scaffolding only — full wiring (and parity guarantee with CI) lands in #7.
-# mypy and pytest hooks are intentionally NOT added here yet; #7 wires them
-# so local pre-commit and CI never disagree.
+exclude: '^openclaw-main/'
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-merge-conflict
       - id: check-added-large-files
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.0
+  # Local hooks, not pinned upstream mirrors: `uv run` resolves the exact
+  # ruff/mypy/pytest versions from uv.lock, the same ones CI installs. Local
+  # and CI can't drift apart on a version bump this way (issue #7).
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix]
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
       - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        always_run: true

@@ -36,19 +36,27 @@ format-check: ## Check formatting without modifying files
 	$(UV) run ruff format --check .
 
 .PHONY: typecheck
-typecheck: ## Run mypy in strict mode
-	$(UV) run mypy --strict src/
+typecheck: ## Run mypy in strict mode (config-driven: src + tests, see pyproject.toml)
+	$(UV) run mypy
 
 .PHONY: test
-test: ## Run the test suite
+test: ## Run the full test suite (unit + e2e)
 	$(UV) run pytest
+
+.PHONY: test-unit
+test-unit: ## Run only the unit test suite (100% coverage enforced — for a single-file run, call `uv run pytest <path> --no-cov` directly)
+	$(UV) run pytest tests/unit
+
+.PHONY: test-e2e
+test-e2e: ## Run only the e2e (black-box subprocess) test suite
+	$(UV) run pytest tests/e2e --no-cov
 
 .PHONY: precommit
 precommit: ## Run pre-commit hooks against all files
 	$(UV) run pre-commit run --all-files
 
 .PHONY: check
-check: lint format-check typecheck test ## Run everything CI runs (see #7)
+check: lint format-check typecheck test ## Run everything CI runs
 
 .PHONY: clean
 clean: ## Remove caches, build artifacts, and the virtualenv

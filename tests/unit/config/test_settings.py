@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from ansina.config import ConfigError, load_settings
+from ansina.config.settings import ServerSettings, _unwrap_model
 
 
 def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
@@ -13,7 +14,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.server.host == "127.0.0.1"
     assert settings.server.port == 8000
     assert settings.logging.level == "INFO"
-    assert settings.database.path == Path("ansina.db")
+    assert settings.database.path == tmp_cwd / "ansina.db"
     assert settings.security.api_token is None
 
 
@@ -107,27 +108,85 @@ def test_secret_in_toml_file_rejected(clean_env: None, tmp_cwd: Path) -> None:
 def test_secret_via_env_loads_and_never_appears_in_text(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value-0123")
 
     settings = load_settings()
 
     assert settings.security.api_token is not None
-    assert settings.security.api_token.get_secret_value() == "s3cr3t-value"
-    assert "s3cr3t-value" not in repr(settings)
-    assert "s3cr3t-value" not in str(settings)
+    assert settings.security.api_token.get_secret_value() == "s3cr3t-value-0123"
+    assert "s3cr3t-value-0123" not in repr(settings)
+    assert "s3cr3t-value-0123" not in str(settings)
 
 
 def test_secret_not_leaked_in_error_report_for_sibling_failure(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value-0123")
     toml_path = tmp_cwd / "ansina.toml"
     toml_path.write_text('[server]\nport = "eighty"\n', encoding="utf-8")
 
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
 
-    assert "s3cr3t-value" not in str(exc_info.value)
+    assert "s3cr3t-value-0123" not in str(exc_info.value)
+
+
+def test_short_api_token_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "too-short")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "security.api_token" in message
+    assert "too-short" not in message
+
+
+def test_non_loopback_bind_without_token_refuses_to_start(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SERVER__HOST", "0.0.0.0")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "server.host" in message
+    assert "ANSINA_SECURITY__API_TOKEN" in message
+
+
+def test_non_loopback_bind_with_token_loads(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SERVER__HOST", "0.0.0.0")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value-0123")
+
+    settings = load_settings()
+
+    assert settings.server.host == "0.0.0.0"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "127.0.0.53"])
+def test_loopback_hosts_without_token_load(
+    host: str, clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SERVER__HOST", host)
+
+    settings = load_settings()
+
+    assert settings.server.host == host
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "", "::", "not-an-ip-or-localhost"])
+def test_non_loopback_hosts_without_token_refuse_to_start(
+    host: str, clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SERVER__HOST", host)
+
+    with pytest.raises(ConfigError):
+        load_settings()
 
 
 def test_top_level_section_type_error_reports_top_level_key(
@@ -147,3 +206,65 @@ def test_settings_is_frozen(clean_env: None, tmp_cwd: Path) -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         settings.server = settings.server
+
+
+def test_database_path_expands_user_home(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DATABASE__PATH", "~/ansina-data/ansina.db")
+
+    settings = load_settings()
+
+    assert settings.database.path == Path.home() / "ansina-data" / "ansina.db"
+
+
+def test_database_path_resolves_relative_to_cwd(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DATABASE__PATH", "nested/ansina.db")
+
+    settings = load_settings()
+
+    assert settings.database.path == tmp_cwd / "nested" / "ansina.db"
+
+
+def test_database_path_absolute_is_unchanged(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    absolute = tmp_cwd / "elsewhere" / "ansina.db"
+    monkeypatch.setenv("ANSINA_DATABASE__PATH", str(absolute))
+
+    settings = load_settings()
+
+    assert settings.database.path == absolute
+
+
+def test_unwrap_model_returns_none_for_a_non_model_annotation() -> None:
+    """`int` contains no nested `BaseModel` anywhere in its args — the recursive walk
+    bottoms out and reports "nothing found" rather than a model.
+    """
+    assert _unwrap_model(int) is None
+
+
+def test_unwrap_model_finds_a_model_nested_inside_a_union() -> None:
+    """None of Ansina's own fields wrap a `BaseModel` in a `Union` (only `SecretStr`
+    fields do that, via `SecretStr | None`), so nothing in `load_settings` exercises
+    `_unwrap_model`'s recursive branch — this drives it directly with `X | None`.
+    """
+    assert _unwrap_model(ServerSettings | None) is ServerSettings
+
+
+def test_env_var_with_unparseable_value_for_nested_model_raises_config_error(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting the *whole-section* env var (not a `__`-nested leaf) to a non-JSON
+    value makes pydantic-settings itself raise `SettingsError` while parsing the env
+    source — a different failure mode than a `ValidationError` on a leaf field, and
+    `load_settings` must wrap it in the same `ConfigError` report either way.
+    """
+    monkeypatch.setenv("ANSINA_SERVER", "not-json")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "server" in str(exc_info.value)

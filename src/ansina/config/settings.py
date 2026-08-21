@@ -11,6 +11,7 @@ silently accepted value — see ``.agents/guardrails/secret-prevention.md``.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import tomllib
 from collections.abc import Sequence
@@ -18,7 +19,15 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -60,9 +69,26 @@ class LoggingSettings(BaseModel):
 class DatabaseSettings(BaseModel):
     """SQLite location, consumed by issue #6's persistence foundation."""
 
-    model_config = _MODEL_CONFIG
+    # `validate_default=True` (unlike the shared `_MODEL_CONFIG`) so the *default*
+    # path goes through `_resolve_path` too, not just an explicitly configured one —
+    # otherwise the unconfigured case would stay relative to whatever the process's
+    # CWD is, the exact ambiguity this validator exists to remove.
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
     path: Path = Path("ansina.db")
+
+    @field_validator("path")
+    @classmethod
+    def _resolve_path(cls, value: Path) -> Path:
+        """Expand `~` and anchor a relative path to the CWD, once, at load time.
+
+        Without this, `~/data/ansina.db` stays literal (SQLite would create a
+        directory named `~`) and a relative path silently tracks wherever the
+        process happens to be launched from — fine from the repo root, wrong the
+        moment Ansina runs as a service. Every consumer downstream sees one
+        already-absolute path.
+        """
+        return value.expanduser().resolve()
 
 
 class SecuritySettings(BaseModel):
@@ -70,7 +96,10 @@ class SecuritySettings(BaseModel):
 
     model_config = _MODEL_CONFIG
 
-    api_token: SecretStr | None = None
+    # `min_length=16` keeps a configured token comfortably above
+    # `logging.redaction._MIN_SECRET_LENGTH` (8) — a token too short to clear that floor
+    # would be unredactable, i.e. would leak verbatim into any log line that echoes it.
+    api_token: SecretStr | None = Field(default=None, min_length=16)
 
 
 # Holds an explicit `load_settings(config_file=...)` override for the duration of that
@@ -165,6 +194,23 @@ def _toml_location(loc: Sequence[str]) -> str:
     return f"[{'.'.join(table)}] {key}"
 
 
+def _is_loopback(host: str) -> bool:
+    """Fail-closed: `True` only for a host that is unambiguously loopback-only.
+
+    `"localhost"` and any address `ipaddress` parses as loopback (`127.0.0.1`,
+    `127.0.0.53`, `::1`, ...) are loopback. Anything unparseable, and the
+    all-interfaces spellings (`""`, `"0.0.0.0"`, `"::"`), are treated as *not*
+    loopback — issue #5 wants a false negative here (an unnecessary startup refusal)
+    rather than a false positive (a network-exposed server that skipped the check).
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _render_report(problems: Sequence[str]) -> str:
     count = len(problems)
     noun = "problem" if count == 1 else "problems"
@@ -215,6 +261,30 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+
+    @model_validator(mode="after")
+    def _refuse_unsafe_bind(self) -> Settings:
+        """Hard refusal (issue #5): a non-loopback bind with auth disabled must never
+        boot. Raised as `ConfigError` directly rather than `ValueError` — this is a
+        model-level check (`loc = ()`), which `_format_validation_error`'s
+        `_toml_location` call can't render (it assumes a field path). Same pattern
+        `_AnsinaTomlSource` already uses for the secret-in-TOML refusal below.
+
+        Runs on every `Settings` construction path (`load_settings()`, env vars, direct
+        kwargs), so this can't be bypassed by skipping `load_settings()`.
+        """
+        if self.security.api_token is None and not _is_loopback(self.server.host):
+            raise ConfigError(
+                _render_report(
+                    [
+                        f"server.host: refusing to start — bound to "
+                        f"{self.server.host!r} (not loopback) with no api_token "
+                        "configured; set ANSINA_SECURITY__API_TOKEN or bind "
+                        "[server] host back to 127.0.0.1"
+                    ]
+                )
+            )
+        return self
 
     @classmethod
     def settings_customise_sources(

@@ -49,3 +49,9 @@ class ConfigurationError(AnsinaError):
     """Configuration failed to load or validate. See `ansina.config.ConfigError`."""
 
     code: ClassVar[str] = "ansina.config.invalid"
+
+
+class StorageError(AnsinaError):
+    """The SQLite persistence layer failed. See `ansina.storage`."""
+
+    code: ClassVar[str] = "ansina.storage.error"
