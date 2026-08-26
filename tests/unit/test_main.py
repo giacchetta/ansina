@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from ansina import __main__
 from ansina.config import ConfigError, Settings, load_settings
+from ansina.heart.runtime import HeartUnavailableError
 
 
 def test_main_boots_uvicorn_with_the_loaded_settings(
@@ -76,3 +77,33 @@ def test_main_exits_non_zero_and_prints_to_stderr_on_config_error(
     captured = capsys.readouterr()
     assert "bad config" in captured.err
     assert captured.out == ""
+
+
+def test_main_exits_non_zero_and_prints_to_stderr_when_create_app_raises(
+    clean_env: None,
+    tmp_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`create_app` can now fail before uvicorn ever binds (issue #10's Heart
+    capability probe) — same clean stderr-and-exit-1 shape as a `ConfigError`, never
+    a traceback, and uvicorn must never be reached.
+    """
+
+    def _raise(_settings: Settings) -> None:
+        raise HeartUnavailableError("no viable heart runtime on this host")
+
+    monkeypatch.setattr(__main__, "create_app", _raise)
+    run_calls: list[str] = []
+    monkeypatch.setattr(
+        "ansina.__main__.uvicorn.run", lambda *a, **k: run_calls.append("run")
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        __main__.main()
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "no viable heart runtime" in captured.err
+    assert captured.out == ""
+    assert run_calls == []

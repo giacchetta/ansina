@@ -9,7 +9,7 @@ than growing its own.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -29,20 +29,37 @@ from ansina.api.readiness import Readiness
 from ansina.api.routes.health import router as health_router
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
+from ansina.heart import HeartRuntime, build_heart_runtime
 from ansina.logging import get_logger
 from ansina.storage import Database, run_migrations
 
 logger = get_logger(__name__)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    heart_factory: Callable[[Settings], HeartRuntime] = build_heart_runtime,
+) -> FastAPI:
     """Build the FastAPI application. Loads `Settings` via `load_settings()` when none
     is given — tests and `python -m ansina` both pass an already-loaded one instead, so
     config is loaded exactly once per process.
+
+    `heart_factory` defaults to `ansina.heart.build_heart_runtime`; tests inject a fake
+    so the unit suite never needs a real model or MLX installed. When
+    `settings.heart.enabled` is `False` (the default), it's never called at all — no
+    probe runs, and `app.state.heart` is `None`.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
     db = Database(resolved_settings.database.path)
+
+    # Built here, not inside `lifespan`, so a `HeartUnavailableError` (issue #10) is
+    # raised while the app is still being assembled — before uvicorn ever binds a
+    # port — the same "fail loudly at boot" shape a `ConfigError` already has.
+    heart: HeartRuntime | None = None
+    if resolved_settings.heart.enabled:
+        heart = heart_factory(resolved_settings)
 
     if resolved_settings.security.api_token is None:
         logger.warning(
@@ -56,11 +73,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.connect()
         run_migrations(db)
         readiness.register("database", db.is_healthy)
+        if heart is not None:
+            heart.load()
+            readiness.register("heart", heart.is_healthy)
         readiness.register("startup", lambda: True)
         try:
             yield
         finally:
             logger.info("ansina shutting down")
+            if heart is not None:
+                heart.unload()
             db.close()
 
     app = FastAPI(
@@ -71,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.readiness = readiness
     app.state.db = db
+    app.state.heart = heart
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware

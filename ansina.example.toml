@@ -22,6 +22,34 @@ level = "INFO"
 # sidecar files next to it; move all three together.
 path = "ansina.db"
 
+[heart]
+# The in-process Heart runtime (issue #10). Off by default: no capability probe
+# runs, no model loads, and "/readyz" carries no "heart" key at all. Turning this on
+# requires the "mlx" extra ("uv sync --extra mlx") and only runs on Apple Silicon —
+# a portable fallback is tracked in a follow-up issue, not shipped yet.
+enabled = false
+
+# "auto" and "mlx" currently behave identically (MLX is the only adapter); "auto"
+# exists so a future adapter can be added without a config break.
+runtime = "auto"
+
+# An explicit local path always wins over model_repo below, and is used as-is with
+# no network access. Leave unset to fetch model_repo instead.
+# model_path = "/path/to/a/local/mlx/model"
+
+# Hugging Face repo id, fetched into cache_dir on first use and reused after —
+# ignored when model_path is set.
+model_repo = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+
+# Download-once model cache. Same "~" expansion / relative-path-resolves-to-CWD
+# behavior as [database] path above.
+cache_dir = "~/.cache/ansina/models"
+
+# Hard ceiling, not a target (blueprint §3) — every prompt built for the Heart must
+# fit inside this budget. 8192 is the maximum accepted here.
+context_tokens = 8192
+max_output_tokens = 512
+
 # Secrets (e.g. the API bearer token) are never read from this file — setting one
 # here is a hard startup error. Set it via the environment instead, e.g.:
 #   ANSINA_SECURITY__API_TOKEN=...

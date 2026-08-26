@@ -91,6 +91,45 @@ class DatabaseSettings(BaseModel):
         return value.expanduser().resolve()
 
 
+class HeartSettings(BaseModel):
+    """The in-process Heart runtime, consumed by issue #10's `ansina.heart`.
+
+    `enabled=False` (the default) means no capability probe runs, no model loads, and
+    `/readyz` carries no `heart` key at all — `uv run ansina`, the E2E suite, and CI
+    are unaffected until this is turned on. `runtime` is `Literal["auto", "mlx"]`
+    only: MLX is the sole adapter this milestone ships (see issue #10's PR
+    description for why the llama-cpp-python fallback was deferred), so `"auto"` and
+    `"mlx"` currently behave identically — the enum exists so a future adapter can
+    add a member without a config break, not to advertise one that doesn't exist yet.
+    """
+
+    # `validate_default=True` for the same reason as `DatabaseSettings`: the default
+    # `cache_dir` must go through `_resolve_paths` too, not just an explicit one.
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    enabled: bool = False
+    runtime: Literal["auto", "mlx"] = "auto"
+    model_path: Path | None = None
+    model_repo: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    cache_dir: Path = Path("~/.cache/ansina/models")
+    # The blueprint's 8k context budget is a hard ceiling, not a target (issue #10) —
+    # enforced here so it can never be configured past what the Heart's prompts are
+    # allowed to assume.
+    context_tokens: int = Field(default=8192, ge=256, le=8192)
+    max_output_tokens: int = Field(default=512, ge=1)
+
+    @field_validator("model_path", "cache_dir")
+    @classmethod
+    def _resolve_paths(cls, value: Path | None) -> Path | None:
+        """Same `~`-expand-and-anchor-to-CWD treatment as
+        `DatabaseSettings._resolve_path` — a relative `cache_dir` or `model_path`
+        must not silently track wherever the process happens to be launched from.
+        """
+        if value is None:
+            return None
+        return value.expanduser().resolve()
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5. No literal default — ever."""
 
@@ -261,6 +300,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    heart: HeartSettings = Field(default_factory=HeartSettings)
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:

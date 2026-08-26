@@ -55,3 +55,9 @@ class StorageError(AnsinaError):
     """The SQLite persistence layer failed. See `ansina.storage`."""
 
     code: ClassVar[str] = "ansina.storage.error"
+
+
+class HeartError(AnsinaError):
+    """The in-process Heart runtime failed. See `ansina.heart`."""
+
+    code: ClassVar[str] = "ansina.heart.error"

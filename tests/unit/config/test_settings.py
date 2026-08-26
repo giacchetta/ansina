@@ -16,6 +16,13 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.logging.level == "INFO"
     assert settings.database.path == tmp_cwd / "ansina.db"
     assert settings.security.api_token is None
+    assert settings.heart.enabled is False
+    assert settings.heart.runtime == "auto"
+    assert settings.heart.model_path is None
+    assert settings.heart.model_repo == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    assert settings.heart.cache_dir == Path.home() / ".cache" / "ansina" / "models"
+    assert settings.heart.context_tokens == 8192
+    assert settings.heart.max_output_tokens == 512
 
 
 def test_toml_overrides_defaults(clean_env: None, tmp_cwd: Path) -> None:
@@ -237,6 +244,63 @@ def test_database_path_absolute_is_unchanged(
     settings = load_settings()
 
     assert settings.database.path == absolute
+
+
+def test_heart_context_tokens_above_ceiling_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """8192 is the blueprint's hard ceiling (issue #10) — config must reject more."""
+    monkeypatch.setenv("ANSINA_HEART__CONTEXT_TOKENS", "8193")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.context_tokens" in str(exc_info.value)
+
+
+def test_heart_model_path_expands_user_home(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__MODEL_PATH", "~/models/heart")
+
+    settings = load_settings()
+
+    assert settings.heart.model_path == Path.home() / "models" / "heart"
+
+
+def test_heart_cache_dir_resolves_relative_to_cwd(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__CACHE_DIR", "nested/heart-cache")
+
+    settings = load_settings()
+
+    assert settings.heart.cache_dir == tmp_cwd / "nested" / "heart-cache"
+
+
+def test_heart_enabled_via_env(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.heart.enabled is True
+
+
+def test_heart_runtime_rejects_unknown_value(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only `"auto"`/`"mlx"` are valid — `"llama_cpp"` isn't a member yet (issue #10
+    deferred that adapter to a follow-up issue), so it must be rejected, not silently
+    accepted as a no-op.
+    """
+    monkeypatch.setenv("ANSINA_HEART__RUNTIME", "llama_cpp")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.runtime" in str(exc_info.value)
 
 
 def test_unwrap_model_returns_none_for_a_non_model_annotation() -> None:

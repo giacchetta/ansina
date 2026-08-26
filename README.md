@@ -4,7 +4,7 @@
 
 > A self-owned AI agent: an always-on in-process **Heart** plus a remote **Brain**, exposed over a single internal REST API. No chat channels.
 
-> **Status:** M0 — skeleton. Zero model code. See the [roadmap](docs/architecture/blueprint.md#4-roadmap).
+> **Status:** M1 in progress — HeartRuntime port + MLX adapter landed (issue #10). See the [roadmap](docs/architecture/blueprint.md#4-roadmap).
 
 ```mermaid
 flowchart LR
@@ -36,6 +36,17 @@ curl localhost:8000/healthz
 ## ⚙️ Configuration
 
 Precedence: built-in defaults → `ansina.toml` → `ANSINA_*` env vars. Secrets are env-only — setting `ANSINA_SECURITY__API_TOKEN` in `ansina.toml` is a hard startup error. See [`ansina.example.toml`](ansina.example.toml) for the full shape.
+
+## 🫀 Heart runtime
+
+The in-process Heart (`[heart] enabled`, off by default) currently runs on **MLX only — Apple Silicon**. Enable it:
+
+```bash
+uv sync --extra mlx
+ANSINA_HEART__ENABLED=true uv run ansina
+```
+
+On any other host, enabling it fails loudly at boot rather than silently degrading — no fallback ships yet (a portable, non-Apple-Silicon adapter is tracked in a follow-up issue).
 
 ## 🛠️ Development
 

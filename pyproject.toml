@@ -15,6 +15,16 @@ dependencies = [
     "pydantic-settings>=2.6",
 ]
 
+# `mlx` — the only HeartRuntime adapter shipped by issue #10 — is an *optional* extra,
+# not a base dependency: it's Apple-Silicon-only, and CI never installs it (both legs
+# run with the Heart disabled). A portable, non-Apple-Silicon fallback
+# (llama-cpp-python) is deferred to a follow-up issue — see `ansina.heart.adapters`.
+[project.optional-dependencies]
+mlx = [
+    "mlx-lm>=0.31.3",
+    "huggingface-hub>=0.34",
+]
+
 [project.scripts]
 ansina = "ansina.__main__:main"
 
@@ -61,6 +71,14 @@ warn_unreachable = true
 # settings resolve modules by file path instead of requiring unique names.
 mypy_path = "src"
 explicit_package_bases = true
+
+# `ansina[mlx]` is an optional extra CI never installs (see `[project.optional-
+# dependencies]`) — neither package ships type stubs anyway, so mypy would otherwise
+# fail to resolve `heart/adapters/mlx.py` and `heart/models.py`'s imports regardless
+# of whether the extra is present.
+[[tool.mypy.overrides]]
+module = ["mlx", "mlx.*", "mlx_lm", "mlx_lm.*", "huggingface_hub", "huggingface_hub.*"]
+ignore_missing_imports = true
 
 [tool.coverage.report]
 fail_under = 100
