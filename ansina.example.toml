@@ -50,6 +50,19 @@ cache_dir = "~/.cache/ansina/models"
 context_tokens = 8192
 max_output_tokens = 512
 
+[heart.tick]
+# The autonomic tick loop (issue #11): on a fixed cadence, the Heart decides
+# idle/act/escalate. Only runs when [heart] enabled = true above; this flag lets the
+# Heart load (e.g. to back a future direct-generate use) without also ticking.
+enabled = true
+
+# Seconds between ticks.
+interval_seconds = 30.0
+
+# Uniform random delay added to each wakeup, so a restarted process doesn't tick in
+# lockstep with anything else on a fixed cadence. 0 disables jitter.
+jitter_seconds = 3.0
+
 # Secrets (e.g. the API bearer token) are never read from this file — setting one
 # here is a hard startup error. Set it via the environment instead, e.g.:
 #   ANSINA_SECURITY__API_TOKEN=...

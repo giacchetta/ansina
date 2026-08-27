@@ -23,6 +23,9 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.cache_dir == Path.home() / ".cache" / "ansina" / "models"
     assert settings.heart.context_tokens == 8192
     assert settings.heart.max_output_tokens == 512
+    assert settings.heart.tick.enabled is True
+    assert settings.heart.tick.interval_seconds == 30.0
+    assert settings.heart.tick.jitter_seconds == 3.0
 
 
 def test_toml_overrides_defaults(clean_env: None, tmp_cwd: Path) -> None:
@@ -301,6 +304,53 @@ def test_heart_runtime_rejects_unknown_value(
         load_settings()
 
     assert "heart.runtime" in str(exc_info.value)
+
+
+def test_tick_settings_via_env(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__ENABLED", "false")
+    monkeypatch.setenv("ANSINA_HEART__TICK__INTERVAL_SECONDS", "10")
+    monkeypatch.setenv("ANSINA_HEART__TICK__JITTER_SECONDS", "0")
+
+    settings = load_settings()
+
+    assert settings.heart.tick.enabled is False
+    assert settings.heart.tick.interval_seconds == 10.0
+    assert settings.heart.tick.jitter_seconds == 0.0
+
+
+def test_tick_settings_via_toml(clean_env: None, tmp_cwd: Path) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        "[heart.tick]\ninterval_seconds = 5.0\n", encoding="utf-8"
+    )
+
+    settings = load_settings()
+
+    assert settings.heart.tick.interval_seconds == 5.0
+    assert settings.heart.tick.jitter_seconds == 3.0  # untouched key keeps its default
+
+
+def test_tick_interval_seconds_must_be_positive(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__INTERVAL_SECONDS", "0")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.tick.interval_seconds" in str(exc_info.value)
+
+
+def test_tick_jitter_seconds_rejects_negative(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__JITTER_SECONDS", "-1")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.tick.jitter_seconds" in str(exc_info.value)
 
 
 def test_unwrap_model_returns_none_for_a_non_model_annotation() -> None:

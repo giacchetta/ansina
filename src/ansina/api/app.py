@@ -27,9 +27,15 @@ from ansina.api.exception_handlers import (
 from ansina.api.middleware import RequestIdMiddleware
 from ansina.api.readiness import Readiness
 from ansina.api.routes.health import router as health_router
+from ansina.api.routes.heart import router as heart_router
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
-from ansina.heart import HeartRuntime, build_heart_runtime
+from ansina.heart import (
+    HeartRuntime,
+    TickLifecycle,
+    build_heart_runtime,
+    build_tick_loop,
+)
 from ansina.logging import get_logger
 from ansina.storage import Database, run_migrations
 
@@ -40,6 +46,9 @@ def create_app(
     settings: Settings | None = None,
     *,
     heart_factory: Callable[[Settings], HeartRuntime] = build_heart_runtime,
+    tick_loop_factory: Callable[
+        [Settings, HeartRuntime], TickLifecycle
+    ] = build_tick_loop,
 ) -> FastAPI:
     """Build the FastAPI application. Loads `Settings` via `load_settings()` when none
     is given — tests and `python -m ansina` both pass an already-loaded one instead, so
@@ -48,7 +57,10 @@ def create_app(
     `heart_factory` defaults to `ansina.heart.build_heart_runtime`; tests inject a fake
     so the unit suite never needs a real model or MLX installed. When
     `settings.heart.enabled` is `False` (the default), it's never called at all — no
-    probe runs, and `app.state.heart` is `None`.
+    probe runs, and `app.state.heart` is `None`. `tick_loop_factory` (default
+    `ansina.heart.build_tick_loop`, issue #11) follows the same shape, gated by both
+    `heart.enabled` and `heart.tick.enabled` — `app.state.tick_loop` is `None` unless
+    both are true.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
@@ -60,6 +72,10 @@ def create_app(
     heart: HeartRuntime | None = None
     if resolved_settings.heart.enabled:
         heart = heart_factory(resolved_settings)
+
+    tick_loop: TickLifecycle | None = None
+    if heart is not None and resolved_settings.heart.tick.enabled:
+        tick_loop = tick_loop_factory(resolved_settings, heart)
 
     if resolved_settings.security.api_token is None:
         logger.warning(
@@ -76,11 +92,16 @@ def create_app(
         if heart is not None:
             heart.load()
             readiness.register("heart", heart.is_healthy)
+            if tick_loop is not None:
+                await tick_loop.start()
+                readiness.register("heart_tick", tick_loop.is_healthy)
         readiness.register("startup", lambda: True)
         try:
             yield
         finally:
             logger.info("ansina shutting down")
+            if tick_loop is not None:
+                await tick_loop.stop()
             if heart is not None:
                 heart.unload()
             db.close()
@@ -94,6 +115,7 @@ def create_app(
     app.state.readiness = readiness
     app.state.db = db
     app.state.heart = heart
+    app.state.tick_loop = tick_loop
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
@@ -110,5 +132,6 @@ def create_app(
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(health_router)
+    app.include_router(heart_router)
 
     return app

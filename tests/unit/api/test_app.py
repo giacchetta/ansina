@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 from ansina.api.app import create_app
 from ansina.config import Settings, load_settings
 from ansina.errors import StorageError
-from ansina.heart.runtime import BaseHeartRuntime, HeartUnavailableError
+from ansina.heart.runtime import BaseHeartRuntime, HeartRuntime, HeartUnavailableError
+from ansina.heart.tick.loop import TickLifecycle, TickLoop
 from ansina.storage import Database
 
 
@@ -46,9 +47,12 @@ def test_app_state_carries_database(app: FastAPI) -> None:
 
 def test_heart_disabled_by_default_no_state_no_readiness_key(app: FastAPI) -> None:
     assert app.state.heart is None
+    assert app.state.tick_loop is None
 
     with TestClient(app) as client:
-        assert "heart" not in client.get("/readyz").json()["checks"]
+        checks = client.get("/readyz").json()["checks"]
+        assert "heart" not in checks
+        assert "heart_tick" not in checks
 
 
 def test_heart_enabled_builds_loads_and_registers_readiness(
@@ -62,12 +66,17 @@ def test_heart_enabled_builds_loads_and_registers_readiness(
 
     assert app.state.heart is fake_heart
     assert fake_heart.load_calls == 0  # not loaded until the lifespan runs
+    assert isinstance(app.state.tick_loop, TickLoop)  # issue #11: on by default
 
     with TestClient(app) as client:
         assert fake_heart.load_calls == 1
-        assert client.get("/readyz").json()["checks"]["heart"] is True
+        checks = client.get("/readyz").json()["checks"]
+        assert checks["heart"] is True
+        assert checks["heart_tick"] is True
+        assert app.state.tick_loop.is_healthy()
 
     assert fake_heart.unload_calls == 1
+    assert not app.state.tick_loop.is_healthy()  # stopped before heart.unload()
 
 
 def test_heart_factory_not_called_when_disabled(clean_env: None, tmp_cwd: Path) -> None:
@@ -88,6 +97,78 @@ def test_heart_unavailable_error_propagates_from_create_app(
 
     with pytest.raises(HeartUnavailableError):
         create_app(settings, heart_factory=_factory)
+
+
+def test_tick_loop_factory_not_called_when_heart_disabled(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    def _factory(_settings: Settings, _heart: HeartRuntime) -> TickLifecycle:
+        pytest.fail("tick_loop_factory must not be called when heart.enabled is False")
+
+    app = create_app(load_settings(), tick_loop_factory=_factory)
+
+    assert app.state.tick_loop is None
+
+
+def test_tick_loop_factory_not_called_when_tick_disabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_HEART__TICK__ENABLED", "false")
+
+    def _factory(_settings: Settings, _heart: HeartRuntime) -> TickLifecycle:
+        pytest.fail(
+            "tick_loop_factory must not be called when heart.tick.enabled is False"
+        )
+
+    app = create_app(
+        load_settings(),
+        heart_factory=lambda _settings: _FakeHeartRuntime(),
+        tick_loop_factory=_factory,
+    )
+
+    assert app.state.tick_loop is None
+
+    with TestClient(app) as client:
+        assert "heart_tick" not in client.get("/readyz").json()["checks"]
+
+
+def test_tick_loop_started_after_heart_loads_and_stopped_before_heart_unloads(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    settings = load_settings()
+    events: list[str] = []
+
+    class _OrderedHeart(_FakeHeartRuntime):
+        def _load_backend(self) -> None:
+            events.append("heart_load")
+            super()._load_backend()
+
+        def _unload_backend(self) -> None:
+            events.append("heart_unload")
+            super()._unload_backend()
+
+    class _RecordingTickLoop:
+        def is_healthy(self) -> bool:
+            return True
+
+        async def start(self) -> None:
+            events.append("tick_start")
+
+        async def stop(self) -> None:
+            events.append("tick_stop")
+
+    app = create_app(
+        settings,
+        heart_factory=lambda _settings: _OrderedHeart(),
+        tick_loop_factory=lambda _settings, _heart: _RecordingTickLoop(),
+    )
+
+    with TestClient(app):
+        pass
+
+    assert events == ["heart_load", "tick_start", "tick_stop", "heart_unload"]
 
 
 def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:

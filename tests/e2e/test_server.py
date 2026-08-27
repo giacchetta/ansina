@@ -158,7 +158,14 @@ def test_openapi_schema(server: str) -> None:
     response = httpx.get(f"{server}/openapi.json")
 
     assert response.status_code == 200
-    assert set(response.json()["paths"]) == {"/healthz", "/readyz", "/version"}
+    assert set(response.json()["paths"]) == {
+        "/healthz",
+        "/readyz",
+        "/version",
+        "/heart/tick",
+        "/heart/tick/pause",
+        "/heart/tick/resume",
+    }
 
 
 def test_request_id_is_echoed(server: str) -> None:
@@ -173,6 +180,25 @@ def test_unknown_path_is_problem_json(server: str) -> None:
     assert response.status_code == 404
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["code"] == "ansina.not_found"
+
+
+def test_heart_tick_503_when_heart_disabled(server: str) -> None:
+    """`[heart] enabled` defaults to `false` (issue #10) — with no Heart there is no
+    tick loop (issue #11) either, so every `/heart/tick*` route must answer 503
+    `problem+json` rather than pretending a loop exists.
+    """
+    response = httpx.get(f"{server}/heart/tick")
+
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "ansina.heart.disabled"
+
+
+def test_authed_heart_tick_requires_token(authed_server: str) -> None:
+    response = httpx.get(f"{authed_server}/heart/tick")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
 
 
 def test_authed_healthz_reachable_without_token(authed_server: str) -> None:

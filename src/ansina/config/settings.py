@@ -91,6 +91,25 @@ class DatabaseSettings(BaseModel):
         return value.expanduser().resolve()
 
 
+class TickSettings(BaseModel):
+    """The autonomic tick loop's cadence, consumed by issue #11's `ansina.heart.tick`.
+
+    Nested under `[heart]` rather than top-level: the tick loop only ever exists
+    alongside a loaded Heart, so `[heart] enabled = false` (still the default) already
+    gates it — there is no independent "tick loop without a Heart" configuration.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = True
+    interval_seconds: float = Field(default=30.0, gt=0)
+    # Uniform random delay added to when the loop wakes for a scheduled tick, so a
+    # freshly restarted process doesn't tick in lockstep with anything else on a fixed
+    # cadence — thundering-herd-style alignment, not overlap (see `TickLoop`'s own
+    # backpressure guard for that).
+    jitter_seconds: float = Field(default=3.0, ge=0)
+
+
 class HeartSettings(BaseModel):
     """The in-process Heart runtime, consumed by issue #10's `ansina.heart`.
 
@@ -117,6 +136,7 @@ class HeartSettings(BaseModel):
     # allowed to assume.
     context_tokens: int = Field(default=8192, ge=256, le=8192)
     max_output_tokens: int = Field(default=512, ge=1)
+    tick: TickSettings = Field(default_factory=TickSettings)
 
     @field_validator("model_path", "cache_dir")
     @classmethod
