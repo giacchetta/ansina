@@ -61,3 +61,14 @@ class HeartError(AnsinaError):
     """The in-process Heart runtime failed. See `ansina.heart`."""
 
     code: ClassVar[str] = "ansina.heart.error"
+
+
+class BrainError(AnsinaError):
+    """The remote Brain provider failed. See `ansina.brain`.
+
+    Only ever raised at construction/selection time (mirroring `HeartError`'s own
+    boot-time subclasses in `ansina.heart.runtime`) — a failure *during* a `stream()`
+    call never raises; it surfaces as a terminal `BrainErrorEvent` instead (issue #12).
+    """
+
+    code: ClassVar[str] = "ansina.brain.error"

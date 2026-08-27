@@ -29,6 +29,8 @@ def configure_logging(settings: Settings) -> None:
     """
     if settings.security.api_token is not None:
         register_secret(settings.security.api_token.get_secret_value())
+    if settings.brain.api_key is not None:
+        register_secret(settings.brain.api_key.get_secret_value())
 
     logging.config.dictConfig(
         {

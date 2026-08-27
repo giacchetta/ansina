@@ -28,6 +28,7 @@ from ansina.api.middleware import RequestIdMiddleware
 from ansina.api.readiness import Readiness
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
+from ansina.brain import BrainProvider, build_brain_provider
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
 from ansina.heart import (
@@ -49,6 +50,7 @@ def create_app(
     tick_loop_factory: Callable[
         [Settings, HeartRuntime], TickLifecycle
     ] = build_tick_loop,
+    brain_factory: Callable[[Settings], BrainProvider] = build_brain_provider,
 ) -> FastAPI:
     """Build the FastAPI application. Loads `Settings` via `load_settings()` when none
     is given — tests and `python -m ansina` both pass an already-loaded one instead, so
@@ -60,7 +62,11 @@ def create_app(
     probe runs, and `app.state.heart` is `None`. `tick_loop_factory` (default
     `ansina.heart.build_tick_loop`, issue #11) follows the same shape, gated by both
     `heart.enabled` and `heart.tick.enabled` — `app.state.tick_loop` is `None` unless
-    both are true.
+    both are true. `brain_factory` (default `ansina.brain.build_brain_provider`, issue
+    #12) follows the same shape again, gated by `brain.enabled` alone — the Brain has
+    no dependency on the Heart being enabled. Nothing calls `BrainProvider.stream()`
+    yet (the tick loop's `escalate` branch stays log-only until a follow-up issue wires
+    it up), so `app.state.brain` exists only for that future consumer to reach.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
@@ -76,6 +82,13 @@ def create_app(
     tick_loop: TickLifecycle | None = None
     if heart is not None and resolved_settings.heart.tick.enabled:
         tick_loop = tick_loop_factory(resolved_settings, heart)
+
+    # Same "fail loudly before uvicorn binds a port" shape as `heart` above —
+    # `BrainUnavailableError` (issue #12) surfaces here, not on the first `stream()`
+    # call. Independent of `heart.enabled`: the Brain has no dependency on the Heart.
+    brain: BrainProvider | None = None
+    if resolved_settings.brain.enabled:
+        brain = brain_factory(resolved_settings)
 
     if resolved_settings.security.api_token is None:
         logger.warning(
@@ -95,6 +108,11 @@ def create_app(
             if tick_loop is not None:
                 await tick_loop.start()
                 readiness.register("heart_tick", tick_loop.is_healthy)
+        # No `/readyz` check for the Brain: unlike `Database.is_healthy`/`HeartRuntime.
+        # is_healthy` (both a cheap local check), the only meaningful liveness signal
+        # for a remote provider is a real network round-trip, and paying for one on
+        # every `/readyz` poll is the wrong trade. `brain is not None` already tells an
+        # operator whether it's configured; issue #12 doesn't ask for more than that.
         readiness.register("startup", lambda: True)
         try:
             yield
@@ -104,6 +122,8 @@ def create_app(
                 await tick_loop.stop()
             if heart is not None:
                 heart.unload()
+            if brain is not None:
+                await brain.aclose()
             db.close()
 
     app = FastAPI(
@@ -116,6 +136,7 @@ def create_app(
     app.state.db = db
     app.state.heart = heart
     app.state.tick_loop = tick_loop
+    app.state.brain = brain
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware

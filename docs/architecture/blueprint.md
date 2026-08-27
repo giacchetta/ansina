@@ -141,6 +141,8 @@ The `HeartRuntime` port + capability probe (issue #10, `src/ansina/heart/`) ship
 
 The **Brain** is a 35B+ model reached through a `BrainProvider` port, cloud-backed by default (OpenAI-compatible adapter), with a local adapter possible later. All real reasoning happens here. The Heart never replaces it.
 
+The port + its OpenAI-compatible adapter (issue #12, `src/ansina/brain/`) ship with the same load-bearing invariant OpenClaw's `ApiProvider` has (§1): `stream()` returns synchronously and never throws after invocation — every failure, including one after bounded retry is exhausted, surfaces as a terminal event on the stream, not a raised exception. A local 35B adapter and multi-provider routing/fallback chains are explicitly out of scope for issue #12, the same "cloud is the only fast path proven on hardware at hand" reasoning that scoped the Heart's MLX-only adapter above. `create_app` wires the port into its lifespan the same way it wires `HeartRuntime`, gated by `[brain] enabled` independently of `[heart] enabled` — but nothing calls `stream()` yet; connecting the tick loop's `escalate` decision to it is a follow-up issue.
+
 Three additional Heart duties — request triage, context curation, structured extraction — are deliberately **not** implemented yet. The user has been burned before by low-quality small-model output; each duty is tracked as a gated experiment (see the Backlog milestone) that must beat a stated baseline before being adopted, not adopted on vibes.
 
 ### Primary target hardware

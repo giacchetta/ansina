@@ -63,9 +63,38 @@ interval_seconds = 30.0
 # lockstep with anything else on a fixed cadence. 0 disables jitter.
 jitter_seconds = 3.0
 
-# Secrets (e.g. the API bearer token) are never read from this file — setting one
-# here is a hard startup error. Set it via the environment instead, e.g.:
+[brain]
+# The remote Brain provider (issue #12). Off by default: "build_brain_provider" is
+# never called and "app.state.brain" stays "None". Independent of [heart] — the Brain
+# has no dependency on the Heart being enabled.
+enabled = false
+
+# Any OpenAI-compatible chat-completions endpoint: OpenAI itself, an
+# Anthropic-via-compat-shim, OpenRouter, or a self-hosted server. A keyless request
+# against this default host is refused at startup; point this at a keyless custom
+# endpoint instead if that's what you're running.
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+timeout_seconds = 60.0
+max_output_tokens = 2048
+
+# Bounded retry: only retries a classified-retryable failure, and only before any
+# text has reached the caller. "max_retries = 0" disables retry entirely.
+max_retries = 3
+retry_initial_backoff_seconds = 1.0
+retry_max_backoff_seconds = 30.0
+
+# Optional. With no price configured (the default), recorded usage carries no
+# "cost_usd" figure rather than a fabricated one.
+# price_per_1m_input_tokens = 0.15
+# price_per_1m_output_tokens = 0.60
+
+# Secrets (e.g. the API bearer token, the Brain's api_key) are never read from this
+# file — setting one here is a hard startup error. Set them via the environment
+# instead, e.g.:
 #   ANSINA_SECURITY__API_TOKEN=...
+#   ANSINA_BRAIN__API_KEY=...
 #
 # Binding [server] host to anything other than loopback (127.0.0.1, ::1, localhost)
 # while no ANSINA_SECURITY__API_TOKEN is set is also a hard startup error — Ansina

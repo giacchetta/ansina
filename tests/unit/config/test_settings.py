@@ -26,6 +26,17 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.tick.enabled is True
     assert settings.heart.tick.interval_seconds == 30.0
     assert settings.heart.tick.jitter_seconds == 3.0
+    assert settings.brain.enabled is False
+    assert settings.brain.base_url == "https://api.openai.com/v1"
+    assert settings.brain.model == "gpt-4o-mini"
+    assert settings.brain.api_key is None
+    assert settings.brain.timeout_seconds == 60.0
+    assert settings.brain.max_output_tokens == 2048
+    assert settings.brain.max_retries == 3
+    assert settings.brain.retry_initial_backoff_seconds == 1.0
+    assert settings.brain.retry_max_backoff_seconds == 30.0
+    assert settings.brain.price_per_1m_input_tokens is None
+    assert settings.brain.price_per_1m_output_tokens is None
 
 
 def test_toml_overrides_defaults(clean_env: None, tmp_cwd: Path) -> None:
@@ -304,6 +315,50 @@ def test_heart_runtime_rejects_unknown_value(
         load_settings()
 
     assert "heart.runtime" in str(exc_info.value)
+
+
+def test_brain_settings_via_env(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_BRAIN__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_BRAIN__BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv("ANSINA_BRAIN__MODEL", "some-model")
+    monkeypatch.setenv("ANSINA_BRAIN__API_KEY", "s3cr3t-brain-key-0123")
+    monkeypatch.setenv("ANSINA_BRAIN__MAX_RETRIES", "5")
+
+    settings = load_settings()
+
+    assert settings.brain.enabled is True
+    assert settings.brain.base_url == "https://openrouter.example/v1"
+    assert settings.brain.model == "some-model"
+    assert settings.brain.api_key is not None
+    assert settings.brain.api_key.get_secret_value() == "s3cr3t-brain-key-0123"
+    assert settings.brain.max_retries == 5
+    assert "s3cr3t-brain-key-0123" not in repr(settings)
+
+
+def test_brain_api_key_in_toml_file_rejected(clean_env: None, tmp_cwd: Path) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[brain]\napi_key = "leaked-brain-key"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_BRAIN__API_KEY" in message
+    assert "leaked-brain-key" not in message
+
+
+def test_brain_max_retries_rejects_negative(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_BRAIN__MAX_RETRIES", "-1")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "brain.max_retries" in str(exc_info.value)
 
 
 def test_tick_settings_via_env(

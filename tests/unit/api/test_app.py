@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ansina.api.app import create_app
+from ansina.brain.events import BrainDone
+from ansina.brain.provider import BrainProvider, BrainRequest
+from ansina.brain.selection import BrainUnavailableError
 from ansina.config import Settings, load_settings
 from ansina.errors import StorageError
 from ansina.heart.runtime import BaseHeartRuntime, HeartRuntime, HeartUnavailableError
@@ -35,6 +39,25 @@ class _FakeHeartRuntime(BaseHeartRuntime):
 
     def _unload_backend(self) -> None:
         self.unload_calls += 1
+
+
+class _FakeBrainProvider:
+    """Stands in for `OpenAICompatibleBrainProvider` so app-lifecycle tests never
+    open a socket. Nothing calls `stream()` yet (issue #12 doesn't wire the tick
+    loop's escalate branch to it) — only construction and `aclose()` matter here.
+    """
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def stream(self, request: BrainRequest) -> AsyncGenerator[BrainDone]:
+        async def _gen() -> AsyncGenerator[BrainDone]:
+            yield BrainDone()
+
+        return _gen()
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
 
 
 def test_app_state_carries_settings(app: FastAPI) -> None:
@@ -169,6 +192,68 @@ def test_tick_loop_started_after_heart_loads_and_stopped_before_heart_unloads(
         pass
 
     assert events == ["heart_load", "tick_start", "tick_stop", "heart_unload"]
+
+
+def test_brain_disabled_by_default_no_state_no_readiness_key(app: FastAPI) -> None:
+    assert app.state.brain is None
+
+    with TestClient(app) as client:
+        checks = client.get("/readyz").json()["checks"]
+        assert "brain" not in checks
+
+
+def test_brain_enabled_builds_and_closes_on_shutdown(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_BRAIN__ENABLED", "true")
+    settings = load_settings()
+    fake_brain = _FakeBrainProvider()
+
+    app = create_app(settings, brain_factory=lambda _settings: fake_brain)
+
+    assert app.state.brain is fake_brain
+    assert fake_brain.close_calls == 0  # not closed until the lifespan shuts down
+
+    with TestClient(app):
+        assert fake_brain.close_calls == 0
+
+    assert fake_brain.close_calls == 1
+
+
+def test_brain_factory_not_called_when_disabled(clean_env: None, tmp_cwd: Path) -> None:
+    def _factory(_settings: Settings) -> BrainProvider:
+        pytest.fail("brain_factory must not be called when brain.enabled is False")
+
+    app = create_app(load_settings(), brain_factory=_factory)
+
+    assert app.state.brain is None
+
+
+def test_brain_unavailable_error_propagates_from_create_app(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_BRAIN__ENABLED", "true")
+    settings = load_settings()
+
+    def _factory(_settings: Settings) -> BrainProvider:
+        raise BrainUnavailableError("no api_key configured")
+
+    with pytest.raises(BrainUnavailableError):
+        create_app(settings, brain_factory=_factory)
+
+
+def test_brain_enabled_independent_of_heart(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Brain has no dependency on the Heart being enabled — issue #12 vs #10/#11
+    are independent config surfaces."""
+    monkeypatch.setenv("ANSINA_BRAIN__ENABLED", "true")
+    settings = load_settings()
+
+    app = create_app(settings, brain_factory=lambda _settings: _FakeBrainProvider())
+
+    assert app.state.heart is None
+    assert app.state.brain is not None
 
 
 def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:

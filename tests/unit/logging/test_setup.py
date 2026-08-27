@@ -54,3 +54,20 @@ def test_configure_logging_registers_configured_token(
         assert "configured-secret-token-value" not in stream.getvalue()
     finally:
         clear_secrets()
+
+
+def test_configure_logging_registers_configured_brain_api_key(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_BRAIN__API_KEY", "configured-secret-brain-key-value")
+    stream = io.StringIO()
+    monkeypatch.setattr("sys.stderr", stream)
+
+    try:
+        configure_logging(load_settings())
+        log = get_logger("ansina.tests.setup")
+        log.info("key in use: configured-secret-brain-key-value")
+
+        assert "configured-secret-brain-key-value" not in stream.getvalue()
+    finally:
+        clear_secrets()

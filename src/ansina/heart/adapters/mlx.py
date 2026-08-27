@@ -18,17 +18,27 @@ from ansina.logging import get_logger
 
 logger = get_logger(__name__)
 
-# `(model_path) -> (model, tokenizer)`. `mlx_lm` ships no type stubs, hence `Any`
-# here rather than real types — kept as a named alias so it reads as a documented
-# seam, not a stray untyped parameter.
+# `(model_path) -> (model, tokenizer)`. Deliberately `Any`, not `mlx_lm`'s real
+# `nn.Module`/`TokenizerWrapper` types: `mlx.*`/`mlx_lm.*` are under `ignore_missing_
+# imports` below (the extra isn't installed in CI), so importing those types here
+# would still resolve to `Any` at check time and would break the moment the extra
+# genuinely isn't installed. Kept as a named alias so it reads as a documented seam,
+# not a stray untyped parameter.
 Loader = Callable[[Path], tuple[Any, Any]]
 
 
 def _default_loader(model_path: Path) -> tuple[Any, Any]:
     from mlx_lm import load
 
-    result: tuple[Any, Any] = load(str(model_path))
-    return result
+    # `load()`'s real return type is `tuple[model, tokenizer] | tuple[model,
+    # tokenizer, config]`, keyed on its own `return_config` kwarg — never passed
+    # here, so the third element never actually appears, but mypy can't narrow a
+    # union on an unpassed default. Indexing (rather than assigning the whole
+    # result to a `tuple[Any, Any]`-typed variable) is valid against either arm of
+    # that union, so it stays correct even if a future `mlx_lm` release adds a
+    # fourth return element.
+    result = load(str(model_path))
+    return result[0], result[1]
 
 
 class MlxHeartRuntime(BaseHeartRuntime):

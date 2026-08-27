@@ -14,6 +14,15 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    # The `BrainProvider` port's OpenAI-compatible adapter (issue #12,
+    # `ansina.brain.adapters.openai_compat`). Unlike `ansina[mlx]` below, this is a
+    # base dependency, not an optional extra: it's pure Python, installs on every CI
+    # leg, and both legs exercise it (the Brain being disabled by default is a config
+    # default, not a platform constraint the way MLX is). Floor set at the version the
+    # adapter was actually built and tested against (3.5.0) — the SDK has made
+    # breaking major-version changes before (e.g. its transport moved to `httpx2`), so
+    # an untested older floor would be a false promise of compatibility.
+    "openai>=3.5",
 ]
 
 # `mlx` — the only HeartRuntime adapter shipped by issue #10 — is an *optional* extra,
@@ -23,7 +32,10 @@ dependencies = [
 [project.optional-dependencies]
 mlx = [
     "mlx-lm>=0.31.3",
-    "huggingface-hub>=0.34",
+    # Floor bumped past the 0.x -> 1.x major boundary to the version actually
+    # resolved/locked (1.28.0) — an untested pre-1.0 floor was a false promise of
+    # compatibility, the same reasoning as `openai`'s floor above.
+    "huggingface-hub>=1.28",
 ]
 
 [project.scripts]
@@ -32,10 +44,14 @@ ansina = "ansina.__main__:main"
 [dependency-groups]
 dev = [
     "ruff>=0.8",
-    "mypy>=1.13",
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "pytest-cov>=6.0",
+    # Floors below bumped past a major-version boundary to the version actually
+    # resolved/locked and tested against — an untested older floor was a false
+    # promise of compatibility, the same reasoning as `openai`'s floor above.
+    # `pytest-asyncio` in particular changed its default fixture loop scope at 1.0.
+    "mypy>=2.3",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "pytest-cov>=7.1",
     "httpx>=0.27",
     "httpx2>=2.12",
     "pre-commit>=4.0",
@@ -92,7 +108,14 @@ exclude_also = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "--cov=src/ansina"
+# `--import-mode=importlib`: `tests/` has no `__init__.py` files (see `[tool.mypy]`'s
+# comment above), so pytest's default "prepend" import mode fails as soon as two test
+# modules share a basename across different subpackages — issue #12 adds `ansina.brain
+# .selection`, which collides with `ansina.heart.selection`'s already-existing
+# `test_selection.py` under that default mode. `importlib` mode resolves modules by
+# file path instead, the same reasoning `[tool.mypy]`'s `explicit_package_bases`
+# already applies on the type-checking side.
+addopts = "--cov=src/ansina --import-mode=importlib"
 filterwarnings = [
     # `TestClient`'s anyio blocking-portal teardown can finalize a request-opened
     # sqlite3.Connection outside `Database.close()`'s own cleanup path, under GC

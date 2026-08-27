@@ -150,6 +150,36 @@ class HeartSettings(BaseModel):
         return value.expanduser().resolve()
 
 
+class BrainSettings(BaseModel):
+    """The remote Brain provider, consumed by issue #12's `ansina.brain`.
+
+    `enabled=False` (the default) means `build_brain_provider` is never called and
+    `app.state.brain` stays `None` — same shape as `HeartSettings.enabled`. `api_key`
+    is env-only (see module docstring); a keyless `base_url` still pointing at the
+    default OpenAI host is refused at selection time (`ansina.brain.selection`) — a
+    keyless *custom* `base_url` (a local OpenAI-compatible server) is legitimate and
+    stays allowed.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = False
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
+    api_key: SecretStr | None = Field(default=None, min_length=16)
+    timeout_seconds: float = Field(default=60.0, gt=0)
+    max_output_tokens: int = Field(default=2048, ge=1)
+    # Bounded retry (issue #12): `max_retries=0` disables retry entirely rather than
+    # meaning "unbounded" — there is no unbounded option.
+    max_retries: int = Field(default=3, ge=0)
+    retry_initial_backoff_seconds: float = Field(default=1.0, gt=0)
+    retry_max_backoff_seconds: float = Field(default=30.0, gt=0)
+    # Optional: with no price configured (the default), `BrainUsage.cost_usd` stays
+    # `None` rather than reporting a fabricated figure.
+    price_per_1m_input_tokens: float | None = Field(default=None, ge=0)
+    price_per_1m_output_tokens: float | None = Field(default=None, ge=0)
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5. No literal default — ever."""
 
@@ -321,6 +351,7 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     heart: HeartSettings = Field(default_factory=HeartSettings)
+    brain: BrainSettings = Field(default_factory=BrainSettings)
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:
