@@ -26,7 +26,14 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
 
     assert response.status_code == 200
     paths = response.json()["paths"]
-    assert set(paths) == {"/healthz", "/readyz", "/version"}
+    assert set(paths) == {
+        "/healthz",
+        "/readyz",
+        "/version",
+        "/heart/tick",
+        "/heart/tick/pause",
+        "/heart/tick/resume",
+    }
 
 
 def test_readyz_returns_200_when_ready(client: TestClient) -> None:

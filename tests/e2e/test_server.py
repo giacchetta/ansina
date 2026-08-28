@@ -136,6 +136,15 @@ def test_readyz(server: str) -> None:
     assert body["checks"]["database"] is True
 
 
+def test_readyz_has_no_heart_key_when_heart_is_disabled(server: str) -> None:
+    """`[heart] enabled` defaults to `false` (issue #10) — the default boot must be
+    entirely unaffected: no `heart` readiness key at all, not even a `false` one.
+    """
+    response = httpx.get(f"{server}/readyz")
+
+    assert "heart" not in response.json()["checks"]
+
+
 def test_version(server: str) -> None:
     response = httpx.get(f"{server}/version")
 
@@ -149,7 +158,14 @@ def test_openapi_schema(server: str) -> None:
     response = httpx.get(f"{server}/openapi.json")
 
     assert response.status_code == 200
-    assert set(response.json()["paths"]) == {"/healthz", "/readyz", "/version"}
+    assert set(response.json()["paths"]) == {
+        "/healthz",
+        "/readyz",
+        "/version",
+        "/heart/tick",
+        "/heart/tick/pause",
+        "/heart/tick/resume",
+    }
 
 
 def test_request_id_is_echoed(server: str) -> None:
@@ -164,6 +180,25 @@ def test_unknown_path_is_problem_json(server: str) -> None:
     assert response.status_code == 404
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["code"] == "ansina.not_found"
+
+
+def test_heart_tick_503_when_heart_disabled(server: str) -> None:
+    """`[heart] enabled` defaults to `false` (issue #10) — with no Heart there is no
+    tick loop (issue #11) either, so every `/heart/tick*` route must answer 503
+    `problem+json` rather than pretending a loop exists.
+    """
+    response = httpx.get(f"{server}/heart/tick")
+
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "ansina.heart.disabled"
+
+
+def test_authed_heart_tick_requires_token(authed_server: str) -> None:
+    response = httpx.get(f"{authed_server}/heart/tick")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
 
 
 def test_authed_healthz_reachable_without_token(authed_server: str) -> None:
@@ -216,6 +251,37 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         assert rows == [(1,)]  # still exactly one row — 0001 was not re-applied
+
+
+def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:
+    """Issue #10 AC #4: turning the Heart on with no viable adapter available must
+    fail loudly at boot — never a silent no-op, never a bare traceback. This is
+    platform-independent: CI never installs the `mlx` extra on either OS leg, so
+    `mlx_lm` is never importable regardless of `sys.platform`. (Asserted on
+    "non-zero exit + stderr mentions the heart," not the exact sentence, so this
+    stays green on a Mac that *does* have the extra installed — there the failure is
+    an absent model instead of an absent backend, per `ansina.heart.selection`.)
+    """
+    port = _free_port()
+    (tmp_path / "ansina.toml").write_text(
+        f'[server]\nhost = "127.0.0.1"\nport = {port}\n'
+        f'[database]\npath = "{(tmp_path / "ansina.db").as_posix()}"\n',
+        encoding="utf-8",
+    )
+
+    process = subprocess.run(
+        [sys.executable, "-m", "ansina"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "ANSINA_HEART__ENABLED": "true"},
+        timeout=_STARTUP_TIMEOUT_S,
+    )
+
+    assert process.returncode != 0
+    combined = (process.stdout + process.stderr).lower()
+    assert "heart" in combined
+    assert "traceback" not in combined
 
 
 def test_shuts_down_cleanly(tmp_path: Path) -> None:

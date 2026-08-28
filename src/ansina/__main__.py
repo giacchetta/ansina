@@ -15,6 +15,7 @@ import uvicorn
 
 from ansina.api import create_app
 from ansina.config import ConfigError, load_settings
+from ansina.errors import AnsinaError
 from ansina.logging import configure_logging, get_logger
 
 
@@ -34,7 +35,15 @@ def main() -> None:
         extra={"host": settings.server.host, "port": settings.server.port},
     )
 
-    app = create_app(settings)
+    try:
+        app = create_app(settings)
+    except AnsinaError as exc:
+        # Mirrors the `ConfigError` branch above: `create_app` can now fail before
+        # uvicorn ever binds (issue #10's Heart capability probe) — same clean
+        # stderr-and-exit-1 shape, never a traceback.
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
+
     uvicorn.run(
         app,
         host=settings.server.host,

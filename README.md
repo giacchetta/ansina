@@ -4,14 +4,15 @@
 
 > A self-owned AI agent: an always-on in-process **Heart** plus a remote **Brain**, exposed over a single internal REST API. No chat channels.
 
-> **Status:** M0 — skeleton. Zero model code. See the [roadmap](docs/architecture/blueprint.md#4-roadmap).
+> **Status:** M1 in progress — HeartRuntime port + MLX adapter (issue #10) and the autonomic tick loop (issue #11) landed. See the [roadmap](docs/architecture/blueprint.md#4-roadmap).
 
 ```mermaid
 flowchart LR
     Client["Client"] -->|Bearer token| MW["RequestIdMiddleware"]
     MW --> Auth["BearerAuthMiddleware"]
-    Auth --> Routes["/healthz · /readyz · /version"]
+    Auth --> Routes["/healthz · /readyz · /version<br/>/heart/tick[/pause|/resume]"]
     Routes --> DB[("SQLite<br/>WAL")]
+    Routes --> Tick["TickLoop<br/>(idle / act / escalate)"]
     Routes -.error.-> Problem["RFC 9457<br/>problem+json"]
 ```
 
@@ -30,12 +31,28 @@ curl localhost:8000/healthz
 | `GET /healthz` | public | Liveness only — 200 unconditionally, never consults readiness. |
 | `GET /readyz` | public | 200 `ready` with per-check booleans, or 503 `problem+json` if any check fails. |
 | `GET /version` | token | Name + version. |
+| `GET /heart/tick` | token | Tick loop status: running, paused, tick count, last decision. 503 `problem+json` if the Heart is disabled. |
+| `POST /heart/tick/pause` | token | Kill switch — halts future ticks without a process restart. |
+| `POST /heart/tick/resume` | token | Undoes `/heart/tick/pause`. |
 
 `PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default. In dev mode (no `ANSINA_SECURITY__API_TOKEN` set), auth is disabled entirely, so `/version` returns 200 without a token; once a token is configured, a missing/wrong one gets a 401 `problem+json`.
 
 ## ⚙️ Configuration
 
 Precedence: built-in defaults → `ansina.toml` → `ANSINA_*` env vars. Secrets are env-only — setting `ANSINA_SECURITY__API_TOKEN` in `ansina.toml` is a hard startup error. See [`ansina.example.toml`](ansina.example.toml) for the full shape.
+
+## 🫀 Heart runtime
+
+The in-process Heart (`[heart] enabled`, off by default) currently runs on **MLX only — Apple Silicon**. Enable it:
+
+```bash
+uv sync --extra mlx
+ANSINA_HEART__ENABLED=true uv run ansina
+```
+
+On any other host, enabling it fails loudly at boot rather than silently degrading — no fallback ships yet (a portable, non-Apple-Silicon adapter is tracked in a follow-up issue).
+
+Once loaded, the Heart runs an autonomic tick loop (`[heart.tick]`, on by default whenever the Heart is): every `interval_seconds` (plus jitter) it decides idle/act/escalate and logs the decision. `act` and `escalate` are logged only for now — there's nothing to act on yet and no `BrainProvider` (issue #12) to escalate to. `GET /heart/tick` reports its state; `POST /heart/tick/pause` and `/resume` are the kill switch.
 
 ## 🛠️ Development
 

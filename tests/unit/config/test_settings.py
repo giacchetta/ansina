@@ -16,6 +16,27 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.logging.level == "INFO"
     assert settings.database.path == tmp_cwd / "ansina.db"
     assert settings.security.api_token is None
+    assert settings.heart.enabled is False
+    assert settings.heart.runtime == "auto"
+    assert settings.heart.model_path is None
+    assert settings.heart.model_repo == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    assert settings.heart.cache_dir == Path.home() / ".cache" / "ansina" / "models"
+    assert settings.heart.context_tokens == 8192
+    assert settings.heart.max_output_tokens == 512
+    assert settings.heart.tick.enabled is True
+    assert settings.heart.tick.interval_seconds == 30.0
+    assert settings.heart.tick.jitter_seconds == 3.0
+    assert settings.brain.enabled is False
+    assert settings.brain.base_url == "https://api.openai.com/v1"
+    assert settings.brain.model == "gpt-4o-mini"
+    assert settings.brain.api_key is None
+    assert settings.brain.timeout_seconds == 60.0
+    assert settings.brain.max_output_tokens == 2048
+    assert settings.brain.max_retries == 3
+    assert settings.brain.retry_initial_backoff_seconds == 1.0
+    assert settings.brain.retry_max_backoff_seconds == 30.0
+    assert settings.brain.price_per_1m_input_tokens is None
+    assert settings.brain.price_per_1m_output_tokens is None
 
 
 def test_toml_overrides_defaults(clean_env: None, tmp_cwd: Path) -> None:
@@ -237,6 +258,154 @@ def test_database_path_absolute_is_unchanged(
     settings = load_settings()
 
     assert settings.database.path == absolute
+
+
+def test_heart_context_tokens_above_ceiling_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """8192 is the blueprint's hard ceiling (issue #10) — config must reject more."""
+    monkeypatch.setenv("ANSINA_HEART__CONTEXT_TOKENS", "8193")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.context_tokens" in str(exc_info.value)
+
+
+def test_heart_model_path_expands_user_home(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__MODEL_PATH", "~/models/heart")
+
+    settings = load_settings()
+
+    assert settings.heart.model_path == Path.home() / "models" / "heart"
+
+
+def test_heart_cache_dir_resolves_relative_to_cwd(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__CACHE_DIR", "nested/heart-cache")
+
+    settings = load_settings()
+
+    assert settings.heart.cache_dir == tmp_cwd / "nested" / "heart-cache"
+
+
+def test_heart_enabled_via_env(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.heart.enabled is True
+
+
+def test_heart_runtime_rejects_unknown_value(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only `"auto"`/`"mlx"` are valid — `"llama_cpp"` isn't a member yet (issue #10
+    deferred that adapter to a follow-up issue), so it must be rejected, not silently
+    accepted as a no-op.
+    """
+    monkeypatch.setenv("ANSINA_HEART__RUNTIME", "llama_cpp")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.runtime" in str(exc_info.value)
+
+
+def test_brain_settings_via_env(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_BRAIN__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_BRAIN__BASE_URL", "https://openrouter.example/v1")
+    monkeypatch.setenv("ANSINA_BRAIN__MODEL", "some-model")
+    monkeypatch.setenv("ANSINA_BRAIN__API_KEY", "s3cr3t-brain-key-0123")
+    monkeypatch.setenv("ANSINA_BRAIN__MAX_RETRIES", "5")
+
+    settings = load_settings()
+
+    assert settings.brain.enabled is True
+    assert settings.brain.base_url == "https://openrouter.example/v1"
+    assert settings.brain.model == "some-model"
+    assert settings.brain.api_key is not None
+    assert settings.brain.api_key.get_secret_value() == "s3cr3t-brain-key-0123"
+    assert settings.brain.max_retries == 5
+    assert "s3cr3t-brain-key-0123" not in repr(settings)
+
+
+def test_brain_api_key_in_toml_file_rejected(clean_env: None, tmp_cwd: Path) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[brain]\napi_key = "leaked-brain-key"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_BRAIN__API_KEY" in message
+    assert "leaked-brain-key" not in message
+
+
+def test_brain_max_retries_rejects_negative(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_BRAIN__MAX_RETRIES", "-1")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "brain.max_retries" in str(exc_info.value)
+
+
+def test_tick_settings_via_env(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__ENABLED", "false")
+    monkeypatch.setenv("ANSINA_HEART__TICK__INTERVAL_SECONDS", "10")
+    monkeypatch.setenv("ANSINA_HEART__TICK__JITTER_SECONDS", "0")
+
+    settings = load_settings()
+
+    assert settings.heart.tick.enabled is False
+    assert settings.heart.tick.interval_seconds == 10.0
+    assert settings.heart.tick.jitter_seconds == 0.0
+
+
+def test_tick_settings_via_toml(clean_env: None, tmp_cwd: Path) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        "[heart.tick]\ninterval_seconds = 5.0\n", encoding="utf-8"
+    )
+
+    settings = load_settings()
+
+    assert settings.heart.tick.interval_seconds == 5.0
+    assert settings.heart.tick.jitter_seconds == 3.0  # untouched key keeps its default
+
+
+def test_tick_interval_seconds_must_be_positive(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__INTERVAL_SECONDS", "0")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.tick.interval_seconds" in str(exc_info.value)
+
+
+def test_tick_jitter_seconds_rejects_negative(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__JITTER_SECONDS", "-1")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.tick.jitter_seconds" in str(exc_info.value)
 
 
 def test_unwrap_model_returns_none_for_a_non_model_annotation() -> None:

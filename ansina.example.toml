@@ -22,9 +22,79 @@ level = "INFO"
 # sidecar files next to it; move all three together.
 path = "ansina.db"
 
-# Secrets (e.g. the API bearer token) are never read from this file — setting one
-# here is a hard startup error. Set it via the environment instead, e.g.:
+[heart]
+# The in-process Heart runtime (issue #10). Off by default: no capability probe
+# runs, no model loads, and "/readyz" carries no "heart" key at all. Turning this on
+# requires the "mlx" extra ("uv sync --extra mlx") and only runs on Apple Silicon —
+# a portable fallback is tracked in a follow-up issue, not shipped yet.
+enabled = false
+
+# "auto" and "mlx" currently behave identically (MLX is the only adapter); "auto"
+# exists so a future adapter can be added without a config break.
+runtime = "auto"
+
+# An explicit local path always wins over model_repo below, and is used as-is with
+# no network access. Leave unset to fetch model_repo instead.
+# model_path = "/path/to/a/local/mlx/model"
+
+# Hugging Face repo id, fetched into cache_dir on first use and reused after —
+# ignored when model_path is set.
+model_repo = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+
+# Download-once model cache. Same "~" expansion / relative-path-resolves-to-CWD
+# behavior as [database] path above.
+cache_dir = "~/.cache/ansina/models"
+
+# Hard ceiling, not a target (blueprint §3) — every prompt built for the Heart must
+# fit inside this budget. 8192 is the maximum accepted here.
+context_tokens = 8192
+max_output_tokens = 512
+
+[heart.tick]
+# The autonomic tick loop (issue #11): on a fixed cadence, the Heart decides
+# idle/act/escalate. Only runs when [heart] enabled = true above; this flag lets the
+# Heart load (e.g. to back a future direct-generate use) without also ticking.
+enabled = true
+
+# Seconds between ticks.
+interval_seconds = 30.0
+
+# Uniform random delay added to each wakeup, so a restarted process doesn't tick in
+# lockstep with anything else on a fixed cadence. 0 disables jitter.
+jitter_seconds = 3.0
+
+[brain]
+# The remote Brain provider (issue #12). Off by default: "build_brain_provider" is
+# never called and "app.state.brain" stays "None". Independent of [heart] — the Brain
+# has no dependency on the Heart being enabled.
+enabled = false
+
+# Any OpenAI-compatible chat-completions endpoint: OpenAI itself, an
+# Anthropic-via-compat-shim, OpenRouter, or a self-hosted server. A keyless request
+# against this default host is refused at startup; point this at a keyless custom
+# endpoint instead if that's what you're running.
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+
+timeout_seconds = 60.0
+max_output_tokens = 2048
+
+# Bounded retry: only retries a classified-retryable failure, and only before any
+# text has reached the caller. "max_retries = 0" disables retry entirely.
+max_retries = 3
+retry_initial_backoff_seconds = 1.0
+retry_max_backoff_seconds = 30.0
+
+# Optional. With no price configured (the default), recorded usage carries no
+# "cost_usd" figure rather than a fabricated one.
+# price_per_1m_input_tokens = 0.15
+# price_per_1m_output_tokens = 0.60
+
+# Secrets (e.g. the API bearer token, the Brain's api_key) are never read from this
+# file — setting one here is a hard startup error. Set them via the environment
+# instead, e.g.:
 #   ANSINA_SECURITY__API_TOKEN=...
+#   ANSINA_BRAIN__API_KEY=...
 #
 # Binding [server] host to anything other than loopback (127.0.0.1, ::1, localhost)
 # while no ANSINA_SECURITY__API_TOKEN is set is also a hard startup error — Ansina

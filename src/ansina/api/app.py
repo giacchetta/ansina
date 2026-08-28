@@ -9,7 +9,7 @@ than growing its own.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -27,22 +27,68 @@ from ansina.api.exception_handlers import (
 from ansina.api.middleware import RequestIdMiddleware
 from ansina.api.readiness import Readiness
 from ansina.api.routes.health import router as health_router
+from ansina.api.routes.heart import router as heart_router
+from ansina.brain import BrainProvider, build_brain_provider
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
+from ansina.heart import (
+    HeartRuntime,
+    TickLifecycle,
+    build_heart_runtime,
+    build_tick_loop,
+)
 from ansina.logging import get_logger
 from ansina.storage import Database, run_migrations
 
 logger = get_logger(__name__)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    heart_factory: Callable[[Settings], HeartRuntime] = build_heart_runtime,
+    tick_loop_factory: Callable[
+        [Settings, HeartRuntime], TickLifecycle
+    ] = build_tick_loop,
+    brain_factory: Callable[[Settings], BrainProvider] = build_brain_provider,
+) -> FastAPI:
     """Build the FastAPI application. Loads `Settings` via `load_settings()` when none
     is given — tests and `python -m ansina` both pass an already-loaded one instead, so
     config is loaded exactly once per process.
+
+    `heart_factory` defaults to `ansina.heart.build_heart_runtime`; tests inject a fake
+    so the unit suite never needs a real model or MLX installed. When
+    `settings.heart.enabled` is `False` (the default), it's never called at all — no
+    probe runs, and `app.state.heart` is `None`. `tick_loop_factory` (default
+    `ansina.heart.build_tick_loop`, issue #11) follows the same shape, gated by both
+    `heart.enabled` and `heart.tick.enabled` — `app.state.tick_loop` is `None` unless
+    both are true. `brain_factory` (default `ansina.brain.build_brain_provider`, issue
+    #12) follows the same shape again, gated by `brain.enabled` alone — the Brain has
+    no dependency on the Heart being enabled. Nothing calls `BrainProvider.stream()`
+    yet (the tick loop's `escalate` branch stays log-only until a follow-up issue wires
+    it up), so `app.state.brain` exists only for that future consumer to reach.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
     db = Database(resolved_settings.database.path)
+
+    # Built here, not inside `lifespan`, so a `HeartUnavailableError` (issue #10) is
+    # raised while the app is still being assembled — before uvicorn ever binds a
+    # port — the same "fail loudly at boot" shape a `ConfigError` already has.
+    heart: HeartRuntime | None = None
+    if resolved_settings.heart.enabled:
+        heart = heart_factory(resolved_settings)
+
+    tick_loop: TickLifecycle | None = None
+    if heart is not None and resolved_settings.heart.tick.enabled:
+        tick_loop = tick_loop_factory(resolved_settings, heart)
+
+    # Same "fail loudly before uvicorn binds a port" shape as `heart` above —
+    # `BrainUnavailableError` (issue #12) surfaces here, not on the first `stream()`
+    # call. Independent of `heart.enabled`: the Brain has no dependency on the Heart.
+    brain: BrainProvider | None = None
+    if resolved_settings.brain.enabled:
+        brain = brain_factory(resolved_settings)
 
     if resolved_settings.security.api_token is None:
         logger.warning(
@@ -56,11 +102,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.connect()
         run_migrations(db)
         readiness.register("database", db.is_healthy)
+        if heart is not None:
+            heart.load()
+            readiness.register("heart", heart.is_healthy)
+            if tick_loop is not None:
+                await tick_loop.start()
+                readiness.register("heart_tick", tick_loop.is_healthy)
+        # No `/readyz` check for the Brain: unlike `Database.is_healthy`/`HeartRuntime.
+        # is_healthy` (both a cheap local check), the only meaningful liveness signal
+        # for a remote provider is a real network round-trip, and paying for one on
+        # every `/readyz` poll is the wrong trade. `brain is not None` already tells an
+        # operator whether it's configured; issue #12 doesn't ask for more than that.
         readiness.register("startup", lambda: True)
         try:
             yield
         finally:
             logger.info("ansina shutting down")
+            if tick_loop is not None:
+                await tick_loop.stop()
+            if heart is not None:
+                heart.unload()
+            if brain is not None:
+                await brain.aclose()
             db.close()
 
     app = FastAPI(
@@ -71,6 +134,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.state.readiness = readiness
     app.state.db = db
+    app.state.heart = heart
+    app.state.tick_loop = tick_loop
+    app.state.brain = brain
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
@@ -87,5 +153,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     app.include_router(health_router)
+    app.include_router(heart_router)
 
     return app

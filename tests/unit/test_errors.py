@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ansina.config import ConfigError
-from ansina.errors import AnsinaError, ConfigurationError, StorageError
+from ansina.errors import AnsinaError, ConfigurationError, HeartError, StorageError
 
 
 def test_ansina_error_has_stable_code() -> None:
@@ -39,3 +39,8 @@ def test_config_error_is_an_ansina_error() -> None:
 def test_storage_error_has_stable_code() -> None:
     assert issubclass(StorageError, AnsinaError)
     assert StorageError.code == "ansina.storage.error"
+
+
+def test_heart_error_has_stable_code() -> None:
+    assert issubclass(HeartError, AnsinaError)
+    assert HeartError.code == "ansina.heart.error"

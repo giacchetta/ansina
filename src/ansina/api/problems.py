@@ -27,6 +27,7 @@ CODE_METHOD_NOT_ALLOWED = "ansina.method_not_allowed"
 CODE_INTERNAL_ERROR = "ansina.internal_error"
 CODE_NOT_READY = "ansina.not_ready"
 CODE_UNAUTHORIZED = "ansina.unauthorized"
+CODE_HEART_DISABLED = "ansina.heart.disabled"
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
