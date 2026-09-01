@@ -36,9 +36,13 @@ _PATTERNS: tuple[tuple[re.Pattern[str], tuple[int, ...]], ...] = (
     # the key name and group 2 the optional quote character — both left intact. The
     # negative lookahead keeps this from treating a bare `Bearer` scheme word as the
     # value when it runs after the Bearer pattern has already masked the real token.
+    # `hash`/`password_hash`/`token_hash`/`salt` cover issue #24's credential columns
+    # (argon2id password hashes, salted-SHA-256 API token hashes) so a stray
+    # `extra={"hash": ...}` never reaches a log line unredacted.
     (
         re.compile(
-            r"(?i)\b(token|api[-_]?key|secret|password|passwd|authorization|credential)"
+            r"(?i)\b(token|api[-_]?key|secret|password|passwd|authorization|credential"
+            r"|password_hash|token_hash|hash|salt)"
             r"\s*[:=]\s*(\"?)(?!Bearer\b)([^\s\"',}]+)\2"
         ),
         (3,),
@@ -50,6 +54,11 @@ _PATTERNS: tuple[tuple[re.Pattern[str], tuple[int, ...]], ...] = (
         ),
         (1,),
     ),
+    # An argon2id PHC-format hash string (`$argon2id$v=19$m=...,t=...,p=...$<salt>
+    # $<hash>`, see `ansina.auth.hashing.hash_password`), wherever it appears — not just
+    # after a recognized key name, since one could land in a log line via a raw
+    # exception message or a copy-pasted row dump.
+    (re.compile(r"(\$argon2id\$[A-Za-z0-9+/,.=$-]+)"), (1,)),
 )
 
 _registered_secrets: set[str] = set()

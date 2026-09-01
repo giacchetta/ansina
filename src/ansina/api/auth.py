@@ -1,11 +1,13 @@
-"""Static bearer-token enforcement — the internal API boundary from issue #5.
+"""Bearer-token enforcement — the internal API boundary from issue #5, extended by
+issue #24 to check the RBAC identity model's `credentials` table instead of a single
+static config secret.
 
 Pure ASGI middleware (`__call__(scope, receive, send)`), not
 `starlette.BaseHTTPMiddleware`, for the same reason `RequestIdMiddleware` is: that class
 buffers the response and runs the downstream handler in a separate task, which breaks
 nesting `contextvars.ContextVar.set()`/`.reset()` cleanly around streaming responses.
 
-Deny-by-default: every route requires the token except `PUBLIC_PATHS`. A route added by
+Deny-by-default: every route requires a token except `PUBLIC_PATHS`. A route added by
 a later milestone is protected automatically, with no per-route opt-in to forget.
 
 Builds the `problem+json` response itself rather than raising — the exception handlers
@@ -15,14 +17,17 @@ here would escape past them and reach the client as a bare, framework-default 50
 
 from __future__ import annotations
 
-import hmac
 from typing import TYPE_CHECKING
 
+import anyio.to_thread
+
 from ansina.api.problems import CODE_UNAUTHORIZED, problem_response
+from ansina.auth.repositories import CredentialRepository
 
 if TYPE_CHECKING:
-    from pydantic import SecretStr
     from starlette.types import ASGIApp, Receive, Scope, Send
+
+    from ansina.storage.database import Database
 
 # Reachable with no token, even when auth is enabled. Everything else is
 # deny-by-default, including /version and the OpenAPI/docs routes.
@@ -31,16 +36,6 @@ PUBLIC_PATHS = frozenset({"/healthz", "/readyz"})
 _HEADER_NAME = b"authorization"
 _SCHEME = "bearer"
 _WWW_AUTHENTICATE = "Bearer"
-
-
-def verify_token(provided: str, expected: str) -> bool:
-    """Constant-time comparison — never `==` on secret material.
-
-    No length or prefix short-circuit before the call: `hmac.compare_digest` is
-    handed the raw candidate as-is, so nothing about the caller's input can be timed
-    to leak how much of the real token it got right.
-    """
-    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
 
 def _extract_bearer_token(scope: Scope) -> str | None:
@@ -65,33 +60,55 @@ def _extract_bearer_token(scope: Scope) -> str | None:
 
 
 class BearerAuthMiddleware:
-    """Rejects any non-`PUBLIC_PATHS` request that lacks a valid bearer token.
+    """Rejects any non-`PUBLIC_PATHS` request that doesn't carry a currently-active
+    API-token credential.
 
-    `token=None` means auth is disabled (dev mode) — every request passes through.
-    `config.settings.Settings` refuses to construct at all when that's paired with a
-    non-loopback bind, so a token-less app is never reachable off the local machine.
+    `enabled=False` (`Settings.security.enabled`) disables authentication outright —
+    every request passes through. `config.settings.Settings` refuses to construct at
+    all when that's paired with a non-loopback bind (`Settings._refuse_unsafe_bind`),
+    so a disabled-auth app is never reachable off the local machine.
+
+    Verification is DB-backed (`ansina.auth.repositories.CredentialRepository
+    .find_user_by_api_token`) rather than a comparison against a single static config
+    secret — issue #24's bootstrap token is generated once and never stored in config
+    at all, so config-based comparison can't work for it. This is a minimal slice of
+    issue #25's planned `Authenticator` chain pulled forward; #25 builds the richer
+    `Principal`/roles-aware `require()` dependency on top of this same lookup — this
+    middleware only ever answers "is there *any* identity this token belongs to,"
+    never "what can it do."
     """
 
-    def __init__(self, app: ASGIApp, *, token: SecretStr | None) -> None:
+    def __init__(self, app: ASGIApp, *, enabled: bool, db: Database) -> None:
         self._app = app
-        self._token = token
+        self._enabled = enabled
+        self._db = db
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
             scope["type"] != "http"
-            or self._token is None
+            or not self._enabled
             or scope["path"] in PUBLIC_PATHS
         ):
             await self._app(scope, receive, send)
             return
 
         provided = _extract_bearer_token(scope)
-        if provided is None or not verify_token(
-            provided, self._token.get_secret_value()
-        ):
-            # Missing header, malformed header, and wrong token all take this one path —
-            # no oracle that would let a caller distinguish "no token sent" from "wrong
-            # token sent" from response shape or content.
+        user = None
+        if provided is not None:
+            # Blocking sqlite I/O plus a per-row salted-hash comparison — offloaded to
+            # a worker thread so it never blocks the event loop for other in-flight
+            # requests. `Database` already hands out one connection per thread by
+            # design (see `storage/database.py`), so a worker thread reused across
+            # requests keeps and reuses its own connection rather than reopening one.
+            credentials = CredentialRepository(self._db)
+            user = await anyio.to_thread.run_sync(
+                credentials.find_user_by_api_token, provided
+            )
+
+        if user is None:
+            # Missing header, malformed header, and an unrecognized token all take this
+            # one path — no oracle that would let a caller distinguish "no token sent"
+            # from "wrong token sent" from response shape or content.
             response = problem_response(
                 status=401,
                 code=CODE_UNAUTHORIZED,

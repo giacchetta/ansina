@@ -23,6 +23,12 @@ dependencies = [
     # breaking major-version changes before (e.g. its transport moved to `httpx2`), so
     # an untested older floor would be a false promise of compatibility.
     "openai>=3.5",
+    # Password hashing for the RBAC identity model (issue #24, `ansina.auth.hashing`).
+    # argon2id has no stdlib implementation; this is a base dependency, not an extra —
+    # unlike `ansina[mlx]`, auth is not optional and both CI legs must exercise it.
+    # Ships prebuilt wheels for macos-arm64 and linux-x86_64, so neither leg compiles
+    # from source.
+    "argon2-cffi>=25.1",
 ]
 
 # `mlx` — the only HeartRuntime adapter shipped by issue #10 — is an *optional* extra,

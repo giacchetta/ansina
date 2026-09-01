@@ -28,6 +28,8 @@ from ansina.api.middleware import RequestIdMiddleware
 from ansina.api.readiness import Readiness
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
+from ansina.auth import ensure_bootstrap_admin, reconcile_builtin_roles, sync_resources
+from ansina.auth.policy import BOOTSTRAP_RESOURCES
 from ansina.brain import BrainProvider, build_brain_provider
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
@@ -90,9 +92,9 @@ def create_app(
     if resolved_settings.brain.enabled:
         brain = brain_factory(resolved_settings)
 
-    if resolved_settings.security.api_token is None:
+    if not resolved_settings.security.enabled:
         logger.warning(
-            "ansina starting with no api_token configured — every route except "
+            "ansina starting with security.enabled = false — every route except "
             "/healthz and /readyz is reachable with no authentication"
         )
 
@@ -101,6 +103,16 @@ def create_app(
         logger.info("ansina starting up")
         db.connect()
         run_migrations(db)
+        # RBAC identity/permission foundation (issue #24): catalog the known resources,
+        # reconcile the builtin roles' grants against that catalog, then resolve the
+        # configured api_token to a bootstrap Admin identity — in that order, since a
+        # role can't be granted a resource that isn't catalogued yet, and the bootstrap
+        # identity can't be assigned the "admin" role before it exists. No dedicated
+        # `/readyz` check: `database` already covers the only failure mode this could
+        # have, the same reasoning already recorded for why the Brain has none.
+        sync_resources(db, BOOTSTRAP_RESOURCES)
+        reconcile_builtin_roles(db)
+        ensure_bootstrap_admin(db, resolved_settings)
         readiness.register("database", db.is_healthy)
         if heart is not None:
             heart.load()
@@ -144,7 +156,9 @@ def create_app(
     # request still gets a request id bound in context — a 401's `problem+json` body
     # carries a real `request_id`, the response still echoes `X-Request-ID`, and the
     # "request completed" access-log line still fires for it.
-    app.add_middleware(BearerAuthMiddleware, token=resolved_settings.security.api_token)
+    app.add_middleware(
+        BearerAuthMiddleware, enabled=resolved_settings.security.enabled, db=db
+    )
     app.add_middleware(RequestIdMiddleware)
 
     app.add_exception_handler(AnsinaError, ansina_error_handler)

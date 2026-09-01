@@ -12,8 +12,11 @@ silently accepted value — see ``.agents/guardrails/secret-prevention.md``.
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
+import re
 import tomllib
+from collections import Counter
 from collections.abc import Sequence
 from contextvars import ContextVar
 from pathlib import Path
@@ -180,15 +183,97 @@ class BrainSettings(BaseModel):
     price_per_1m_output_tokens: float | None = Field(default=None, ge=0)
 
 
-class SecuritySettings(BaseModel):
-    """Auth material for issue #5. No literal default — ever."""
+class PasswordHashSettings(BaseModel):
+    """Tunable argon2id work factors for `ansina.auth.hashing`, consumed by issue #24.
+
+    Defaults follow the OWASP-recommended argon2id baseline (m=64 MiB, t=3, p=4) — high
+    enough to make an offline brute-force of a stolen hash expensive, low enough not to
+    dominate a login request. The unit suite overrides these with minimal values (see
+    `tests/unit/auth/conftest.py`) so hashing doesn't dominate test runtime.
+    """
 
     model_config = _MODEL_CONFIG
 
-    # `min_length=16` keeps a configured token comfortably above
-    # `logging.redaction._MIN_SECRET_LENGTH` (8) — a token too short to clear that floor
-    # would be unredactable, i.e. would leak verbatim into any log line that echoes it.
-    api_token: SecretStr | None = Field(default=None, min_length=16)
+    time_cost: int = Field(default=3, ge=1)
+    memory_cost_kib: int = Field(default=65536, ge=1)
+    parallelism: int = Field(default=4, ge=1)
+
+
+_TOKEN_MIN_LENGTH = 32
+# The alphabet `secrets.token_urlsafe()`/`token_hex()` draw from — restricting a
+# manually-supplied token to it rejects any human-typed phrase (spaces, punctuation,
+# mixed scripts) outright, before entropy is even considered.
+_TOKEN_CHARSET = re.compile(r"^[A-Za-z0-9_-]+$")
+# Best-effort deterrent, not a cryptographic guarantee: a sufficiently-crafted
+# adversarial string can still clear this bar. Calibrated against `secrets.token_hex()`
+# — the lowest-entropy-per-char generator Ansina recommends — whose observed floor
+# across 2000 trials at this length is ~3.0 bits/char; 2.5 leaves margin against a
+# false rejection of a genuinely random token while still catching padded/repeated
+# strings (e.g. a word repeated to hit the length floor lands around 2.9, an all-one-
+# character string at 0.0).
+_TOKEN_MIN_ENTROPY_BITS_PER_CHAR = 2.5
+
+
+def _token_entropy_bits_per_char(value: str) -> float:
+    """Shannon entropy of `value`'s own character distribution, in bits/char."""
+    if not value:
+        return 0.0
+    counts = Counter(value)
+    length = len(value)
+    return -sum((n / length) * math.log2(n / length) for n in counts.values())
+
+
+class SecuritySettings(BaseModel):
+    """Auth material for issue #5 and #24.
+
+    `enabled=False` is the only way to run with no authentication at all (loopback-only
+    — see `Settings._refuse_unsafe_bind`) — a deliberate, explicit opt-out rather than
+    an incidental side effect of leaving `api_token` unset. When `enabled=True` (the
+    default) and no `api_token` override is configured, Ansina generates its own
+    high-entropy bootstrap token on first boot and prints it once
+    (`ansina.auth.bootstrap`) — nobody, including Ansina's own logs, ever sees it again.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = True
+
+    # Optional operator override of the auto-generated bootstrap token — e.g. for a
+    # scripted/orchestrated install, or CI, that needs a token known ahead of time.
+    # No literal default — ever. Validated to look like a securely generated value
+    # (length, charset, entropy) rather than a human-chosen phrase; see
+    # `_validate_token_strength` below.
+    api_token: SecretStr | None = Field(default=None, min_length=_TOKEN_MIN_LENGTH)
+
+    # Issue #24: on first boot with no users, this resolves to a single synthetic Admin
+    # identity (`ansina.auth.bootstrap`) so the service stays reachable. Setting this
+    # `False` revokes that identity's credential (but keeps the user and its
+    # `external_identities` row, for audit-log attribution) once a real Admin account
+    # exists — it does not prevent the bootstrap identity from ever being created.
+    bootstrap_admin_enabled: bool = True
+    password: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
+
+    @field_validator("api_token")
+    @classmethod
+    def _validate_token_strength(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return value
+        raw = value.get_secret_value()
+        if not _TOKEN_CHARSET.match(raw):
+            raise ValueError(
+                "api_token must contain only letters, digits, '-' and '_' (the same "
+                "alphabet a securely generated token uses) — generate one with e.g. "
+                '`python -c "import secrets; print(secrets.token_urlsafe(32))"`'
+            )
+        entropy = _token_entropy_bits_per_char(raw)
+        if entropy < _TOKEN_MIN_ENTROPY_BITS_PER_CHAR:
+            raise ValueError(
+                f"api_token looks too predictable ({entropy:.2f} bits/char of its own "
+                f"character distribution, need >= {_TOKEN_MIN_ENTROPY_BITS_PER_CHAR}) "
+                "— use a securely generated random token, not a human-chosen or "
+                "padded/repeated one"
+            )
+        return value
 
 
 # Holds an explicit `load_settings(config_file=...)` override for the duration of that
@@ -355,23 +440,29 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:
-        """Hard refusal (issue #5): a non-loopback bind with auth disabled must never
-        boot. Raised as `ConfigError` directly rather than `ValueError` — this is a
-        model-level check (`loc = ()`), which `_format_validation_error`'s
-        `_toml_location` call can't render (it assumes a field path). Same pattern
-        `_AnsinaTomlSource` already uses for the secret-in-TOML refusal below.
+        """Hard refusal (issue #5, updated by #24): a non-loopback bind with auth
+        disabled must never boot. Raised as `ConfigError` directly rather than
+        `ValueError` — this is a model-level check (`loc = ()`), which
+        `_format_validation_error`'s `_toml_location` call can't render (it assumes a
+        field path). Same pattern `_AnsinaTomlSource` already uses for the
+        secret-in-TOML refusal below.
+
+        Keyed on `security.enabled`, not on whether `api_token` happens to be set:
+        issue #24 makes an explicit config token optional even when auth *is*
+        enabled (Ansina generates its own bootstrap token instead) — `api_token is
+        None` is no longer synonymous with "no authentication."
 
         Runs on every `Settings` construction path (`load_settings()`, env vars, direct
         kwargs), so this can't be bypassed by skipping `load_settings()`.
         """
-        if self.security.api_token is None and not _is_loopback(self.server.host):
+        if not self.security.enabled and not _is_loopback(self.server.host):
             raise ConfigError(
                 _render_report(
                     [
                         f"server.host: refusing to start — bound to "
-                        f"{self.server.host!r} (not loopback) with no api_token "
-                        "configured; set ANSINA_SECURITY__API_TOKEN or bind "
-                        "[server] host back to 127.0.0.1"
+                        f"{self.server.host!r} (not loopback) with "
+                        "security.enabled = false; set ANSINA_SECURITY__ENABLED=true "
+                        "or bind [server] host back to 127.0.0.1"
                     ]
                 )
             )

@@ -7,6 +7,7 @@ Never imports `ansina.api` internals (blueprint §5) — this is the gate that a
 from __future__ import annotations
 
 import os
+import re
 import signal
 import socket
 import sqlite3
@@ -24,8 +25,11 @@ import pytest
 _STARTUP_TIMEOUT_S = 15.0
 _POLL_INTERVAL_S = 0.1
 
-# Long enough to clear `SecuritySettings.api_token`'s `min_length=16`.
-_E2E_TOKEN = "e2e-test-token-0123456789"
+# Long enough and high-entropy enough to clear `SecuritySettings.api_token`'s
+# strength bar (>=32 chars, base64url charset, >=2.5 bits/char) — see
+# `config/settings.py`'s `_TOKEN_MIN_LENGTH`/`_TOKEN_CHARSET`/
+# `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
+_E2E_TOKEN = "e2e-test-token-0123456789abcdefghij"
 
 
 def _free_port() -> int:
@@ -106,14 +110,23 @@ def _launch_server(
 
 @pytest.fixture
 def server(tmp_path: Path) -> Iterator[str]:
-    """No ANSINA_SECURITY__API_TOKEN — auth disabled, every route reachable."""
-    with _launch_server(tmp_path) as srv:
+    """`ANSINA_SECURITY__ENABLED=false` — auth disabled, every route reachable.
+
+    Since issue #24, an *unset* `ANSINA_SECURITY__API_TOKEN` no longer implies "no
+    auth" — `security.enabled` defaults to `true` and Ansina would instead
+    auto-generate and enforce its own bootstrap token — so dev mode has to be
+    requested explicitly here.
+    """
+    with _launch_server(tmp_path, env={"ANSINA_SECURITY__ENABLED": "false"}) as srv:
         yield srv.base_url
 
 
 @pytest.fixture
 def authed_server(tmp_path: Path) -> Iterator[str]:
-    """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced."""
+    """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced via that
+    operator-supplied override, not the auto-generated path (see
+    `test_bootstrap_token_is_generated_printed_once_and_authenticates` for that one).
+    """
     with _launch_server(
         tmp_path, env={"ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN}
     ) as srv:
@@ -225,11 +238,92 @@ def test_authed_protected_route_accepts_valid_token(authed_server: str) -> None:
     assert response.json()["name"] == "ansina"
 
 
+def test_bootstrap_token_is_generated_printed_once_and_authenticates(
+    tmp_path: Path,
+) -> None:
+    """Issue #24 (redesign): first boot with `security.enabled` at its default
+    (`true`) and no `ANSINA_SECURITY__API_TOKEN` configured auto-generates a
+    bootstrap token, prints it to stdout exactly once, and that token immediately
+    authenticates a real request — the whole generate -> print -> DB-backed-verify
+    chain working end to end, not just its pieces in isolation.
+
+    Captures the child's combined stdout/stderr to a file rather than a pipe:
+    reading a live process's stdout pipe risks blocking on buffering, where a file
+    can be read at any time without coordinating with the writer.
+    """
+    port = _free_port()
+    (tmp_path / "ansina.toml").write_text(
+        f'[server]\nhost = "127.0.0.1"\nport = {port}\n'
+        f'[database]\npath = "{(tmp_path / "ansina.db").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "server-output.log"
+    base_url = f"http://127.0.0.1:{port}"
+
+    with output_path.open("w", encoding="utf-8") as output_file:
+        process = subprocess.Popen(  # fixed argv, no shell, no untrusted input
+            [sys.executable, "-m", "ansina"],
+            cwd=tmp_path,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            env=os.environ,
+        )
+        try:
+            deadline = time.monotonic() + _STARTUP_TIMEOUT_S
+            last_error: Exception | None = None
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    pytest.fail(
+                        f"ansina exited early (code {process.returncode}):\n"
+                        f"{output_path.read_text(encoding='utf-8')}"
+                    )
+                try:
+                    response = httpx.get(f"{base_url}/healthz", timeout=1.0)
+                    if response.status_code == 200:
+                        break
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                time.sleep(_POLL_INTERVAL_S)
+            else:
+                process.kill()
+                raise TimeoutError(f"ansina never became healthy: {last_error}")
+
+            output = output_path.read_text(encoding="utf-8")
+            # The banner's token line (see `ansina.auth.bootstrap._BANNER`): exactly
+            # three leading spaces, nothing else on the line.
+            match = re.search(r"^   (\S+)$", output, re.MULTILINE)
+            assert match is not None, f"bootstrap token banner not found:\n{output}"
+            token = match.group(1)
+
+            response = httpx.get(
+                f"{base_url}/version", headers={"Authorization": f"Bearer {token}"}
+            )
+            assert response.status_code == 200
+            assert response.json()["name"] == "ansina"
+
+            response = httpx.get(
+                f"{base_url}/version",
+                headers={"Authorization": f"Bearer {token}x"},
+            )
+            assert response.status_code == 401
+
+            # The raw token appears exactly once in the entire captured output — the
+            # banner itself — never inside a JSON log line alongside it.
+            assert output.count(token) == 1
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_migration_survives_a_restart(tmp_path: Path) -> None:
     """A real, black-box run of issue #6's acceptance criteria: on first boot the
     database file is created and migrated, and a second boot against the same file
-    does not re-apply migration 0001 — checked from outside the process, via a plain
-    `sqlite3` connection to the file the server wrote.
+    does not re-apply already-applied migrations — checked from outside the process,
+    via a plain `sqlite3` connection to the file the server wrote.
     """
     with _launch_server(tmp_path) as srv:
         response = httpx.get(f"{srv.base_url}/readyz")
@@ -241,7 +335,10 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
         assert journal_mode.lower() == "wal"
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
-        assert rows == [(1,)]
+        # (1,) = storage's own bookkeeping table (issue #6); (2,) = the RBAC identity
+        # model (issue #24) — bump this alongside `storage/migrations/` whenever a new
+        # migration lands.
+        assert rows == [(1,), (2,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -250,7 +347,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
-        assert rows == [(1,)]  # still exactly one row — 0001 was not re-applied
+        assert rows == [(1,), (2,)]  # still exactly these rows — nothing re-applied
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:

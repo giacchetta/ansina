@@ -4,30 +4,17 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ansina.api.auth import _extract_bearer_token, verify_token
-
-
-def test_verify_token_accepts_matching_values() -> None:
-    assert verify_token("matching-token-01234", "matching-token-01234") is True
-
-
-def test_verify_token_rejects_differing_values() -> None:
-    assert verify_token("wrong-token-0123456789", "right-token-0123456789") is False
-
-
-def test_verify_token_rejects_unequal_length_values() -> None:
-    assert verify_token("short-token-01234x", "short-token-01234") is False
-    assert verify_token("short-token-0123", "short-token-01234") is False
-
-
-def test_verify_token_rejects_shared_prefix_candidate() -> None:
-    # Differs only in the final character — a length- or prefix-based short-circuit
-    # would still get this wrong; only a true constant-time comparison rejects it.
-    expected = "shared-prefix-token-0"
-    candidate = expected[:-1] + "9"
-    assert verify_token(candidate, expected) is False
+from ansina.api.auth import _extract_bearer_token
+from ansina.auth.models import CredentialType, SubjectType
+from ansina.auth.repositories import (
+    CredentialRepository,
+    RoleAssignmentRepository,
+    RoleRepository,
+    UserRepository,
+)
 
 
 def test_extract_bearer_token_rejects_undecodable_bytes() -> None:
@@ -110,8 +97,8 @@ def test_malformed_or_missing_credentials_are_rejected(
     assert response.json()["code"] == "ansina.unauthorized"
 
 
-def test_no_token_configured_disables_auth(client: TestClient) -> None:
-    """`client`/`app` (no ANSINA_SECURITY__API_TOKEN set) — every route reachable."""
+def test_auth_disabled_lets_every_route_through(client: TestClient) -> None:
+    """`client`/`app` (`ANSINA_SECURITY__ENABLED=false`) — every route reachable."""
     for path in ("/healthz", "/readyz", "/version", "/openapi.json"):
         assert client.get(path).status_code == 200
 
@@ -138,3 +125,50 @@ def test_rejected_request_is_still_access_logged(
         and entry.get("extra", {}).get("status_code") == 401
         for entry in logs
     )
+
+
+def test_verification_is_db_backed_not_a_single_static_secret(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """Issue #24's redesign: `BearerAuthMiddleware` checks *any* active `credentials`
+    row, not one static configured value — proven by minting a second user's token
+    directly against the same database the running app is using and confirming it
+    authenticates too, alongside the bootstrap token `authed_client` already proves.
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("second-user")
+    role = RoleRepository(db).get_by_slug("admin")
+    assert role is not None
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+    CredentialRepository(db).create_api_token(user.id, "a-second-users-own-token")
+
+    response = authed_client.get(
+        "/version", headers={"Authorization": "Bearer a-second-users-own-token"}
+    )
+
+    assert response.status_code == 200
+
+
+def test_revoking_a_credential_rejects_its_token_on_the_next_request(
+    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+) -> None:
+    # Sanity: the token works before revocation.
+    assert (
+        authed_client.get(
+            "/version", headers={"Authorization": f"Bearer {authed_token}"}
+        ).status_code
+        == 200
+    )
+
+    db = authed_app.state.db
+    bootstrap_user = UserRepository(db).get_by_username("bootstrap-admin")
+    assert bootstrap_user is not None
+    CredentialRepository(db).delete_credentials(
+        bootstrap_user.id, CredentialType.API_TOKEN
+    )
+
+    response = authed_client.get(
+        "/version", headers={"Authorization": f"Bearer {authed_token}"}
+    )
+
+    assert response.status_code == 401

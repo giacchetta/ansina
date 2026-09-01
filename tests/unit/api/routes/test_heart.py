@@ -77,6 +77,10 @@ def heart_enabled_app(
     monkeypatch: pytest.MonkeyPatch,
     fake_tick_loop: _FakeTickLoop,
 ) -> FastAPI:
+    # Auth disabled (dev mode) — this fixture is for exercising heart-tick route
+    # behavior, not authentication (see `authed_client` for the deny-by-default
+    # tests above). Since issue #24, an unset api_token no longer implies "no auth."
+    monkeypatch.setenv("ANSINA_SECURITY__ENABLED", "false")
     monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
     settings = load_settings()
     return create_app(

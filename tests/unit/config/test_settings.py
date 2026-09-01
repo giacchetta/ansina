@@ -4,7 +4,12 @@ import pytest
 from pydantic import ValidationError
 
 from ansina.config import ConfigError, load_settings
-from ansina.config.settings import ServerSettings, _unwrap_model
+from ansina.config.settings import (
+    SecuritySettings,
+    ServerSettings,
+    _token_entropy_bits_per_char,
+    _unwrap_model,
+)
 
 
 def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
@@ -15,7 +20,12 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.server.port == 8000
     assert settings.logging.level == "INFO"
     assert settings.database.path == tmp_cwd / "ansina.db"
+    assert settings.security.enabled is True
     assert settings.security.api_token is None
+    assert settings.security.bootstrap_admin_enabled is True
+    assert settings.security.password.time_cost == 3
+    assert settings.security.password.memory_cost_kib == 65536
+    assert settings.security.password.parallelism == 4
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"
     assert settings.heart.model_path is None
@@ -126,30 +136,37 @@ def test_secret_in_toml_file_rejected(clean_env: None, tmp_cwd: Path) -> None:
     assert "leaked-token" not in message
 
 
+# A value that clears `SecuritySettings`'s strength bar (>=32 chars, base64url
+# charset, >=2.5 bits/char of its own character-distribution entropy) — see
+# `config/settings.py`'s `_TOKEN_MIN_LENGTH`/`_TOKEN_CHARSET`/
+# `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
+_STRONG_TOKEN = "s3cr3t-value-0123456789-abcdefgh"
+
+
 def test_secret_via_env_loads_and_never_appears_in_text(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value-0123")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
 
     settings = load_settings()
 
     assert settings.security.api_token is not None
-    assert settings.security.api_token.get_secret_value() == "s3cr3t-value-0123"
-    assert "s3cr3t-value-0123" not in repr(settings)
-    assert "s3cr3t-value-0123" not in str(settings)
+    assert settings.security.api_token.get_secret_value() == _STRONG_TOKEN
+    assert _STRONG_TOKEN not in repr(settings)
+    assert _STRONG_TOKEN not in str(settings)
 
 
 def test_secret_not_leaked_in_error_report_for_sibling_failure(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value-0123")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
     toml_path = tmp_cwd / "ansina.toml"
     toml_path.write_text('[server]\nport = "eighty"\n', encoding="utf-8")
 
     with pytest.raises(ConfigError) as exc_info:
         load_settings()
 
-    assert "s3cr3t-value-0123" not in str(exc_info.value)
+    assert _STRONG_TOKEN not in str(exc_info.value)
 
 
 def test_short_api_token_rejected(
@@ -165,9 +182,92 @@ def test_short_api_token_rejected(
     assert "too-short" not in message
 
 
-def test_non_loopback_bind_without_token_refuses_to_start(
+def test_bad_charset_api_token_rejected(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A long, high-entropy value is still rejected if it isn't URL-safe-base64-shaped
+    — e.g. a copy-pasted human phrase with spaces/punctuation."""
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__API_TOKEN", "Hello, World! this has punctuation & spaces 42"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "security.api_token" in message
+    assert "letters, digits" in message
+
+
+def test_low_entropy_api_token_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Long enough (32 chars) and charset-clean, but a 2-character repeating
+    pattern — rejected on entropy, not length or charset."""
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "ab" * 16)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "security.api_token" in message
+    assert "too predictable" in message
+
+
+def test_token_entropy_of_empty_string_is_zero() -> None:
+    """Guards `_validate_token_strength` against a division by zero — unreachable via
+    `load_settings()` today (the `min_length` constraint rejects an empty token before
+    the entropy check ever runs), but this is a general-purpose helper, not a
+    single-call-site inline detail, so it must behave sanely called directly too.
+    """
+    assert _token_entropy_bits_per_char("") == 0.0
+
+
+def test_security_settings_accepts_an_explicit_none_token() -> None:
+    """`_validate_token_strength`'s `value is None` branch — not reachable via
+    `load_settings()` (an *absent* env var means "use the default," which pydantic
+    never routes through this validator; only an *explicitly provided* value is), but
+    `SecuritySettings` can still be constructed directly with `api_token=None`.
+    """
+    settings = SecuritySettings(api_token=None)
+
+    assert settings.api_token is None
+
+
+def test_strong_api_token_accepted(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
+
+    settings = load_settings()
+
+    assert settings.security.api_token is not None
+    assert settings.security.api_token.get_secret_value() == _STRONG_TOKEN
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "127.0.0.53"])
+def test_loopback_hosts_with_auth_disabled_boot_fine(
+    host: str, clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_refuse_unsafe_bind`'s check short-circuits on `security.enabled` — `
+    _is_loopback` is only ever reached when auth is disabled, so this is the path
+    that actually exercises every loopback spelling (not
+    `test_loopback_hosts_without_token_load` above, which runs with the `True`
+    default and never reaches it at all).
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__ENABLED", "false")
+    monkeypatch.setenv("ANSINA_SERVER__HOST", host)
+
+    settings = load_settings()
+
+    assert settings.security.enabled is False
+    assert settings.server.host == host
+
+
+def test_non_loopback_bind_with_auth_disabled_refuses_to_start(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ENABLED", "false")
     monkeypatch.setenv("ANSINA_SERVER__HOST", "0.0.0.0")
 
     with pytest.raises(ConfigError) as exc_info:
@@ -175,14 +275,31 @@ def test_non_loopback_bind_without_token_refuses_to_start(
 
     message = str(exc_info.value)
     assert "server.host" in message
-    assert "ANSINA_SECURITY__API_TOKEN" in message
+    assert "ANSINA_SECURITY__ENABLED" in message
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "", "::", "not-an-ip-or-localhost"])
+def test_non_loopback_hosts_boot_fine_with_default_settings(
+    host: str, clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike the pre-#24 model, `api_token` being unset no longer means "no auth" —
+    Ansina generates its own bootstrap token (`ansina.auth.bootstrap`) — so a
+    non-loopback bind with `security.enabled` left at its `True` default and no
+    explicit override is safe and must not be refused.
+    """
+    monkeypatch.setenv("ANSINA_SERVER__HOST", host)
+
+    settings = load_settings()
+
+    assert settings.security.enabled is True
+    assert settings.security.api_token is None
 
 
 def test_non_loopback_bind_with_token_loads(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANSINA_SERVER__HOST", "0.0.0.0")
-    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "s3cr3t-value-0123")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
 
     settings = load_settings()
 
@@ -201,9 +318,10 @@ def test_loopback_hosts_without_token_load(
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "", "::", "not-an-ip-or-localhost"])
-def test_non_loopback_hosts_without_token_refuse_to_start(
+def test_non_loopback_hosts_with_auth_disabled_refuse_to_start(
     host: str, clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ENABLED", "false")
     monkeypatch.setenv("ANSINA_SERVER__HOST", host)
 
     with pytest.raises(ConfigError):

@@ -24,6 +24,14 @@ uv run ansina       # serves on http://127.0.0.1:8000
 curl localhost:8000/healthz
 ```
 
+First run prints a bootstrap Admin API token **once** — copy it now, it's never shown or stored in plaintext again:
+
+```bash
+uv run ansina        # look for the banner, then Ctrl-C
+export TOKEN=<the token from the banner>
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
+```
+
 ## 🔌 API
 
 | Route | Auth | Purpose |
@@ -35,7 +43,7 @@ curl localhost:8000/healthz
 | `POST /heart/tick/pause` | token | Kill switch — halts future ticks without a process restart. |
 | `POST /heart/tick/resume` | token | Undoes `/heart/tick/pause`. |
 
-`PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default. In dev mode (no `ANSINA_SECURITY__API_TOKEN` set), auth is disabled entirely, so `/version` returns 200 without a token; once a token is configured, a missing/wrong one gets a 401 `problem+json`.
+`PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default. Auth is enforced by default: on first boot Ansina generates and prints its own bootstrap API token (or hashes an operator-supplied `ANSINA_SECURITY__API_TOKEN` instead, if one is set); a missing/wrong token gets a 401 `problem+json`. `ANSINA_SECURITY__ENABLED=false` disables auth entirely (loopback-only) for local dev — `/version` then returns 200 without a token.
 
 ## ⚙️ Configuration
 
