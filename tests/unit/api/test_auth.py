@@ -4,17 +4,20 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from ansina.api.auth import _extract_bearer_token
-from ansina.auth.models import CredentialType, SubjectType
+from ansina.api.auth import BearerAuthMiddleware, _extract_bearer_token
+from ansina.api.exception_handlers import ansina_error_handler
+from ansina.auth.models import CredentialType, SubjectType, User
+from ansina.auth.principal import AuthMethod
 from ansina.auth.repositories import (
     CredentialRepository,
     RoleAssignmentRepository,
     RoleRepository,
     UserRepository,
 )
+from ansina.errors import AnsinaError
 
 
 def test_extract_bearer_token_rejects_undecodable_bytes() -> None:
@@ -172,3 +175,88 @@ def test_revoking_a_credential_rejects_its_token_on_the_next_request(
     )
 
     assert response.status_code == 401
+
+
+def test_an_inactive_users_token_no_longer_authenticates(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """Issue #25: `resolve_principal` rejects an inactive user's token even though
+    `find_user_by_api_token` itself doesn't filter on `users.active` — the one
+    deliberate addition beyond formalizing #24's lookup.
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("disabled-user")
+    role = RoleRepository(db).get_by_slug("admin")
+    assert role is not None
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+    CredentialRepository(db).create_api_token(user.id, "disabled-user-token")
+    UserRepository(db).set_active(user.id, active=False)
+
+    response = authed_client.get(
+        "/version", headers={"Authorization": "Bearer disabled-user-token"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_a_read_role_user_gets_403_on_a_mutating_route_before_route_logic_runs(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """Authorization (issue #25) runs as a route dependency, ahead of the handler
+    body — a `Read`-role caller gets 403 on `POST /heart/tick/pause` even though the
+    Heart is disabled (which would otherwise 503), because it never reaches that code.
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("reader")
+    role = RoleRepository(db).get_by_slug("read")
+    assert role is not None
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+    CredentialRepository(db).create_api_token(user.id, "reader-token")
+
+    response = authed_client.post(
+        "/heart/tick/pause", headers={"Authorization": "Bearer reader-token"}
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ansina.forbidden"
+
+
+def test_middleware_authenticators_param_is_real_dependency_injection(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """The `authenticators` constructor param (issue #25's formalized chain) is
+    exercised end to end: a tiny standalone app wired with one custom `Authenticator`
+    (never touching `ApiTokenAuthenticator`) authenticates a token only that member
+    recognizes, and the resulting `Principal` lands on `request.state` for a handler
+    to read — proving `BearerAuthMiddleware` now runs through the chain, not an
+    inline lookup of its own.
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("custom-chain-user")
+
+    class _AlwaysMatchAuthenticator:
+        method = AuthMethod.API_TOKEN
+
+        def authenticate(self, credential: str) -> User | None:
+            return user if credential == "custom-secret" else None
+
+    app = FastAPI()
+    app.add_middleware(
+        BearerAuthMiddleware,
+        enabled=True,
+        db=db,
+        authenticators=(_AlwaysMatchAuthenticator(),),
+    )
+    app.add_exception_handler(AnsinaError, ansina_error_handler)
+
+    @app.get("/ping")
+    async def ping(request: Request) -> dict[str, str]:
+        return {"actor": request.state.principal.actor}
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/ping", headers={"Authorization": "Bearer custom-secret"})
+
+    assert response.status_code == 200
+    assert response.json() == {"actor": "custom-chain-user"}

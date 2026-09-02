@@ -5,6 +5,11 @@ an error spine that maps every failure (`AnsinaError`, HTTP errors, validation e
 unhandled exceptions) to `application/problem+json`, and the SQLite connection +
 migration lifecycle from issue #6. Every later endpoint plugs into this shape rather
 than growing its own.
+
+Issue #25 adds one more mandatory step at the end of assembly: `audit_route_coverage`
+walks every registered route and refuses to build the app at all if any non-public one
+lacks a `require(...)` authorization declaration — the same "fail loudly before uvicorn
+binds a port" pattern `HeartUnavailableError`/`BrainUnavailableError` already use.
 """
 
 from __future__ import annotations
@@ -26,10 +31,11 @@ from ansina.api.exception_handlers import (
 )
 from ansina.api.middleware import RequestIdMiddleware
 from ansina.api.readiness import Readiness
+from ansina.api.route_audit import audit_route_coverage
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
+from ansina.api.routes.openapi import router as openapi_router
 from ansina.auth import ensure_bootstrap_admin, reconcile_builtin_roles, sync_resources
-from ansina.auth.policy import BOOTSTRAP_RESOURCES
 from ansina.brain import BrainProvider, build_brain_provider
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
@@ -103,14 +109,15 @@ def create_app(
         logger.info("ansina starting up")
         db.connect()
         run_migrations(db)
-        # RBAC identity/permission foundation (issue #24): catalog the known resources,
+        # RBAC identity/permission foundation (issue #24, catalog source replaced by
+        # #25): catalog the resources the route-coverage audit already extracted below,
         # reconcile the builtin roles' grants against that catalog, then resolve the
         # configured api_token to a bootstrap Admin identity — in that order, since a
         # role can't be granted a resource that isn't catalogued yet, and the bootstrap
         # identity can't be assigned the "admin" role before it exists. No dedicated
         # `/readyz` check: `database` already covers the only failure mode this could
         # have, the same reasoning already recorded for why the Brain has none.
-        sync_resources(db, BOOTSTRAP_RESOURCES)
+        sync_resources(db, _app.state.resource_specs)
         reconcile_builtin_roles(db)
         ensure_bootstrap_admin(db, resolved_settings)
         readiness.register("database", db.is_healthy)
@@ -142,6 +149,16 @@ def create_app(
         title="Ansina",
         version=__version__,
         lifespan=lifespan,
+        # FastAPI's default `/openapi.json`/`/docs`/`/redoc`/`/docs/oauth2-redirect`
+        # are plain Starlette routes that can't carry a `require(...)` dependency, so
+        # the route-coverage audit below could never see them — and `/docs`/`/redoc`
+        # are non-functional with auth enabled regardless (no `fastapi.security`
+        # scheme is declared for Swagger UI's "Authorize" button, since auth here is
+        # middleware-level). `routes/openapi.py` serves `/openapi.json` as a real,
+        # gated `APIRoute` instead; nothing re-serves the HTML viewers.
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
     )
     app.state.settings = resolved_settings
     app.state.readiness = readiness
@@ -168,5 +185,13 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(heart_router)
+    app.include_router(openapi_router)
+
+    # Issue #25: refuses to boot (`RouteCoverageError`, before uvicorn ever binds a
+    # port — same "fail loudly" shape as `HeartUnavailableError`) if any non-public
+    # route above lacks a `require(...)` declaration. The surviving declarations are
+    # also the `resources` catalog's entire source (see `lifespan`'s `sync_resources`
+    # call), replacing issue #24's hand-written `BOOTSTRAP_RESOURCES` seed.
+    app.state.resource_specs = audit_route_coverage(app)
 
     return app

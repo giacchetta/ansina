@@ -3,21 +3,11 @@ from __future__ import annotations
 import pytest
 
 from ansina.auth.models import RoleSlug, Verb
-from ansina.auth.policy import (
-    BOOTSTRAP_RESOURCES,
-    BUILTIN_ROLES,
-    is_sensitive_resource,
-    permitted_verbs,
-)
+from ansina.auth.policy import BUILTIN_ROLES, is_sensitive_resource, permitted_verbs
 
 
 def test_builtin_roles_cover_exactly_the_four_slugs() -> None:
     assert {spec.slug for spec in BUILTIN_ROLES} == set(RoleSlug)
-
-
-def test_bootstrap_resources_have_unique_names() -> None:
-    names = [spec.name for spec in BOOTSTRAP_RESOURCES]
-    assert len(names) == len(set(names))
 
 
 @pytest.mark.parametrize(

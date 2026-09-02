@@ -1,6 +1,7 @@
 """Bearer-token enforcement — the internal API boundary from issue #5, extended by
 issue #24 to check the RBAC identity model's `credentials` table instead of a single
-static config secret.
+static config secret, and by issue #25 to resolve a full `Principal` (not just "some
+identity exists") through a formal `Authenticator` chain.
 
 Pure ASGI middleware (`__call__(scope, receive, send)`), not
 `starlette.BaseHTTPMiddleware`, for the same reason `RequestIdMiddleware` is: that class
@@ -22,11 +23,12 @@ from typing import TYPE_CHECKING
 import anyio.to_thread
 
 from ansina.api.problems import CODE_UNAUTHORIZED, problem_response
-from ansina.auth.repositories import CredentialRepository
+from ansina.auth.authenticator import build_authenticators, resolve_principal
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
 
+    from ansina.auth.authenticator import Authenticator
     from ansina.storage.database import Database
 
 # Reachable with no token, even when auth is enabled. Everything else is
@@ -61,27 +63,39 @@ def _extract_bearer_token(scope: Scope) -> str | None:
 
 class BearerAuthMiddleware:
     """Rejects any non-`PUBLIC_PATHS` request that doesn't carry a currently-active
-    API-token credential.
+    credential, and resolves the matched identity into a full `Principal` (issue #25)
+    attached to `scope["state"]["principal"]` for `ansina.api.authorization.require()`
+    to read back — every route past this middleware runs with a `Principal` already on
+    request state, or never runs at all.
 
     `enabled=False` (`Settings.security.enabled`) disables authentication outright —
-    every request passes through. `config.settings.Settings` refuses to construct at
-    all when that's paired with a non-loopback bind (`Settings._refuse_unsafe_bind`),
-    so a disabled-auth app is never reachable off the local machine.
+    every request passes through with no `Principal` resolved. `config.settings.
+    Settings` refuses to construct at all when that's paired with a non-loopback bind
+    (`Settings._refuse_unsafe_bind`), so a disabled-auth app is never reachable off the
+    local machine.
 
-    Verification is DB-backed (`ansina.auth.repositories.CredentialRepository
-    .find_user_by_api_token`) rather than a comparison against a single static config
-    secret — issue #24's bootstrap token is generated once and never stored in config
-    at all, so config-based comparison can't work for it. This is a minimal slice of
-    issue #25's planned `Authenticator` chain pulled forward; #25 builds the richer
-    `Principal`/roles-aware `require()` dependency on top of this same lookup — this
-    middleware only ever answers "is there *any* identity this token belongs to,"
-    never "what can it do."
+    Verification runs through an `Authenticator` chain (`authenticators`, default
+    `ansina.auth.authenticator.build_authenticators`) rather than a comparison against
+    a single static config secret — issue #24's bootstrap token is generated once and
+    never stored in config at all, so config-based comparison can't work for it. Issue
+    #24 shipped this as one inline DB lookup; #25 formalizes it as this chain so a
+    follow-up milestone's federated-login authenticator is an append, not a rewrite.
     """
 
-    def __init__(self, app: ASGIApp, *, enabled: bool, db: Database) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        enabled: bool,
+        db: Database,
+        authenticators: tuple[Authenticator, ...] | None = None,
+    ) -> None:
         self._app = app
         self._enabled = enabled
         self._db = db
+        self._authenticators = (
+            authenticators if authenticators is not None else build_authenticators(db)
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
@@ -93,22 +107,21 @@ class BearerAuthMiddleware:
             return
 
         provided = _extract_bearer_token(scope)
-        user = None
+        principal = None
         if provided is not None:
             # Blocking sqlite I/O plus a per-row salted-hash comparison — offloaded to
             # a worker thread so it never blocks the event loop for other in-flight
             # requests. `Database` already hands out one connection per thread by
             # design (see `storage/database.py`), so a worker thread reused across
             # requests keeps and reuses its own connection rather than reopening one.
-            credentials = CredentialRepository(self._db)
-            user = await anyio.to_thread.run_sync(
-                credentials.find_user_by_api_token, provided
+            principal = await anyio.to_thread.run_sync(
+                resolve_principal, self._db, self._authenticators, provided
             )
 
-        if user is None:
-            # Missing header, malformed header, and an unrecognized token all take this
-            # one path — no oracle that would let a caller distinguish "no token sent"
-            # from "wrong token sent" from response shape or content.
+        if principal is None:
+            # Missing header, malformed header, an unrecognized token, and an inactive
+            # user's token all take this one path — no oracle that would let a caller
+            # distinguish any of those from response shape or content.
             response = problem_response(
                 status=401,
                 code=CODE_UNAUTHORIZED,
@@ -119,4 +132,5 @@ class BearerAuthMiddleware:
             await response(scope, receive, send)
             return
 
+        scope.setdefault("state", {})["principal"] = principal
         await self._app(scope, receive, send)

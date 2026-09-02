@@ -4,14 +4,20 @@ Ansina's first non-health routes: deny-by-default already covers them (they're n
 `api/auth.py`'s `PUBLIC_PATHS`), so every one of these requires the bearer token once
 one is configured. This is the kill switch the issue asks for — an operator can halt or
 restart the tick loop without a process restart.
+
+All three share one `heart.tick` resource (issue #25's `require(...)`): a `Read`-role
+caller gets `GET /heart/tick` but 403s on the two `POST` routes; `Write`/`Maintain`/
+`Admin` get all three.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.params import Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ansina.api.authorization import require
 from ansina.api.problems import CODE_HEART_DISABLED, problem_response
 from ansina.heart.tick import TickController, TickDecision
 
@@ -21,6 +27,21 @@ _DISABLED_DETAIL = (
     "the Heart is disabled ([heart] enabled = false) — there is no tick loop to report "
     "on or control"
 )
+
+_RESOURCE = "heart.tick"
+_DESCRIPTION = "The autonomic tick loop's status and pause/resume."
+
+
+def _require_tick() -> Depends:
+    """A fresh `require(...)` dependency per route — one call site per route, like
+    every other router in this codebase, rather than one `Depends` instance shared
+    across the three routes below. Constructs `fastapi.params.Depends` directly rather
+    than through the `fastapi.Depends` factory used everywhere else in the codebase —
+    that factory is typed to return `Any` (for annotation convenience at a route
+    decorator's `Depends(...)` call site), which defeats this function's own explicit
+    return type under `mypy --strict`.
+    """
+    return Depends(require(_RESOURCE, description=_DESCRIPTION))
 
 
 class TickStatus(BaseModel):
@@ -57,6 +78,7 @@ def _disabled_response() -> JSONResponse:
         200: {"model": TickStatus},
         503: {"description": "The Heart is disabled — no tick loop exists."},
     },
+    dependencies=[_require_tick()],
 )
 async def get_tick_status(request: Request) -> TickStatus | JSONResponse:
     tick_loop = _get_tick_loop(request)
@@ -79,6 +101,7 @@ async def get_tick_status(request: Request) -> TickStatus | JSONResponse:
         200: {"model": PauseResult},
         503: {"description": "The Heart is disabled — no tick loop exists."},
     },
+    dependencies=[_require_tick()],
 )
 async def pause_tick_loop(request: Request) -> PauseResult | JSONResponse:
     tick_loop = _get_tick_loop(request)
@@ -95,6 +118,7 @@ async def pause_tick_loop(request: Request) -> PauseResult | JSONResponse:
         200: {"model": PauseResult},
         503: {"description": "The Heart is disabled — no tick loop exists."},
     },
+    dependencies=[_require_tick()],
 )
 async def resume_tick_loop(request: Request) -> PauseResult | JSONResponse:
     tick_loop = _get_tick_loop(request)

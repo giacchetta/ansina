@@ -84,24 +84,14 @@ BUILTIN_ROLES: tuple[RoleSpec, ...] = (
 class ResourceSpec:
     """One catalogued resource's seed data. Consumed by
     `auth.reconciler.sync_resources`.
+
+    Issue #24 seeded this from a hand-written constant (`BOOTSTRAP_RESOURCES`); issue
+    #25 replaces that source with `ansina.api.route_audit.audit_route_coverage`'s real
+    `app.routes` walk — every route's own `require(resource, description=...)`
+    declaration becomes one `ResourceSpec`, so the catalog can never drift from the
+    actual surface. `sync_resources`'s contract (make `resources` match the given specs
+    exactly) is unchanged.
     """
 
     name: str
     description: str
-
-
-# The real surface as of issue #24: `/version` and the Heart tick routes (issue #11),
-# plus the `auth.*` management resources #27 will expose routes for. Issue #25 replaces
-# this constant as the catalog's source, walking `app.routes` instead — this is
-# deliberately real, observable seed data now rather than a no-op placeholder.
-BOOTSTRAP_RESOURCES: tuple[ResourceSpec, ...] = (
-    ResourceSpec("system.version", "GET /version — build/version metadata."),
-    ResourceSpec("heart.tick", "The autonomic tick loop's status and pause/resume."),
-    ResourceSpec("auth.users", "User account management."),
-    ResourceSpec("auth.groups", "Group management."),
-    ResourceSpec(
-        "auth.roles", "Role listing (builtin roles are read-only, issue #27)."
-    ),
-    ResourceSpec("auth.role_assignments", "Attaching/detaching a role to a subject."),
-    ResourceSpec("auth.permissions", "The resource/verb discovery catalog."),
-)

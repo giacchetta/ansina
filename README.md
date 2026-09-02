@@ -9,8 +9,9 @@
 ```mermaid
 flowchart LR
     Client["Client"] -->|Bearer token| MW["RequestIdMiddleware"]
-    MW --> Auth["BearerAuthMiddleware"]
-    Auth --> Routes["/healthz · /readyz · /version<br/>/heart/tick[/pause|/resume]"]
+    MW --> Auth["BearerAuthMiddleware<br/>(401 · resolves Principal)"]
+    Auth --> Authz["require(resource)<br/>(403 · role check)"]
+    Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]"]
     Routes --> DB[("SQLite<br/>WAL")]
     Routes --> Tick["TickLoop<br/>(idle / act / escalate)"]
     Routes -.error.-> Problem["RFC 9457<br/>problem+json"]
@@ -34,16 +35,19 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
 
 ## 🔌 API
 
-| Route | Auth | Purpose |
-|---|---|---|
-| `GET /healthz` | public | Liveness only — 200 unconditionally, never consults readiness. |
-| `GET /readyz` | public | 200 `ready` with per-check booleans, or 503 `problem+json` if any check fails. |
-| `GET /version` | token | Name + version. |
-| `GET /heart/tick` | token | Tick loop status: running, paused, tick count, last decision. 503 `problem+json` if the Heart is disabled. |
-| `POST /heart/tick/pause` | token | Kill switch — halts future ticks without a process restart. |
-| `POST /heart/tick/resume` | token | Undoes `/heart/tick/pause`. |
+| Route | Auth | Min role | Purpose |
+|---|---|---|---|
+| `GET /healthz` | public | — | Liveness only — 200 unconditionally, never consults readiness. |
+| `GET /readyz` | public | — | 200 `ready` with per-check booleans, or 503 `problem+json` if any check fails. |
+| `GET /version` | token | Read | Name + version. |
+| `GET /openapi.json` | token | Read | The OpenAPI contract document — no `/docs`/`/redoc` HTML viewer is served; point any external OpenAPI UI at a fetched copy of this JSON instead. |
+| `GET /heart/tick` | token | Read | Tick loop status: running, paused, tick count, last decision. 503 `problem+json` if the Heart is disabled. |
+| `POST /heart/tick/pause` | token | Write | Kill switch — halts future ticks without a process restart. |
+| `POST /heart/tick/resume` | token | Write | Undoes `/heart/tick/pause`. |
 
-`PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default. Auth is enforced by default: on first boot Ansina generates and prints its own bootstrap API token (or hashes an operator-supplied `ANSINA_SECURITY__API_TOKEN` instead, if one is set); a missing/wrong token gets a 401 `problem+json`. `ANSINA_SECURITY__ENABLED=false` disables auth entirely (loopback-only) for local dev — `/version` then returns 200 without a token.
+`PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default at both layers: **authentication** (a valid bearer token identifying *some* user — 401 `problem+json`, `ansina.unauthorized`) and, per user role, **authorization** (that user's role holding a grant for this route's resource and HTTP verb — 403 `problem+json`, `ansina.forbidden`). Four fixed roles, increasing in scope: `Read` (GET only) → `Write` (+POST/PUT/PATCH) → `Maintain`/`Admin` (+DELETE and the RBAC management surface). A route with no `require(...)` authorization declaration fails to boot at all — the same "fail loudly before uvicorn binds a port" gate `HeartUnavailableError` uses — so a new endpoint can never ship ungated by accident.
+
+Auth is enforced by default: on first boot Ansina generates and prints its own bootstrap API token, assigned the `Admin` role (or hashes an operator-supplied `ANSINA_SECURITY__API_TOKEN` instead, if one is set); a missing/wrong token gets a 401. `ANSINA_SECURITY__ENABLED=false` disables both authentication and authorization entirely (loopback-only) for local dev — `/version` then returns 200 without a token.
 
 ## ⚙️ Configuration
 

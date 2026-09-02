@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -8,6 +8,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ansina.api.app import create_app
+from ansina.auth.models import SubjectType
+from ansina.auth.repositories import (
+    CredentialRepository,
+    RoleAssignmentRepository,
+    RoleRepository,
+    UserRepository,
+)
 from ansina.config import load_settings
 
 # Long enough and high-entropy enough to clear `SecuritySettings.api_token`'s
@@ -56,3 +63,26 @@ def authed_app(
 def authed_client(authed_app: FastAPI) -> Iterator[TestClient]:
     with TestClient(authed_app, raise_server_exceptions=False) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def token_for_role(authed_app: FastAPI) -> Callable[[str], str]:
+    """A factory minting a fresh user + token holding exactly one builtin role, on
+    `authed_app`'s own database — the shape `tests/unit/api/test_authorization.py`
+    reuses for every "does role X get verb Y" case instead of hand-rolling the
+    create-user/assign-role/create-token sequence per test.
+    """
+    counter = iter(range(1, 1_000))
+
+    def _mint(role_slug: str) -> str:
+        db = authed_app.state.db
+        username = f"{role_slug}-user-{next(counter)}"
+        token = f"{username}-token"
+        user = UserRepository(db).create(username)
+        role = RoleRepository(db).get_by_slug(role_slug)
+        assert role is not None, f"unknown builtin role slug: {role_slug!r}"
+        RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+        CredentialRepository(db).create_api_token(user.id, token)
+        return token
+
+    return _mint

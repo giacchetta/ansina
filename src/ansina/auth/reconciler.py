@@ -26,8 +26,9 @@ def sync_resources(db: Database, specs: tuple[ResourceSpec, ...]) -> None:
     `role_permissions` rows (`ON DELETE CASCADE`) — the catalog is derived data, so a
     resource that's no longer declared loses its grants along with it.
 
-    Issue #24 calls this with `auth.policy.BOOTSTRAP_RESOURCES`; issue #25 replaces that
-    argument with a real `app.routes` walk — this function's contract doesn't change.
+    Issue #24 called this with a hand-written `BOOTSTRAP_RESOURCES` constant; issue #25
+    replaced that argument with `ansina.api.route_audit.audit_route_coverage`'s real
+    `app.routes` walk — this function's own contract didn't change either time.
     """
     resources = ResourceRepository(db)
     wanted = {spec.name: spec.description for spec in specs}

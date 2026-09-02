@@ -9,15 +9,19 @@ needs to wait.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ansina import __version__
+from ansina.api.authorization import require
 from ansina.api.problems import CODE_NOT_READY, problem_response
 from ansina.api.readiness import Readiness
 
 router = APIRouter()
+
+_VERSION_RESOURCE = "system.version"
+_VERSION_DESCRIPTION = "GET /version — build/version metadata."
 
 
 class HealthStatus(BaseModel):
@@ -65,6 +69,12 @@ async def readyz(request: Request) -> ReadyStatus | JSONResponse:
     )
 
 
-@router.get("/version", response_model=VersionInfo)
+@router.get(
+    "/version",
+    response_model=VersionInfo,
+    dependencies=[
+        Depends(require(_VERSION_RESOURCE, description=_VERSION_DESCRIPTION))
+    ],
+)
 async def version() -> VersionInfo:
     return VersionInfo(name="ansina", version=__version__)

@@ -15,6 +15,7 @@ from typing import Any
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from ansina.auth.authorization import ForbiddenError, SudoRequiredError
 from ansina.errors import AnsinaError, ConfigurationError
 from ansina.logging import get_request_id
 
@@ -28,6 +29,8 @@ CODE_INTERNAL_ERROR = "ansina.internal_error"
 CODE_NOT_READY = "ansina.not_ready"
 CODE_UNAUTHORIZED = "ansina.unauthorized"
 CODE_HEART_DISABLED = "ansina.heart.disabled"
+CODE_FORBIDDEN = ForbiddenError.code
+CODE_SUDO_REQUIRED = SudoRequiredError.code
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
@@ -35,6 +38,10 @@ CODE_HEART_DISABLED = "ansina.heart.disabled"
 _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     AnsinaError: 500,
     ConfigurationError: 500,
+    # 403s, distinguishable from CODE_UNAUTHORIZED (401, no/invalid identity) by
+    # `code` alone — neither leaks which credential component was wrong.
+    ForbiddenError: 403,
+    SudoRequiredError: 403,
 }
 
 

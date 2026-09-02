@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,6 +22,14 @@ from pathlib import Path
 
 import httpx
 import pytest
+
+# The one exception to this module's "never import `ansina.api` internals" rule
+# (blueprint §5): `ansina.auth.hashing` is the domain-layer credential-hashing
+# scheme, not an API-layer internal — reusing it here to seed a token directly into
+# the running server's SQLite file means this test never re-implements salted-SHA256
+# by hand, and fails loudly (an import error, not a silently-wrong hash) if that
+# scheme ever changes shape.
+from ansina.auth.hashing import hash_token, new_token_salt
 
 _STARTUP_TIMEOUT_S = 15.0
 _POLL_INTERVAL_S = 0.1
@@ -30,6 +39,7 @@ _POLL_INTERVAL_S = 0.1
 # `config/settings.py`'s `_TOKEN_MIN_LENGTH`/`_TOKEN_CHARSET`/
 # `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
 _E2E_TOKEN = "e2e-test-token-0123456789abcdefghij"
+_E2E_READ_TOKEN = "e2e-read-role-token-0123456789abcd"
 
 
 def _free_port() -> int:
@@ -181,6 +191,19 @@ def test_openapi_schema(server: str) -> None:
     }
 
 
+def test_docs_and_redoc_are_gone(server: str) -> None:
+    """Issue #25: `create_app` disables FastAPI's default `/docs`/`/redoc`/`/docs/
+    oauth2-redirect` — plain Starlette routes that can't carry a `require(...)`
+    authorization declaration, and non-functional with auth enabled regardless (no
+    `fastapi.security` scheme is declared for Swagger UI's "Authorize" button to use).
+    `/openapi.json` (`test_openapi_schema`) is the one FastAPI default kept, re-served
+    as a gated route of our own.
+    """
+    assert httpx.get(f"{server}/docs").status_code == 404
+    assert httpx.get(f"{server}/redoc").status_code == 404
+    assert httpx.get(f"{server}/docs/oauth2-redirect").status_code == 404
+
+
 def test_request_id_is_echoed(server: str) -> None:
     response = httpx.get(f"{server}/healthz", headers={"X-Request-ID": "e2e-trace"})
 
@@ -236,6 +259,60 @@ def test_authed_protected_route_accepts_valid_token(authed_server: str) -> None:
 
     assert response.status_code == 200
     assert response.json()["name"] == "ansina"
+
+
+def test_read_role_token_progresses_401_then_403_then_200(
+    authed_server: str, tmp_path: Path
+) -> None:
+    """Issue #25's acceptance criterion, black-box end to end: no token is 401, a
+    `Read`-role token gets 403 on a mutating route it holds no grant for, and 200 on a
+    `GET` it does. `tmp_path` is the same directory `authed_server`'s own fixture
+    already launched the server against (pytest caches a function-scoped fixture once
+    per test), so `ansina.db` is the real file the running process is reading and
+    writing — the user is seeded directly into it via plain `sqlite3`, the same
+    technique `test_migration_survives_a_restart` already uses, plus `ansina.auth.
+    hashing` for the credential hash (see this module's docstring for why that one
+    import is allowed).
+    """
+    db_path = tmp_path / "ansina.db"
+    salt = new_token_salt()
+    token_hash = hash_token(_E2E_READ_TOKEN, salt)
+    with sqlite3.connect(db_path) as conn:
+        user_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO users (id, username) VALUES (?, ?)", (user_id, "e2e-reader")
+        )
+        (role_id,) = conn.execute("SELECT id FROM roles WHERE slug = 'read'").fetchone()
+        conn.execute(
+            "INSERT INTO role_assignments (id, subject_type, subject_id, role_id) "
+            "VALUES (?, 'user', ?, ?)",
+            (uuid.uuid4().hex, user_id, role_id),
+        )
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash, salt) "
+            "VALUES (?, ?, 'api_token', ?, ?)",
+            (uuid.uuid4().hex, user_id, token_hash, salt),
+        )
+        conn.commit()
+
+    # 401: no token at all.
+    no_token_response = httpx.post(f"{authed_server}/heart/tick/pause")
+    assert no_token_response.status_code == 401
+    assert no_token_response.json()["code"] == "ansina.unauthorized"
+
+    # 403: a valid Read-role token, but Read holds no grant for POST.
+    read_headers = {"Authorization": f"Bearer {_E2E_READ_TOKEN}"}
+    forbidden_response = httpx.post(
+        f"{authed_server}/heart/tick/pause", headers=read_headers
+    )
+    assert forbidden_response.status_code == 403
+    assert forbidden_response.headers["content-type"] == "application/problem+json"
+    assert forbidden_response.json()["code"] == "ansina.forbidden"
+
+    # 200: the same token, on the GET verb Read does grant.
+    ok_response = httpx.get(f"{authed_server}/version", headers=read_headers)
+    assert ok_response.status_code == 200
+    assert ok_response.json()["name"] == "ansina"
 
 
 def test_bootstrap_token_is_generated_printed_once_and_authenticates(
