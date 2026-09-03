@@ -8,7 +8,7 @@ talks to the database or to FastAPI — this module is pure data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from ansina.auth.models import User
@@ -29,8 +29,8 @@ class Principal:
     or reachable via group membership (`RoleAssignmentRepository.roles_for_user`, issue
     #24's union query, built for exactly this).
 
-    `sudo_active` is always `False` here — issue #25 ships the field so #26's sudo
-    step-up has somewhere to set it without touching every caller of this dataclass.
+    `sudo_active` is always `False` until issue #26's `BearerAuthMiddleware` extension
+    resolves a live `X-Sudo-Token` header into a grant and calls `with_sudo()` below.
     """
 
     user: User
@@ -38,8 +38,16 @@ class Principal:
     role_slugs: frozenset[str] = field(default_factory=frozenset)
     auth_method: AuthMethod = AuthMethod.API_TOKEN
     sudo_active: bool = False
+    sudo_grant_id: str | None = None
 
     @property
     def actor(self) -> str:
         """The identity to record in an audit log line — the caller's username."""
         return self.user.username
+
+    def with_sudo(self, grant_id: str) -> Principal:
+        """A copy of this `Principal` elevated by a live sudo grant (issue #26) —
+        `auth.authorization.authorize()`'s `sensitive=True` branch reads `sudo_active`
+        back; `api.authorization.require()`'s audit log line reads `sudo_grant_id`.
+        """
+        return replace(self, sudo_active=True, sudo_grant_id=grant_id)

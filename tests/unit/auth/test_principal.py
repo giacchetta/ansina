@@ -23,4 +23,16 @@ def test_defaults_are_api_token_and_no_live_sudo() -> None:
 
     assert principal.auth_method is AuthMethod.API_TOKEN
     assert principal.sudo_active is False
+    assert principal.sudo_grant_id is None
     assert principal.role_slugs == frozenset()
+
+
+def test_with_sudo_elevates_without_mutating_the_original() -> None:
+    principal = Principal(user=_USER, role_ids=frozenset({"role-1"}))
+
+    elevated = principal.with_sudo("grant-1")
+
+    assert elevated.sudo_active is True
+    assert elevated.sudo_grant_id == "grant-1"
+    assert principal.sudo_active is False
+    assert principal.sudo_grant_id is None

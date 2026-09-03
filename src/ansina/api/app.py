@@ -35,7 +35,13 @@ from ansina.api.route_audit import audit_route_coverage
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
 from ansina.api.routes.openapi import router as openapi_router
-from ansina.auth import ensure_bootstrap_admin, reconcile_builtin_roles, sync_resources
+from ansina.api.routes.sudo import router as sudo_router
+from ansina.auth import (
+    build_sudo_service,
+    ensure_bootstrap_admin,
+    reconcile_builtin_roles,
+    sync_resources,
+)
 from ansina.brain import BrainProvider, build_brain_provider
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
@@ -79,6 +85,10 @@ def create_app(
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
     db = Database(resolved_settings.database.path)
+    # Issue #26: no boot-time failure mode of its own (unlike heart/brain below) —
+    # built unconditionally, always available at `app.state.sudo` for both
+    # `BearerAuthMiddleware` (grant resolution) and `routes/sudo.py` (issuance).
+    sudo = build_sudo_service(db, resolved_settings)
 
     # Built here, not inside `lifespan`, so a `HeartUnavailableError` (issue #10) is
     # raised while the app is still being assembled — before uvicorn ever binds a
@@ -166,6 +176,7 @@ def create_app(
     app.state.heart = heart
     app.state.tick_loop = tick_loop
     app.state.brain = brain
+    app.state.sudo = sudo
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
@@ -174,7 +185,10 @@ def create_app(
     # carries a real `request_id`, the response still echoes `X-Request-ID`, and the
     # "request completed" access-log line still fires for it.
     app.add_middleware(
-        BearerAuthMiddleware, enabled=resolved_settings.security.enabled, db=db
+        BearerAuthMiddleware,
+        enabled=resolved_settings.security.enabled,
+        db=db,
+        sudo=sudo,
     )
     app.add_middleware(RequestIdMiddleware)
 
@@ -186,6 +200,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(heart_router)
     app.include_router(openapi_router)
+    app.include_router(sudo_router)
 
     # Issue #25: refuses to boot (`RouteCoverageError`, before uvicorn ever binds a
     # port — same "fail loudly" shape as `HeartUnavailableError`) if any non-public

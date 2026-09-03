@@ -33,6 +33,8 @@ from ansina.auth.models import (
     RoleAssignment,
     RolePermission,
     SubjectType,
+    SudoGrant,
+    SudoLockout,
     User,
     Verb,
 )
@@ -543,6 +545,136 @@ class CredentialRepository:
                 )
                 return User.from_row(user_row) if user_row is not None else None
         return None
+
+
+class SudoGrantRepository:
+    """CRUD on `sudo_grants` (issue #26). Timestamps are always caller-supplied ISO
+    8601 strings (`auth.sudo.SudoService`'s injectable clock) — never a SQL-side
+    `now`, so grant issuance and expiry stay driven by whatever clock the caller
+    passes, real or fake.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def create(
+        self,
+        user_id: str,
+        raw_token: str,
+        verifier: str,
+        *,
+        issued_at: str,
+        expires_at: str,
+    ) -> SudoGrant:
+        """Replaces any existing grant for `user_id` — one active grant per user, so
+        a re-step-up replaces rather than accumulates and `DELETE /auth/sudo` always
+        has exactly one unambiguous grant to revoke.
+        """
+        salt = new_token_salt()
+        token_hash = hash_token(raw_token, salt)
+        grant_id = _new_id()
+        with self._db.transaction() as cursor:
+            cursor.execute("DELETE FROM sudo_grants WHERE user_id = ?", (user_id,))
+            cursor.execute(
+                """
+                INSERT INTO sudo_grants
+                    (id, user_id, hash, salt, verifier, issued_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (grant_id, user_id, token_hash, salt, verifier, issued_at, expires_at),
+            )
+            row = cursor.execute(
+                "SELECT * FROM sudo_grants WHERE id = ?", (grant_id,)
+            ).fetchone()
+        return SudoGrant.from_row(row)
+
+    def find_active(self, user_id: str, token: str, *, now: str) -> SudoGrant | None:
+        """The caller's own live grant, or `None` if it's missing, revoked, expired,
+        or the presented token doesn't match. Scoped to `user_id` — the principal is
+        already resolved by the time this runs, so unlike `CredentialRepository.
+        find_user_by_api_token` there is no need to scan every user's grants.
+        """
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT * FROM sudo_grants WHERE user_id = ? "
+                "AND revoked_at IS NULL AND expires_at > ?",
+                (user_id, now),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        grant = SudoGrant.from_row(row)
+        if not verify_token_hash(token, grant.salt, grant.hash):
+            return None
+        return grant
+
+    def revoke_for_user(self, user_id: str, *, now: str) -> None:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE sudo_grants SET revoked_at = ? "
+                "WHERE user_id = ? AND revoked_at IS NULL",
+                (now, user_id),
+            )
+
+    def revoke_all(self, *, now: str) -> None:
+        """The break-glass path (`DELETE /auth/sudo/grants`) — revokes every user's
+        active grant, including the caller's own.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE sudo_grants SET revoked_at = ? WHERE revoked_at IS NULL",
+                (now,),
+            )
+
+
+class SudoLockoutRepository:
+    """CRUD on `sudo_lockouts` (issue #26) — at most one row per user. The lockout
+    arithmetic itself (when to reset, when to lock) lives in `auth.sudo.SudoService`;
+    this repository only persists whatever it decides.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def get(self, user_id: str) -> SudoLockout | None:
+        row = (
+            self._db.connection()
+            .execute("SELECT * FROM sudo_lockouts WHERE user_id = ?", (user_id,))
+            .fetchone()
+        )
+        return SudoLockout.from_row(row) if row is not None else None
+
+    def set(
+        self,
+        user_id: str,
+        *,
+        failed_count: int,
+        first_failed_at: str | None,
+        locked_until: str | None,
+    ) -> SudoLockout:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO sudo_lockouts
+                    (user_id, failed_count, first_failed_at, locked_until)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    failed_count = excluded.failed_count,
+                    first_failed_at = excluded.first_failed_at,
+                    locked_until = excluded.locked_until
+                """,
+                (user_id, failed_count, first_failed_at, locked_until),
+            )
+            row = cursor.execute(
+                "SELECT * FROM sudo_lockouts WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        return SudoLockout.from_row(row)
+
+    def clear(self, user_id: str) -> None:
+        with self._db.transaction() as cursor:
+            cursor.execute("DELETE FROM sudo_lockouts WHERE user_id = ?", (user_id,))
 
 
 class ExternalIdentityRepository:

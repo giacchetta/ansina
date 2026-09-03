@@ -72,6 +72,17 @@ def test_salt_key_value_is_redacted() -> None:
     assert "0123456789abcdef0123456789abcdef" not in result
 
 
+def test_sudo_token_header_key_value_is_redacted() -> None:
+    """Issue #26: `x-sudo-token: <value>` needs no new pattern — the existing
+    `token`-keyed assignment pattern already matches it (the hyphen before `token` is
+    a non-word boundary, so `\\btoken` matches inside `x-sudo-token` the same way it
+    already matches inside `Authorization: Bearer`).
+    """
+    result = redact("x-sudo-token: abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ")
+    assert "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ" not in result
+    assert result == "x-sudo-token: ***"
+
+
 def test_argon2_phc_hash_is_redacted_wherever_it_appears() -> None:
     """Not just after a recognized key name — issue #24's redaction test covers a raw
     PHC-format hash landing in a log line via an exception message or row dump too.

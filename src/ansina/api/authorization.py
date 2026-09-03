@@ -76,11 +76,15 @@ def require(
 
         verb = _VERB_BY_METHOD.get(request.method)
         db: Database = request.app.state.db
-        log_extra = {
+        log_extra: dict[str, str] = {
             "actor": principal.actor,
             "resource": resource,
             "verb": request.method,
         }
+        if principal.sudo_grant_id is not None:
+            # Issue #26 AC: "every sensitive action taken under a grant is logged
+            # with the grant id" — never the grant token itself.
+            log_extra["sudo_grant_id"] = principal.sudo_grant_id
         if verb is None:
             # No route in this codebase answers a method outside Verb today (Starlette
             # itself 405s an unregistered method before any dependency runs) — this is

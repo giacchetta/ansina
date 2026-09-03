@@ -8,10 +8,10 @@
 
 ```mermaid
 flowchart LR
-    Client["Client"] -->|Bearer token| MW["RequestIdMiddleware"]
-    MW --> Auth["BearerAuthMiddleware<br/>(401 · resolves Principal)"]
-    Auth --> Authz["require(resource)<br/>(403 · role check)"]
-    Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]"]
+    Client["Client"] -->|Bearer token<br/>+ optional X-Sudo-Token| MW["RequestIdMiddleware"]
+    MW --> Auth["BearerAuthMiddleware<br/>(401 · resolves Principal,<br/>elevates on a live grant)"]
+    Auth --> Authz["require(resource)<br/>(403 · role check ·<br/>sudo_required)"]
+    Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]<br/>/auth/sudo[/grants]"]
     Routes --> DB[("SQLite<br/>WAL")]
     Routes --> Tick["TickLoop<br/>(idle / act / escalate)"]
     Routes -.error.-> Problem["RFC 9457<br/>problem+json"]
@@ -44,10 +44,15 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
 | `GET /heart/tick` | token | Read | Tick loop status: running, paused, tick count, last decision. 503 `problem+json` if the Heart is disabled. |
 | `POST /heart/tick/pause` | token | Write | Kill switch — halts future ticks without a process restart. |
 | `POST /heart/tick/resume` | token | Write | Undoes `/heart/tick/pause`. |
+| `POST /auth/sudo` | token | Maintain | Step up: re-verify your password, get back a short-lived sudo grant token. |
+| `DELETE /auth/sudo` | token | Maintain | Revoke your own active sudo grant early. |
+| `DELETE /auth/sudo/grants` | token (+ sudo for `Maintain`) | Maintain | Break-glass — revokes *every* user's active sudo grant. |
 
 `PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default at both layers: **authentication** (a valid bearer token identifying *some* user — 401 `problem+json`, `ansina.unauthorized`) and, per user role, **authorization** (that user's role holding a grant for this route's resource and HTTP verb — 403 `problem+json`, `ansina.forbidden`). Four fixed roles, increasing in scope: `Read` (GET only) → `Write` (+POST/PUT/PATCH) → `Maintain`/`Admin` (+DELETE and the RBAC management surface). A route with no `require(...)` authorization declaration fails to boot at all — the same "fail loudly before uvicorn binds a port" gate `HeartUnavailableError` uses — so a new endpoint can never ship ungated by accident.
 
 Auth is enforced by default: on first boot Ansina generates and prints its own bootstrap API token, assigned the `Admin` role (or hashes an operator-supplied `ANSINA_SECURITY__API_TOKEN` instead, if one is set); a missing/wrong token gets a 401. `ANSINA_SECURITY__ENABLED=false` disables both authentication and authorization entirely (loopback-only) for local dev — `/version` then returns 200 without a token.
+
+**Sudo step-up**, mirroring Linux `sudo`: `Admin` and `Maintain` hold identical role grants, but any request touching the identity/access-control surface (an `auth.*` resource marked `sensitive=True`) additionally requires `Maintain` to present a live sudo grant — `Admin` never does. Get one via `POST /auth/sudo` (body: `{"password": "..."}`, re-verified against your own account), then present the returned `token` as `X-Sudo-Token` on the sensitive call; a missing, wrong, expired, or revoked grant answers 403 `ansina.auth.sudo_required` rather than a misleading 401 — your bearer token is still fine, you just haven't stepped up. Grants expire after `[security.sudo] ttl_seconds` (default 10 minutes) and can be revoked early via `DELETE /auth/sudo`; five consecutive failed step-up attempts lock further attempts out for `lockout_seconds`, answering 429 with a `Retry-After` header. Verification itself sits behind a pluggable `StepUpVerifier` port — M2 ships password only, a future second factor is a new verifier, not a rewrite of the grant/TTL/revocation machinery.
 
 ## ⚙️ Configuration
 

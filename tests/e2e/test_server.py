@@ -29,7 +29,7 @@ import pytest
 # the running server's SQLite file means this test never re-implements salted-SHA256
 # by hand, and fails loudly (an import error, not a silently-wrong hash) if that
 # scheme ever changes shape.
-from ansina.auth.hashing import hash_token, new_token_salt
+from ansina.auth.hashing import Argon2Params, hash_password, hash_token, new_token_salt
 
 _STARTUP_TIMEOUT_S = 15.0
 _POLL_INTERVAL_S = 0.1
@@ -40,6 +40,13 @@ _POLL_INTERVAL_S = 0.1
 # `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
 _E2E_TOKEN = "e2e-test-token-0123456789abcdefghij"
 _E2E_READ_TOKEN = "e2e-read-role-token-0123456789abcd"
+_E2E_MAINTAIN_TOKEN = "e2e-maintain-role-token-0123456789ab"
+_E2E_MAINTAIN_PASSWORD = "correct horse battery staple e2e"
+# Cheap, test-only argon2id work factors (matches `tests/unit/auth/conftest.py`'s
+# `cheap_argon2` fixture) — the running server's own configured params never matter
+# for *verifying* this hash: argon2-cffi parses them back out of the PHC-format
+# string itself (see `ansina.auth.hashing`'s module docstring).
+_E2E_CHEAP_ARGON2 = Argon2Params(time_cost=1, memory_cost_kib=8, parallelism=1)
 
 
 def _free_port() -> int:
@@ -188,6 +195,8 @@ def test_openapi_schema(server: str) -> None:
         "/heart/tick",
         "/heart/tick/pause",
         "/heart/tick/resume",
+        "/auth/sudo",
+        "/auth/sudo/grants",
     }
 
 
@@ -315,6 +324,88 @@ def test_read_role_token_progresses_401_then_403_then_200(
     assert ok_response.json()["name"] == "ansina"
 
 
+def test_sudo_step_up_round_trip(authed_server: str, tmp_path: Path) -> None:
+    """Issue #26's headline AC, black-box end to end: a `Maintain` caller is refused
+    the sensitive break-glass route with no grant (403 `ansina.auth.sudo_required`),
+    obtains one via `POST /auth/sudo`, succeeds with it (204), and is refused again
+    once that grant is revoked — while an `Admin` token reaches the same route with no
+    grant at all. `Maintain`/password seeded directly into the running server's SQLite
+    file, the same technique `test_read_role_token_progresses_401_then_403_then_200`
+    already establishes.
+    """
+    db_path = tmp_path / "ansina.db"
+    salt = new_token_salt()
+    token_hash = hash_token(_E2E_MAINTAIN_TOKEN, salt)
+    password_hash = hash_password(_E2E_MAINTAIN_PASSWORD, _E2E_CHEAP_ARGON2)
+    with sqlite3.connect(db_path) as conn:
+        user_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO users (id, username) VALUES (?, ?)",
+            (user_id, "e2e-maintainer"),
+        )
+        (role_id,) = conn.execute(
+            "SELECT id FROM roles WHERE slug = 'maintain'"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO role_assignments (id, subject_type, subject_id, role_id) "
+            "VALUES (?, 'user', ?, ?)",
+            (uuid.uuid4().hex, user_id, role_id),
+        )
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash, salt) "
+            "VALUES (?, ?, 'api_token', ?, ?)",
+            (uuid.uuid4().hex, user_id, token_hash, salt),
+        )
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash, salt) "
+            "VALUES (?, ?, 'password', ?, NULL)",
+            (uuid.uuid4().hex, user_id, password_hash),
+        )
+        conn.commit()
+
+    maintain_headers = {"Authorization": f"Bearer {_E2E_MAINTAIN_TOKEN}"}
+
+    # 403: Maintain's role grants DELETE on auth.sudo.grants, but there's no live
+    # sudo grant yet.
+    no_grant_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants", headers=maintain_headers
+    )
+    assert no_grant_response.status_code == 403
+    assert no_grant_response.json()["code"] == "ansina.auth.sudo_required"
+
+    # Step up.
+    step_up_response = httpx.post(
+        f"{authed_server}/auth/sudo",
+        headers=maintain_headers,
+        json={"password": _E2E_MAINTAIN_PASSWORD},
+    )
+    assert step_up_response.status_code == 200
+    grant_token = step_up_response.json()["token"]
+
+    # 204: the same sensitive route, now presenting a live grant.
+    granted_headers = {**maintain_headers, "X-Sudo-Token": grant_token}
+    revoke_all_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants", headers=granted_headers
+    )
+    assert revoke_all_response.status_code == 204
+
+    # The break-glass call above revoked every active grant, including the one that
+    # just authorized it — presenting it again is refused.
+    again_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants", headers=granted_headers
+    )
+    assert again_response.status_code == 403
+    assert again_response.json()["code"] == "ansina.auth.sudo_required"
+
+    # Admin (the bootstrap identity `authed_server` already authenticates as via
+    # _E2E_TOKEN) reaches the same sensitive route with no grant at all, by design.
+    admin_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants",
+        headers={"Authorization": f"Bearer {_E2E_TOKEN}"},
+    )
+    assert admin_response.status_code == 204
+
+
 def test_bootstrap_token_is_generated_printed_once_and_authenticates(
     tmp_path: Path,
 ) -> None:
@@ -413,9 +504,9 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         assert journal_mode.lower() == "wal"
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # (1,) = storage's own bookkeeping table (issue #6); (2,) = the RBAC identity
-        # model (issue #24) — bump this alongside `storage/migrations/` whenever a new
-        # migration lands.
-        assert rows == [(1,), (2,)]
+        # model (issue #24); (3,) = sudo grants/lockouts (issue #26) — bump this
+        # alongside `storage/migrations/` whenever a new migration lands.
+        assert rows == [(1,), (2,), (3,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -424,7 +515,8 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
-        assert rows == [(1,), (2,)]  # still exactly these rows — nothing re-applied
+        # still exactly these rows — nothing re-applied
+        assert rows == [(1,), (2,), (3,)]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:

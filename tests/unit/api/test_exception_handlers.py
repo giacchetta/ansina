@@ -26,6 +26,10 @@ def _install_test_routes(app: FastAPI) -> None:
     async def _raise_ansina_error() -> None:
         raise _TeapotError("short and stout", details={"field": "spout"})
 
+    @app.get("/__test/rate-limited")
+    async def _raise_rate_limited() -> None:
+        raise _TeapotError("slow down", details={"retry_after_seconds": 42.7})
+
     @app.get("/__test/boom")
     async def _raise_unexpected() -> None:
         raise ValueError("something exploded")
@@ -47,6 +51,20 @@ def test_ansina_error_becomes_problem_json_with_stable_code(app: FastAPI) -> Non
     assert body["detail"] == "short and stout"
     assert body["field"] == "spout"
     assert "request_id" in body
+
+
+def test_retry_after_seconds_detail_becomes_a_real_header(app: FastAPI) -> None:
+    """Issue #26: `SudoLockedOutError` is the first `AnsinaError` shaped as a rate
+    limit — any `AnsinaError` carrying `details["retry_after_seconds"]` gets a real
+    `Retry-After` header alongside the body's own copy, for a client that honors the
+    header without parsing JSON.
+    """
+    _install_test_routes(app)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/__test/rate-limited")
+
+    assert response.headers["retry-after"] == "42"
+    assert response.json()["retry_after_seconds"] == 42.7
 
 
 def test_unknown_path_is_404_problem_json(client: TestClient) -> None:

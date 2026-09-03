@@ -114,6 +114,20 @@ time_cost = 3
 memory_cost_kib = 65536
 parallelism = 4
 
+[security.sudo]
+# Sudo step-up (issue #26): a Maintain caller must present a live grant on any
+# sensitive auth.* action (Admin never does). Get one via POST /auth/sudo (body:
+# {"password": "..."}), present it back as the X-Sudo-Token header.
+
+# How long an issued grant stays valid.
+ttl_seconds = 600.0
+
+# N consecutive failed step-up attempts within attempt_window_seconds locks further
+# attempts out for lockout_seconds (429 with a Retry-After header).
+max_failed_attempts = 5
+attempt_window_seconds = 300.0
+lockout_seconds = 900.0
+
 # api_token (issue #24) is an *optional* override of the auto-generated bootstrap
 # token above — e.g. for a scripted/orchestrated install or CI that needs a token
 # known ahead of time. Prefer letting Ansina generate its own; a manually-supplied

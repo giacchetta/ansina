@@ -14,6 +14,8 @@ from ansina.auth.repositories import (
     RoleAssignmentRepository,
     RolePermissionRepository,
     RoleRepository,
+    SudoGrantRepository,
+    SudoLockoutRepository,
     UnknownSubjectError,
     UserRepository,
 )
@@ -510,3 +512,136 @@ def test_external_identity_create_rejects_a_duplicate_provider_subject(
 
     with pytest.raises(DuplicateError, match="local"):
         identities.create(user.id, "local", "alice")
+
+
+# --- SudoGrantRepository ---------------------------------------------------------
+
+_EARLY = "2026-01-01T00:00:00.000Z"
+_LATE = "2026-01-01T00:10:00.000Z"
+
+
+def test_sudo_grant_create_and_find_active(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    grants = SudoGrantRepository(db)
+
+    grant = grants.create(
+        user.id, "a-real-grant", "password", issued_at=_EARLY, expires_at=_LATE
+    )
+
+    assert grant.verifier == "password"
+    assert grant.revoked_at is None
+    assert "a-real-grant" not in grant.hash
+    found = grants.find_active(user.id, "a-real-grant", now=_EARLY)
+    assert found is not None
+    assert found.id == grant.id
+
+
+def test_sudo_grant_find_active_rejects_a_wrong_token(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    grants = SudoGrantRepository(db)
+    grants.create(
+        user.id, "a-real-grant", "password", issued_at=_EARLY, expires_at=_LATE
+    )
+
+    assert grants.find_active(user.id, "a-wrong-grant", now=_EARLY) is None
+
+
+def test_sudo_grant_find_active_rejects_an_expired_grant(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    grants = SudoGrantRepository(db)
+    grants.create(
+        user.id, "a-real-grant", "password", issued_at=_EARLY, expires_at=_LATE
+    )
+
+    assert (
+        grants.find_active(user.id, "a-real-grant", now="2026-01-01T00:20:00.000Z")
+        is None
+    )
+
+
+def test_sudo_grant_find_active_scoped_to_the_given_user(db: Database) -> None:
+    grants = SudoGrantRepository(db)
+    alice = UserRepository(db).create("alice")
+    bob = UserRepository(db).create("bob")
+    grants.create(
+        alice.id, "alice-grant", "password", issued_at=_EARLY, expires_at=_LATE
+    )
+
+    assert grants.find_active(bob.id, "alice-grant", now=_EARLY) is None
+
+
+def test_sudo_grant_create_replaces_a_users_existing_grant(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    grants = SudoGrantRepository(db)
+    grants.create(
+        user.id, "first-grant", "password", issued_at=_EARLY, expires_at=_LATE
+    )
+
+    grants.create(
+        user.id, "second-grant", "password", issued_at=_EARLY, expires_at=_LATE
+    )
+
+    assert grants.find_active(user.id, "first-grant", now=_EARLY) is None
+    assert grants.find_active(user.id, "second-grant", now=_EARLY) is not None
+
+
+def test_sudo_grant_revoke_for_user(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    grants = SudoGrantRepository(db)
+    grants.create(user.id, "a-grant", "password", issued_at=_EARLY, expires_at=_LATE)
+
+    grants.revoke_for_user(user.id, now=_EARLY)
+
+    assert grants.find_active(user.id, "a-grant", now=_EARLY) is None
+
+
+def test_sudo_grant_revoke_all_revokes_every_users_grant(db: Database) -> None:
+    grants = SudoGrantRepository(db)
+    alice = UserRepository(db).create("alice")
+    bob = UserRepository(db).create("bob")
+    grants.create(
+        alice.id, "alice-grant", "password", issued_at=_EARLY, expires_at=_LATE
+    )
+    grants.create(bob.id, "bob-grant", "password", issued_at=_EARLY, expires_at=_LATE)
+
+    grants.revoke_all(now=_EARLY)
+
+    assert grants.find_active(alice.id, "alice-grant", now=_EARLY) is None
+    assert grants.find_active(bob.id, "bob-grant", now=_EARLY) is None
+
+
+# --- SudoLockoutRepository --------------------------------------------------------
+
+
+def test_sudo_lockout_get_of_unknown_user_returns_none(db: Database) -> None:
+    assert SudoLockoutRepository(db).get("nobody") is None
+
+
+def test_sudo_lockout_set_creates_and_updates(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    lockouts = SudoLockoutRepository(db)
+
+    lockouts.set(user.id, failed_count=1, first_failed_at=_EARLY, locked_until=None)
+    updated = lockouts.set(
+        user.id, failed_count=2, first_failed_at=_EARLY, locked_until=_LATE
+    )
+
+    assert updated.failed_count == 2
+    assert updated.locked_until == _LATE
+    fetched = lockouts.get(user.id)
+    assert fetched is not None
+    assert fetched.failed_count == 2
+
+
+def test_sudo_lockout_clear(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    lockouts = SudoLockoutRepository(db)
+    lockouts.set(user.id, failed_count=1, first_failed_at=_EARLY, locked_until=None)
+
+    lockouts.clear(user.id)
+
+    assert lockouts.get(user.id) is None
+
+
+def test_sudo_lockout_clear_of_unknown_user_is_a_no_op(db: Database) -> None:
+    SudoLockoutRepository(db).clear("nobody")

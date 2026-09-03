@@ -229,6 +229,59 @@ class Credential:
 
 
 @dataclass(frozen=True, slots=True)
+class SudoGrant:
+    """A row in `sudo_grants` (issue #26). `hash`/`salt` never carry the raw grant
+    token — same salted-SHA-256 scheme as an `api_token` `Credential` (see
+    `ansina.auth.hashing`). `verifier` names which `StepUpVerifier` satisfied the
+    step-up that issued this grant; `revoked_at` is `None` until `DELETE /auth/sudo`
+    (or the break-glass `DELETE /auth/sudo/grants`) revokes it early.
+    """
+
+    id: str
+    user_id: str
+    hash: str
+    salt: str
+    verifier: str
+    issued_at: str
+    expires_at: str
+    revoked_at: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Self:
+        return cls(
+            id=row["id"],
+            user_id=row["user_id"],
+            hash=row["hash"],
+            salt=row["salt"],
+            verifier=row["verifier"],
+            issued_at=row["issued_at"],
+            expires_at=row["expires_at"],
+            revoked_at=row["revoked_at"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SudoLockout:
+    """A row in `sudo_lockouts` (issue #26) — at most one per user. `locked_until`
+    is `None` until `failed_count` reaches `[security.sudo] max_failed_attempts`.
+    """
+
+    user_id: str
+    failed_count: int
+    first_failed_at: str | None
+    locked_until: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Self:
+        return cls(
+            user_id=row["user_id"],
+            failed_count=row["failed_count"],
+            first_failed_at=row["first_failed_at"],
+            locked_until=row["locked_until"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalIdentity:
     """A row in `external_identities`. Every M2-created user gets exactly one
     `provider="local"` row; the bootstrap admin (`auth.bootstrap`) gets

@@ -123,13 +123,18 @@ def _grant(
 
 
 def _principal(
-    role_ids: frozenset[str], role_slugs: frozenset[str], *, sudo_active: bool = False
+    role_ids: frozenset[str],
+    role_slugs: frozenset[str],
+    *,
+    sudo_active: bool = False,
+    sudo_grant_id: str | None = None,
 ) -> Principal:
     return Principal(
         user=_USER,
         role_ids=role_ids,
         role_slugs=role_slugs,
         sudo_active=sudo_active,
+        sudo_grant_id=sudo_grant_id,
     )
 
 
@@ -281,6 +286,30 @@ def test_authorization_decision_is_audit_logged(
         and entry["extra"]["code"] == "ansina.forbidden"
         for entry in denied
     )
+
+
+def test_sudo_grant_id_is_included_in_the_audit_log_line(
+    db: Database,
+    client_factory: Any,
+    captured_logs: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """Issue #26 AC: "every sensitive action taken under a grant is logged with the
+    grant id" — never the grant token itself.
+    """
+    role_id = _grant(db, RoleSlug.MAINTAIN, _SENSITIVE_RESOURCE, (Verb.GET,))
+    principal = _principal(
+        frozenset({role_id}),
+        frozenset({RoleSlug.MAINTAIN.value}),
+        sudo_active=True,
+        sudo_grant_id="grant-123",
+    )
+    client = client_factory({"tok": principal})
+
+    client.get("/sensitive-test", headers={"X-Test-Principal": "tok"})
+
+    logs = captured_logs()
+    granted = [entry for entry in logs if entry["message"] == "authorization granted"]
+    assert any(entry["extra"].get("sudo_grant_id") == "grant-123" for entry in granted)
 
 
 async def test_unmapped_verb_is_denied_fail_closed(db: Database) -> None:

@@ -26,6 +26,10 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.security.password.time_cost == 3
     assert settings.security.password.memory_cost_kib == 65536
     assert settings.security.password.parallelism == 4
+    assert settings.security.sudo.ttl_seconds == 600.0
+    assert settings.security.sudo.max_failed_attempts == 5
+    assert settings.security.sudo.attempt_window_seconds == 300.0
+    assert settings.security.sudo.lockout_seconds == 900.0
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"
     assert settings.heart.model_path is None

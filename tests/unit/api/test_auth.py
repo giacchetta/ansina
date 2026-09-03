@@ -7,7 +7,11 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from ansina.api.auth import BearerAuthMiddleware, _extract_bearer_token
+from ansina.api.auth import (
+    BearerAuthMiddleware,
+    _extract_bearer_token,
+    _extract_sudo_token,
+)
 from ansina.api.exception_handlers import ansina_error_handler
 from ansina.auth.models import CredentialType, SubjectType, User
 from ansina.auth.principal import AuthMethod
@@ -15,6 +19,7 @@ from ansina.auth.repositories import (
     CredentialRepository,
     RoleAssignmentRepository,
     RoleRepository,
+    SudoGrantRepository,
     UserRepository,
 )
 from ansina.errors import AnsinaError
@@ -24,6 +29,11 @@ def test_extract_bearer_token_rejects_undecodable_bytes() -> None:
     # Mirrors `test_extract_inbound_id_rejects_undecodable_bytes` in test_middleware.py.
     scope = {"headers": [(b"authorization", b"\xff\xfe")]}
     assert _extract_bearer_token(scope) is None
+
+
+def test_extract_sudo_token_rejects_undecodable_bytes() -> None:
+    scope = {"headers": [(b"x-sudo-token", b"\xff\xfe")]}
+    assert _extract_sudo_token(scope) is None
 
 
 @pytest.mark.parametrize("path", ["/healthz", "/readyz"])
@@ -260,3 +270,65 @@ def test_middleware_authenticators_param_is_real_dependency_injection(
 
     assert response.status_code == 200
     assert response.json() == {"actor": "custom-chain-user"}
+
+
+def test_valid_sudo_token_elevates_and_reaches_a_sensitive_route(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """Issue #26: `BearerAuthMiddleware` elevates a resolved `Principal` when a
+    live `X-Sudo-Token` accompanies it — proven against the real `DELETE /auth/sudo/
+    grants` sensitive route rather than a probe, so this also exercises `require(...,
+    sensitive=True)`'s own check end to end. The grant is seeded directly via
+    `SudoGrantRepository`, not `POST /auth/sudo` — issuance itself is `test_sudo.py`'s
+    and `test_routes/test_sudo.py`'s job; this test is only about the middleware
+    reading a grant back.
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("maintainer")
+    role = RoleRepository(db).get_by_slug("maintain")
+    assert role is not None
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+    CredentialRepository(db).create_api_token(user.id, "maintainer-token")
+    SudoGrantRepository(db).create(
+        user.id,
+        "a-live-sudo-grant",
+        "password",
+        issued_at="2026-01-01T00:00:00.000Z",
+        expires_at="2999-01-01T00:00:00.000Z",
+    )
+
+    response = authed_client.delete(
+        "/auth/sudo/grants",
+        headers={
+            "Authorization": "Bearer maintainer-token",
+            "X-Sudo-Token": "a-live-sudo-grant",
+        },
+    )
+
+    assert response.status_code == 204
+
+
+def test_a_wrong_sudo_token_does_not_elevate_and_stays_sudo_required(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """An unrecognized `X-Sudo-Token` deliberately never becomes a 401 by itself — the
+    caller's bearer token is still perfectly valid, it just fails to elevate, so a
+    sensitive route answers its own 403 `CODE_SUDO_REQUIRED`.
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("maintainer-2")
+    role = RoleRepository(db).get_by_slug("maintain")
+    assert role is not None
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+    CredentialRepository(db).create_api_token(user.id, "maintainer-2-token")
+
+    response = authed_client.delete(
+        "/auth/sudo/grants",
+        headers={
+            "Authorization": "Bearer maintainer-2-token",
+            "X-Sudo-Token": "not-a-real-grant",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ansina.auth.sudo_required"

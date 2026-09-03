@@ -199,6 +199,21 @@ class PasswordHashSettings(BaseModel):
     parallelism: int = Field(default=4, ge=1)
 
 
+class SudoSettings(BaseModel):
+    """Sudo step-up tuning for `ansina.auth.sudo.SudoService`, consumed by issue #26.
+
+    Defaults follow the issue's own stated numbers: a 10-minute grant, locked out
+    after 5 consecutive failures within a 5-minute window, for 15 minutes.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    ttl_seconds: float = Field(default=600.0, gt=0)
+    max_failed_attempts: int = Field(default=5, ge=1)
+    attempt_window_seconds: float = Field(default=300.0, gt=0)
+    lockout_seconds: float = Field(default=900.0, gt=0)
+
+
 _TOKEN_MIN_LENGTH = 32
 # The alphabet `secrets.token_urlsafe()`/`token_hex()` draw from — restricting a
 # manually-supplied token to it rejects any human-typed phrase (spaces, punctuation,
@@ -252,6 +267,7 @@ class SecuritySettings(BaseModel):
     # exists — it does not prevent the bootstrap identity from ever being created.
     bootstrap_admin_enabled: bool = True
     password: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
+    sudo: SudoSettings = Field(default_factory=SudoSettings)
 
     @field_validator("api_token")
     @classmethod

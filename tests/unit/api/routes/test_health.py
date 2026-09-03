@@ -33,6 +33,8 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/heart/tick",
         "/heart/tick/pause",
         "/heart/tick/resume",
+        "/auth/sudo",
+        "/auth/sudo/grants",
     }
 
 

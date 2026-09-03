@@ -24,16 +24,30 @@ from ansina.auth.authorization import ForbiddenError, SudoRequiredError, authori
 from ansina.auth.bootstrap import ensure_bootstrap_admin
 from ansina.auth.principal import AuthMethod, Principal
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
+from ansina.auth.step_up import (
+    PasswordStepUpVerifier,
+    StepUpRegistry,
+    StepUpVerifier,
+    build_step_up_verifiers,
+)
+from ansina.auth.sudo import SudoLockedOutError, SudoService, build_sudo_service
 
 __all__ = [
     "ApiTokenAuthenticator",
     "AuthMethod",
     "Authenticator",
     "ForbiddenError",
+    "PasswordStepUpVerifier",
     "Principal",
+    "StepUpRegistry",
+    "StepUpVerifier",
+    "SudoLockedOutError",
     "SudoRequiredError",
+    "SudoService",
     "authorize",
     "build_authenticators",
+    "build_step_up_verifiers",
+    "build_sudo_service",
     "ensure_bootstrap_admin",
     "reconcile_builtin_roles",
     "resolve_principal",
