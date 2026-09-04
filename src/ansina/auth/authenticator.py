@@ -66,7 +66,11 @@ def resolve_principal(
         user = authenticator.authenticate(credential)
         if user is None:
             continue
-        if not user.active:
+        if not user.active or user.deleted_at is not None:
+            # `deleted_at` (issue #27) is a one-way tombstone distinct from `active`'s
+            # suspend/resume flag — `UserRepository.soft_delete` already purges every
+            # credential a deleted user could authenticate with, but this check is the
+            # backstop against a hand-edited row (see the migration's own docstring).
             return None
         roles = RoleAssignmentRepository(db).roles_for_user(user.id)
         return Principal(

@@ -216,6 +216,26 @@ class RolePermissionRepository:
                 (role_id, resource, verb.value),
             )
 
+    def grants_for_roles(self, role_ids: frozenset[str]) -> frozenset[tuple[str, Verb]]:
+        """Every `(resource, verb)` pair granted to any of `role_ids` — the whole grant
+        set, not scoped to one resource like `effective_verbs`. Backs
+        `auth.management.assert_may_assign_role`'s self-escalation check: a caller may
+        only assign a role whose grant set is a subset of its own.
+        """
+        if not role_ids:
+            return frozenset()
+        placeholders = ",".join("?" for _ in role_ids)
+        rows = (
+            self._db.connection()
+            .execute(
+                f"SELECT DISTINCT resource, verb FROM role_permissions "
+                f"WHERE role_id IN ({placeholders})",
+                tuple(role_ids),
+            )
+            .fetchall()
+        )
+        return frozenset((row["resource"], Verb(row["verb"])) for row in rows)
+
     def effective_verbs(
         self, role_ids: frozenset[str], resource: str
     ) -> frozenset[Verb]:
@@ -313,6 +333,36 @@ class UserRepository:
                 "UPDATE users SET active = ? WHERE id = ?", (int(active), user_id)
             )
 
+    def set_display_name(self, user_id: str, display_name: str) -> None:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE users SET display_name = ? WHERE id = ?",
+                (display_name, user_id),
+            )
+
+    def soft_delete(self, user_id: str, *, deleted_at: str) -> None:
+        """The one-way tombstone (issue #27) — see `storage/migrations/
+        0004_user_tombstone.sql`. Sets `deleted_at` and `active = 0`, then destroys
+        every row that could ever grant this identity access again: its credentials,
+        role assignments, group memberships, and any live sudo grant. The `users` row
+        and its `external_identities` row are deliberately left in place so audit log
+        lines referring to this identity stay attributable. All in one transaction —
+        this must never leave a half-purged user.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE users SET active = 0, deleted_at = ? WHERE id = ?",
+                (deleted_at, user_id),
+            )
+            cursor.execute("DELETE FROM credentials WHERE user_id = ?", (user_id,))
+            cursor.execute(
+                "DELETE FROM role_assignments "
+                "WHERE subject_type = 'user' AND subject_id = ?",
+                (user_id,),
+            )
+            cursor.execute("DELETE FROM user_groups WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM sudo_grants WHERE user_id = ?", (user_id,))
+
 
 class GroupRepository:
     """CRUD on `"groups"` — always quoted (`GROUPS` is a SQLite keyword)."""
@@ -351,6 +401,29 @@ class GroupRepository:
         assert group is not None  # unreachable — just inserted, in a committed txn
         return group
 
+    def update(self, group_id: str, *, name: str, description: str) -> Group | None:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                'UPDATE "groups" SET name = ?, description = ? WHERE id = ?',
+                (name, description, group_id),
+            )
+        return self.get(group_id)
+
+    def delete(self, group_id: str) -> None:
+        """`user_groups` and `role_permissions`-adjacent rows referencing this group
+        via a foreign key cascade away on their own; `role_assignments` does not
+        (`subject_id` is deliberately not a foreign key — see the table comment in
+        `storage/migrations/0002_rbac.sql`), so this deletes those explicitly in the
+        same transaction.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM role_assignments "
+                "WHERE subject_type = 'group' AND subject_id = ?",
+                (group_id,),
+            )
+            cursor.execute('DELETE FROM "groups" WHERE id = ?', (group_id,))
+
     def add_member(self, group_id: str, user_id: str) -> None:
         with self._db.transaction() as cursor:
             cursor.execute(
@@ -358,6 +431,39 @@ class GroupRepository:
                 "ON CONFLICT (user_id, group_id) DO NOTHING",
                 (user_id, group_id),
             )
+
+    def remove_member(self, group_id: str, user_id: str) -> None:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM user_groups WHERE group_id = ? AND user_id = ?",
+                (group_id, user_id),
+            )
+
+    def list_members(self, group_id: str) -> list[User]:
+        rows = (
+            self._db.connection()
+            .execute(
+                "SELECT u.* FROM users u "
+                "JOIN user_groups ug ON ug.user_id = u.id "
+                "WHERE ug.group_id = ? ORDER BY u.username",
+                (group_id,),
+            )
+            .fetchall()
+        )
+        return [User.from_row(row) for row in rows]
+
+    def groups_for_user(self, user_id: str) -> list[Group]:
+        rows = (
+            self._db.connection()
+            .execute(
+                'SELECT g.* FROM "groups" g '
+                "JOIN user_groups ug ON ug.group_id = g.id "
+                "WHERE ug.user_id = ? ORDER BY g.slug",
+                (user_id,),
+            )
+            .fetchall()
+        )
+        return [Group.from_row(row) for row in rows]
 
 
 class RoleAssignmentRepository:
@@ -411,6 +517,59 @@ class RoleAssignmentRepository:
                 "WHERE subject_type = ? AND subject_id = ? AND role_id = ?",
                 (subject_type.value, subject_id, role_id),
             )
+
+    def list_for_subject(
+        self, subject_type: SubjectType, subject_id: str
+    ) -> list[Role]:
+        """Every role directly assigned to `subject_id` — unlike `roles_for_user`, this
+        does *not* follow group membership; it's the detail-view/guard query for "what
+        is assigned to this one subject row," not "what can this user reach."
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                """
+                SELECT r.* FROM roles r
+                JOIN role_assignments ra ON ra.role_id = r.id
+                WHERE ra.subject_type = ? AND ra.subject_id = ?
+                ORDER BY r.slug
+                """,
+                (subject_type.value, subject_id),
+            )
+            .fetchall()
+        )
+        return [Role.from_row(row) for row in rows]
+
+    def user_ids_with_role(self, role_id: str) -> frozenset[str]:
+        """Every active, non-deleted user who holds `role_id`, direct or via group
+        membership — the inverse of `roles_for_user`. Backs last-Admin protection
+        (`auth.management.assert_admin_remains`): a user who is already inactive or
+        deleted doesn't count as a living Admin to protect.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                """
+                SELECT DISTINCT u.id FROM users u
+                WHERE u.active = 1 AND u.deleted_at IS NULL
+                AND (
+                    u.id IN (
+                        SELECT subject_id FROM role_assignments
+                        WHERE subject_type = 'user' AND role_id = ?
+                    )
+                    OR u.id IN (
+                        SELECT ug.user_id FROM user_groups ug
+                        JOIN role_assignments ra
+                            ON ra.subject_type = 'group' AND ra.subject_id = ug.group_id
+                        WHERE ra.role_id = ?
+                    )
+                )
+                """,
+                (role_id, role_id),
+            )
+            .fetchall()
+        )
+        return frozenset(row["id"] for row in rows)
 
     def roles_for_user(self, user_id: str) -> list[Role]:
         """Every role reachable by `user_id`, direct or via group membership."""

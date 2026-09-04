@@ -149,6 +149,14 @@ Three additional Heart duties — request triage, context curation, structured e
 
 Mac Mini 2024, Apple M4, 16 GB unified memory — this is the deployment target and it shapes the adapter priority (MLX first). The Fedora/AMD-RX580 development machine is incidental and must not shape design decisions.
 
+### Identity & access control
+
+M2 (`src/ansina/auth/` + `api/authorization.py`/`api/route_audit.py`/`api/routes/{sudo,users,groups,role_assignments,roles,permissions}.py`) replaces the M0 single-shared-secret model with real identity and a permission model keyed on data, not code: **permissions are rows**, not an enum — the entire authorization question is "does one of the caller's roles hold a `role_permissions` row for (this resource, this verb)?", true for both the four builtin roles and any future admin-defined one. A resource is a stable, dotted, URL-independent name a route declares for itself (e.g. `heart.tick`, `auth.users`); a startup-time route-coverage audit walks every registered route and refuses to boot if any lacks exactly one such declaration, and that same walk is the resource catalog's only source — the catalog can never drift from what the API surface actually enforces.
+
+Four fixed roles, strictly increasing: `Read` (GET) → `Write` (+POST/PUT/PATCH) → `Maintain`/`Admin` (+DELETE and every `auth.*` resource, the identity/access-control surface itself). `Maintain` and `Admin` hold identical grants under this fixed policy — they diverge only via **sudo step-up**, mirroring Linux `sudo`: a resource can be marked `sensitive=True`, which additionally requires `Maintain` (never `Admin`) to present a live, short-lived grant obtained by re-verifying a password through a pluggable `StepUpVerifier` port. A missing/expired/wrong/revoked grant answers its own 403 (`ansina.auth.sudo_required`), never a misleading 401 — the bearer token is still fine, the caller just hasn't stepped up.
+
+Users/Groups/Roles are exposed over the REST API itself (`/auth/users`, `/auth/groups`, role attach/detach, `GET /auth/roles`/`GET /auth/permissions`), `Admin`/`Maintain` only, every mutation sudo-gated for `Maintain` — the first surface where that mechanism protects something an operator actually cares about, rather than only a break-glass route. Two invariants hold server-side, stated in permission terms so they generalize once non-builtin roles exist: no caller can grant a `role_permissions` row it does not itself effectively hold (only `Admin`, sudo grant or not, may ever mint a new `Admin` assignment or hand out an `auth.*` permission), and the last remaining `Admin` can never be deleted, deactivated, or demoted — there is no route back from a database with zero admins. Deleting a user is a one-way tombstone, not a row removal: every credential, role assignment, group membership, and live sudo grant is purged in one transaction, while the row and its identity record survive for audit attribution — nothing survives that could authenticate or authorize again, so a hand-edited "reactivate" on a deleted row restores nothing. Roles themselves are read-only over this API in M2 — builtin-role grants are owned by the reconciler that seeds them at every boot — with `GET /auth/roles`/`GET /auth/permissions` shipped now specifically so a follow-up custom-roles milestone adds write routes over the same tables rather than a new discovery mechanism.
+
 ---
 
 ## §4 Roadmap
@@ -157,14 +165,16 @@ Mac Mini 2024, Apple M4, 16 GB unified memory — this is the deployment target 
 flowchart TD
     M0["M0 — Skeleton\npackaging · config · logging · REST API\nauth · persistence · CI · docs\n(zero model code)"]
     M1["M1 — Heart & Brain\nHeartRuntime port + MLX/llama-cpp adapters\nautonomic tick loop\nBrainProvider port + OpenAI-compatible adapter"]
+    M2["M2 — RBAC & Access Control\nUser/Group/Role data model + permission model\nauthorization enforcement + route-coverage gate\nsudo step-up\nUsers/Groups/Roles management API"]
     BL["Backlog — Experiments\nHeart as triage / curator / extractor\n(gated behind a quality benchmark)"]
     M0 --> M1
+    M0 --> M2
     M1 -.unlocks, not required for.-> BL
 ```
 
 M0 exit criterion: `uv run ansina` serves an authenticated REST API with health probes, structured logs, and a migrated SQLite database, green on CI for Linux and macOS-arm64, with zero model code.
 
-Tracking issues live in GitHub milestones `M0 — Skeleton`, `M1 — Heart & Brain`, `Backlog — Experiments`.
+Tracking issues live in GitHub milestones `M0 — Skeleton`, `M1 — Heart & Brain`, `M2 — RBAC & Access Control`, `Backlog — Experiments`.
 
 ---
 

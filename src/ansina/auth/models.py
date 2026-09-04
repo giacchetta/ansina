@@ -132,13 +132,17 @@ class RolePermission:
 
 @dataclass(frozen=True, slots=True)
 class User:
-    """A row in `users`."""
+    """A row in `users`. `deleted_at` (issue #27) is a one-way tombstone, distinct
+    from `active`'s suspend/resume flag — see `storage/migrations/
+    0004_user_tombstone.sql` for why the two can't be merged into one column.
+    """
 
     id: str
     username: str
     display_name: str
     active: bool
     created_at: str
+    deleted_at: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Self:
@@ -148,6 +152,7 @@ class User:
             display_name=row["display_name"],
             active=bool(row["active"]),
             created_at=row["created_at"],
+            deleted_at=row["deleted_at"],
         )
 
 

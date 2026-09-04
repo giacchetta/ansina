@@ -35,6 +35,17 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/heart/tick/resume",
         "/auth/sudo",
         "/auth/sudo/grants",
+        "/auth/users",
+        "/auth/users/{user_id}",
+        "/auth/users/{user_id}/password",
+        "/auth/users/{user_id}/tokens",
+        "/auth/users/{user_id}/roles/{role_id}",
+        "/auth/groups",
+        "/auth/groups/{group_id}",
+        "/auth/groups/{group_id}/members/{user_id}",
+        "/auth/groups/{group_id}/roles/{role_id}",
+        "/auth/roles",
+        "/auth/permissions",
     }
 
 

@@ -22,6 +22,13 @@ from ansina.auth.authenticator import (
 )
 from ansina.auth.authorization import ForbiddenError, SudoRequiredError, authorize
 from ansina.auth.bootstrap import ensure_bootstrap_admin
+from ansina.auth.management import (
+    LastAdminError,
+    NotFoundError,
+    SelfEscalationError,
+    assert_admin_remains,
+    assert_may_assign_role,
+)
 from ansina.auth.principal import AuthMethod, Principal
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
 from ansina.auth.step_up import (
@@ -37,13 +44,18 @@ __all__ = [
     "AuthMethod",
     "Authenticator",
     "ForbiddenError",
+    "LastAdminError",
+    "NotFoundError",
     "PasswordStepUpVerifier",
     "Principal",
+    "SelfEscalationError",
     "StepUpRegistry",
     "StepUpVerifier",
     "SudoLockedOutError",
     "SudoRequiredError",
     "SudoService",
+    "assert_admin_remains",
+    "assert_may_assign_role",
     "authorize",
     "build_authenticators",
     "build_step_up_verifiers",

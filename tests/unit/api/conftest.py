@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ansina.api.app import create_app
+from ansina.auth.hashing import Argon2Params
 from ansina.auth.models import SubjectType
 from ansina.auth.repositories import (
     CredentialRepository,
@@ -84,5 +85,42 @@ def token_for_role(authed_app: FastAPI) -> Callable[[str], str]:
         RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
         CredentialRepository(db).create_api_token(user.id, token)
         return token
+
+    return _mint
+
+
+_CHEAP_ARGON2 = Argon2Params(time_cost=1, memory_cost_kib=8, parallelism=1)
+_SUDOED_MAINTAIN_PASSWORD = "correct horse battery staple"
+
+
+@pytest.fixture
+def sudoed_maintain(
+    authed_app: FastAPI, authed_client: TestClient
+) -> Callable[[], dict[str, str]]:
+    """Mint a fresh `Maintain` user (password + api_token) and step it up, returning
+    headers carrying both the bearer token and a live `X-Sudo-Token` grant — the shape
+    every mutating `/auth/*` management route test needs (issue #27). Counter-suffixed
+    so repeated calls within one test never collide.
+    """
+    counter = iter(range(1, 1_000))
+
+    def _mint() -> dict[str, str]:
+        db = authed_app.state.db
+        username = f"maintainer-{next(counter)}"
+        token = f"{username}-token"
+        user = UserRepository(db).create(username)
+        role = RoleRepository(db).get_by_slug("maintain")
+        assert role is not None
+        RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+        CredentialRepository(db).create_api_token(user.id, token)
+        CredentialRepository(db).set_password(
+            user.id, _SUDOED_MAINTAIN_PASSWORD, _CHEAP_ARGON2
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        step_up = authed_client.post(
+            "/auth/sudo", headers=headers, json={"password": _SUDOED_MAINTAIN_PASSWORD}
+        )
+        assert step_up.status_code == 200
+        return {**headers, "X-Sudo-Token": step_up.json()["token"]}
 
     return _mint

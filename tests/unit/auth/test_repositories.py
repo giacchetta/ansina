@@ -174,6 +174,27 @@ def test_effective_verbs_with_no_role_ids_short_circuits_to_empty(
     )
 
 
+def test_grants_for_roles_unions_across_roles(db: Database) -> None:
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("auth.users", "")
+    read = roles.create("read", "Read", "")
+    write = roles.create("write", "Write", "")
+    permissions.grant(read.id, "heart.tick", Verb.GET)
+    permissions.grant(write.id, "auth.users", Verb.POST)
+
+    grants = permissions.grants_for_roles(frozenset({read.id, write.id}))
+
+    assert grants == {("heart.tick", Verb.GET), ("auth.users", Verb.POST)}
+
+
+def test_grants_for_roles_with_no_role_ids_short_circuits_to_empty(
+    db: Database,
+) -> None:
+    assert RolePermissionRepository(db).grants_for_roles(frozenset()) == frozenset()
+
+
 # --- UserRepository ------------------------------------------------------------
 
 
@@ -236,6 +257,67 @@ def test_user_list_all_orders_by_username(db: Database) -> None:
     assert [u.username for u in users.list_all()] == ["alice", "bob"]
 
 
+def test_user_set_display_name(db: Database) -> None:
+    users = UserRepository(db)
+    user = users.create("alice")
+
+    users.set_display_name(user.id, "Alice A.")
+
+    updated = users.get(user.id)
+    assert updated is not None
+    assert updated.display_name == "Alice A."
+
+
+def test_user_soft_delete_purges_access_but_keeps_the_row_and_identity(
+    db: Database,
+) -> None:
+    """See `storage/migrations/0004_user_tombstone.sql` — the whole point of the
+    tombstone is that nothing survives a soft-delete that could grant access again.
+    """
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    identities = ExternalIdentityRepository(db)
+    credentials = CredentialRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    groups = GroupRepository(db)
+
+    user = users.create("alice")
+    role = roles.create("read", "Read", "")
+    assignments.assign(SubjectType.USER, user.id, role.id)
+    group = groups.create("ops", "Operations")
+    groups.add_member(group.id, user.id)
+    credentials.create_api_token(user.id, "a-token")
+    credentials.set_password(
+        user.id, "hunter2", Argon2Params(time_cost=1, memory_cost_kib=8, parallelism=1)
+    )
+    SudoGrantRepository(db).create(
+        user.id,
+        "a-grant",
+        "password",
+        issued_at="2026-01-01T00:00:00.000Z",
+        expires_at="2999-01-01T00:00:00.000Z",
+    )
+
+    users.soft_delete(user.id, deleted_at="2026-06-01T00:00:00.000Z")
+
+    updated = users.get(user.id)
+    assert updated is not None
+    assert updated.deleted_at == "2026-06-01T00:00:00.000Z"
+    assert updated.active is False
+    # The row and its local identity survive, for audit attribution.
+    assert identities.get_by_provider_subject("local", "alice") is not None
+    # Everything that could grant access again is gone.
+    assert credentials.find_user_by_api_token("a-token") is None
+    assert assignments.roles_for_user(user.id) == []
+    assert groups.list_members(group.id) == []
+    assert (
+        SudoGrantRepository(db).find_active(
+            user.id, "a-grant", now="2026-01-01T00:00:01.000Z"
+        )
+        is None
+    )
+
+
 # --- GroupRepository ------------------------------------------------------------
 
 
@@ -276,6 +358,83 @@ def test_group_list_all_orders_by_slug(db: Database) -> None:
     groups.create("alpha", "Alpha")
 
     assert [g.slug for g in groups.list_all()] == ["alpha", "zeta"]
+
+
+def test_group_update(db: Database) -> None:
+    groups = GroupRepository(db)
+    group = groups.create("ops", "Operations")
+
+    updated = groups.update(group.id, name="Ops Team", description="new desc")
+
+    assert updated is not None
+    assert updated.name == "Ops Team"
+    assert updated.description == "new desc"
+
+
+def test_group_update_of_unknown_id_returns_none(db: Database) -> None:
+    assert GroupRepository(db).update("no-such-id", name="x", description="") is None
+
+
+def test_group_delete_also_removes_its_role_assignments(db: Database) -> None:
+    """`role_assignments.subject_id` is deliberately not a foreign key (see
+    `0002_rbac.sql`), so `delete()` must clean these up itself.
+    """
+    groups = GroupRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    group = groups.create("ops", "Operations")
+    role = roles.create("read", "Read", "")
+    assignments.assign(SubjectType.GROUP, group.id, role.id)
+
+    groups.delete(group.id)
+
+    assert groups.get(group.id) is None
+    assert assignments.list_for_subject(SubjectType.GROUP, group.id) == []
+
+
+def test_group_remove_member(db: Database) -> None:
+    groups = GroupRepository(db)
+    users = UserRepository(db)
+    group = groups.create("ops", "Operations")
+    user = users.create("alice")
+    groups.add_member(group.id, user.id)
+
+    groups.remove_member(group.id, user.id)
+
+    assert groups.list_members(group.id) == []
+
+
+def test_group_remove_member_of_a_non_member_is_a_no_op(db: Database) -> None:
+    groups = GroupRepository(db)
+    users = UserRepository(db)
+    group = groups.create("ops", "Operations")
+    user = users.create("alice")
+
+    groups.remove_member(group.id, user.id)  # must not raise
+
+
+def test_group_list_members_orders_by_username(db: Database) -> None:
+    groups = GroupRepository(db)
+    users = UserRepository(db)
+    group = groups.create("ops", "Operations")
+    bob = users.create("bob")
+    alice = users.create("alice")
+    groups.add_member(group.id, bob.id)
+    groups.add_member(group.id, alice.id)
+
+    assert [u.username for u in groups.list_members(group.id)] == ["alice", "bob"]
+
+
+def test_groups_for_user_orders_by_slug(db: Database) -> None:
+    groups = GroupRepository(db)
+    users = UserRepository(db)
+    user = users.create("alice")
+    zeta = groups.create("zeta", "Zeta")
+    alpha = groups.create("alpha", "Alpha")
+    groups.add_member(zeta.id, user.id)
+    groups.add_member(alpha.id, user.id)
+
+    assert [g.slug for g in groups.groups_for_user(user.id)] == ["alpha", "zeta"]
 
 
 # --- RoleAssignmentRepository ---------------------------------------------------
@@ -378,6 +537,65 @@ def test_roles_for_user_deduplicates_direct_and_group_grants_of_the_same_role(
     assignments.assign(SubjectType.GROUP, group.id, role.id)
 
     assert [r.id for r in assignments.roles_for_user(user.id)] == [role.id]
+
+
+def test_list_for_subject_returns_only_direct_assignments(db: Database) -> None:
+    """Unlike `roles_for_user`, this does not follow group membership."""
+    users = UserRepository(db)
+    groups = GroupRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    group = groups.create("ops", "Operations")
+    groups.add_member(group.id, user.id)
+    direct_role = roles.create("read", "Read", "")
+    group_role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, direct_role.id)
+    assignments.assign(SubjectType.GROUP, group.id, group_role.id)
+
+    assert [r.id for r in assignments.list_for_subject(SubjectType.USER, user.id)] == [
+        direct_role.id
+    ]
+    assert [
+        r.id for r in assignments.list_for_subject(SubjectType.GROUP, group.id)
+    ] == [group_role.id]
+
+
+def test_user_ids_with_role_includes_direct_and_group_mediated_holders(
+    db: Database,
+) -> None:
+    users = UserRepository(db)
+    groups = GroupRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    admin = roles.create("admin", "Admin", "")
+    direct_holder = users.create("alice")
+    group_holder = users.create("bob")
+    group = groups.create("admins", "Admins")
+    assignments.assign(SubjectType.USER, direct_holder.id, admin.id)
+    assignments.assign(SubjectType.GROUP, group.id, admin.id)
+    groups.add_member(group.id, group_holder.id)
+
+    holders = assignments.user_ids_with_role(admin.id)
+
+    assert holders == {direct_holder.id, group_holder.id}
+
+
+def test_user_ids_with_role_excludes_inactive_and_deleted_users(
+    db: Database,
+) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    admin = roles.create("admin", "Admin", "")
+    inactive = users.create("inactive-admin")
+    deleted = users.create("deleted-admin")
+    assignments.assign(SubjectType.USER, inactive.id, admin.id)
+    assignments.assign(SubjectType.USER, deleted.id, admin.id)
+    users.set_active(inactive.id, active=False)
+    users.soft_delete(deleted.id, deleted_at="2026-01-01T00:00:00.000Z")
+
+    assert assignments.user_ids_with_role(admin.id) == frozenset()
 
 
 # --- CredentialRepository -------------------------------------------------------

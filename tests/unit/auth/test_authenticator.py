@@ -79,6 +79,24 @@ def test_resolve_principal_returns_none_for_an_inactive_user(db: Database) -> No
     assert resolve_principal(db, authenticators, "reader-token") is None
 
 
+def test_resolve_principal_returns_none_for_a_deleted_user(db: Database) -> None:
+    """Backstop for a hand-edited row: `UserRepository.soft_delete` (issue #27)
+    already purges the credential a deleted user would authenticate with, so this
+    sets `deleted_at` directly — bypassing `soft_delete` — to prove
+    `resolve_principal` itself also refuses a tombstoned user, not just as a side
+    effect of the credential being gone.
+    """
+    _, user_id = _seed_reader(db)
+    with db.transaction() as cursor:
+        cursor.execute(
+            "UPDATE users SET deleted_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00.000Z", user_id),
+        )
+    authenticators = build_authenticators(db)
+
+    assert resolve_principal(db, authenticators, "reader-token") is None
+
+
 def test_a_second_authenticator_can_be_appended_without_touching_the_first(
     db: Database,
 ) -> None:

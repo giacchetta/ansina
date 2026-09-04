@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from ansina.auth.authorization import ForbiddenError, SudoRequiredError
+from ansina.auth.management import LastAdminError, NotFoundError, SelfEscalationError
+from ansina.auth.repositories import DuplicateError, UnknownSubjectError
 from ansina.auth.sudo import SudoLockedOutError
 from ansina.errors import AnsinaError, ConfigurationError
 from ansina.logging import get_request_id
@@ -33,6 +35,11 @@ CODE_HEART_DISABLED = "ansina.heart.disabled"
 CODE_FORBIDDEN = ForbiddenError.code
 CODE_SUDO_REQUIRED = SudoRequiredError.code
 CODE_SUDO_LOCKED_OUT = SudoLockedOutError.code
+CODE_SELF_ESCALATION = SelfEscalationError.code
+CODE_LAST_ADMIN = LastAdminError.code
+CODE_NOT_FOUND_AUTH = NotFoundError.code
+CODE_DUPLICATE = DuplicateError.code
+CODE_UNKNOWN_SUBJECT = UnknownSubjectError.code
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
@@ -49,6 +56,17 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # already suggest, and it's a rate-limiting concern, not an identity/permission
     # one (issue #26).
     SudoLockedOutError: 429,
+    # 403, same family as ForbiddenError — the caller is otherwise entitled to mutate
+    # this resource, but not to hand out a grant it doesn't itself hold (issue #27).
+    SelfEscalationError: 403,
+    # 409: the request is well-formed and the caller is otherwise authorized, but
+    # applying it would leave the RBAC model in a state with no recovery path.
+    LastAdminError: 409,
+    DuplicateError: 409,
+    # 404: a path referenced a user/group/role id, or a role_assignments subject, that
+    # doesn't exist.
+    NotFoundError: 404,
+    UnknownSubjectError: 404,
 }
 
 

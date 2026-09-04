@@ -197,6 +197,17 @@ def test_openapi_schema(server: str) -> None:
         "/heart/tick/resume",
         "/auth/sudo",
         "/auth/sudo/grants",
+        "/auth/users",
+        "/auth/users/{user_id}",
+        "/auth/users/{user_id}/password",
+        "/auth/users/{user_id}/tokens",
+        "/auth/users/{user_id}/roles/{role_id}",
+        "/auth/groups",
+        "/auth/groups/{group_id}",
+        "/auth/groups/{group_id}/members/{user_id}",
+        "/auth/groups/{group_id}/roles/{role_id}",
+        "/auth/roles",
+        "/auth/permissions",
     }
 
 
@@ -406,6 +417,98 @@ def test_sudo_step_up_round_trip(authed_server: str, tmp_path: Path) -> None:
     assert admin_response.status_code == 204
 
 
+def test_rbac_management_round_trip(authed_server: str) -> None:
+    """Issue #27's headline flow, black-box end to end. Every other test above that
+    needs a non-bootstrap identity (`test_read_role_token_progresses_401_then_403_
+    then_200`, `test_sudo_step_up_round_trip`) seeds one directly into the running
+    server's SQLite file, because until this issue there was no other way to create
+    one. This test creates its `Maintain` user entirely over HTTP instead — the
+    point of shipping this management API at all. The bootstrap Admin creates a
+    user, sets its password, issues it an API token, and assigns it `Maintain`; that
+    user is then refused a mutating `/auth/*` call with no sudo grant, succeeds once
+    stepped up, is refused an attempt to self-escalate to `Admin`, and the bootstrap
+    Admin itself cannot be deleted as the sole remaining Admin.
+    """
+    admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+
+    created = httpx.post(
+        f"{authed_server}/auth/users",
+        headers=admin_headers,
+        json={"username": "e2e-rbac-user"},
+    )
+    assert created.status_code == 201
+    user_id = created.json()["id"]
+
+    set_password = httpx.put(
+        f"{authed_server}/auth/users/{user_id}/password",
+        headers=admin_headers,
+        json={"password": "a perfectly good passphrase"},
+    )
+    assert set_password.status_code == 204
+
+    issued = httpx.post(
+        f"{authed_server}/auth/users/{user_id}/tokens",
+        headers=admin_headers,
+        json={"label": "e2e"},
+    )
+    assert issued.status_code == 201
+    user_token = issued.json()["token"]
+
+    roles = httpx.get(f"{authed_server}/auth/roles", headers=admin_headers)
+    assert roles.status_code == 200
+    maintain_role_id = next(r["id"] for r in roles.json() if r["slug"] == "maintain")
+    admin_role_id = next(r["id"] for r in roles.json() if r["slug"] == "admin")
+
+    assign_maintain = httpx.post(
+        f"{authed_server}/auth/users/{user_id}/roles/{maintain_role_id}",
+        headers=admin_headers,
+    )
+    assert assign_maintain.status_code == 204
+
+    user_headers = {"Authorization": f"Bearer {user_token}"}
+
+    # 403 sudo_required: Maintain holds the grant, but hasn't stepped up yet.
+    no_grant = httpx.post(
+        f"{authed_server}/auth/users", headers=user_headers, json={"username": "nobody"}
+    )
+    assert no_grant.status_code == 403
+    assert no_grant.json()["code"] == "ansina.auth.sudo_required"
+
+    step_up = httpx.post(
+        f"{authed_server}/auth/sudo",
+        headers=user_headers,
+        json={"password": "a perfectly good passphrase"},
+    )
+    assert step_up.status_code == 200
+    granted_headers = {**user_headers, "X-Sudo-Token": step_up.json()["token"]}
+
+    with_grant = httpx.post(
+        f"{authed_server}/auth/users",
+        headers=granted_headers,
+        json={"username": "e2e-second-user"},
+    )
+    assert with_grant.status_code == 201
+
+    # A sudo'd Maintain still cannot self-escalate to Admin.
+    self_escalate = httpx.post(
+        f"{authed_server}/auth/users/{user_id}/roles/{admin_role_id}",
+        headers=granted_headers,
+    )
+    assert self_escalate.status_code == 403
+    assert self_escalate.json()["code"] == "ansina.auth.self_escalation"
+
+    # The bootstrap Admin is the sole Admin — deleting it is refused.
+    admins = httpx.get(f"{authed_server}/auth/users", headers=admin_headers)
+    bootstrap_id = next(
+        u["id"] for u in admins.json() if u["username"] == "bootstrap-admin"
+    )
+    delete_last_admin = httpx.delete(
+        f"{authed_server}/auth/users/{bootstrap_id}", headers=admin_headers
+    )
+    assert delete_last_admin.status_code == 409
+    assert delete_last_admin.json()["code"] == "ansina.auth.last_admin"
+
+
 def test_bootstrap_token_is_generated_printed_once_and_authenticates(
     tmp_path: Path,
 ) -> None:
@@ -504,9 +607,10 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         assert journal_mode.lower() == "wal"
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # (1,) = storage's own bookkeeping table (issue #6); (2,) = the RBAC identity
-        # model (issue #24); (3,) = sudo grants/lockouts (issue #26) — bump this
-        # alongside `storage/migrations/` whenever a new migration lands.
-        assert rows == [(1,), (2,), (3,)]
+        # model (issue #24); (3,) = sudo grants/lockouts (issue #26); (4,) = the user
+        # deletion tombstone (issue #27) — bump this alongside `storage/migrations/`
+        # whenever a new migration lands.
+        assert rows == [(1,), (2,), (3,), (4,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -516,7 +620,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # still exactly these rows — nothing re-applied
-        assert rows == [(1,), (2,), (3,)]
+        assert rows == [(1,), (2,), (3,), (4,)]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:

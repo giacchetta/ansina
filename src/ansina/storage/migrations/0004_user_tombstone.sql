@@ -1,0 +1,15 @@
+-- Migration 0004: user deletion tombstone (issue #27).
+--
+-- `users.active` is the suspend/resume flag (`UserRepository.set_active`,
+-- `PATCH /auth/users/{id}`) — flipping it back on is exactly what that route is for, so
+-- it cannot also carry "this identity was deleted and must never be restorable." That
+-- needs its own one-way marker: `deleted_at` is NULL for every live user and, once set
+-- by `DELETE /auth/users/{id}` (`UserRepository.soft_delete`), is never cleared by any
+-- route. The `users` row and its `external_identities` row are kept (not hard-deleted)
+-- so audit log lines referring to this identity stay attributable and the username
+-- stays permanently reserved (`users.username` is UNIQUE) — but `soft_delete` also
+-- purges every credential, role assignment, group membership, and sudo grant for the
+-- user in the same transaction, so a hand-edited `active = 1` on a tombstoned row
+-- restores nothing: there is no credential left to authenticate with and no role left
+-- to authorize with.
+ALTER TABLE users ADD COLUMN deleted_at TEXT;

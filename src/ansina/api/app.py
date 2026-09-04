@@ -32,10 +32,15 @@ from ansina.api.exception_handlers import (
 from ansina.api.middleware import RequestIdMiddleware
 from ansina.api.readiness import Readiness
 from ansina.api.route_audit import audit_route_coverage
+from ansina.api.routes.groups import router as groups_router
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
 from ansina.api.routes.openapi import router as openapi_router
+from ansina.api.routes.permissions import router as permissions_router
+from ansina.api.routes.role_assignments import router as role_assignments_router
+from ansina.api.routes.roles import router as roles_router
 from ansina.api.routes.sudo import router as sudo_router
+from ansina.api.routes.users import router as users_router
 from ansina.auth import (
     build_sudo_service,
     ensure_bootstrap_admin,
@@ -201,6 +206,11 @@ def create_app(
     app.include_router(heart_router)
     app.include_router(openapi_router)
     app.include_router(sudo_router)
+    app.include_router(users_router)
+    app.include_router(groups_router)
+    app.include_router(role_assignments_router)
+    app.include_router(roles_router)
+    app.include_router(permissions_router)
 
     # Issue #25: refuses to boot (`RouteCoverageError`, before uvicorn ever binds a
     # port — same "fail loudly" shape as `HeartUnavailableError`) if any non-public
