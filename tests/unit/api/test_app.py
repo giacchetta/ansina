@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -8,6 +9,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ansina.api.app import create_app
+from ansina.auth.models import RoleSlug
+from ansina.auth.repositories import (
+    CredentialRepository,
+    ExternalIdentityRepository,
+    RoleAssignmentRepository,
+    RoleRepository,
+    UserRepository,
+)
 from ansina.brain.events import BrainDone
 from ansina.brain.provider import BrainProvider, BrainRequest
 from ansina.brain.selection import BrainUnavailableError
@@ -264,8 +273,70 @@ def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
             .execute("SELECT version FROM schema_version")
             .fetchall()
         )
-        assert [row[0] for row in rows] == [1]
+        assert [row[0] for row in rows] == [1, 2, 3, 4]
 
     # Outside the `with` block, lifespan shutdown has run — the database is closed.
     with pytest.raises(StorageError, match="after close"):
         app.state.db.connection()
+
+
+def test_lifespan_seeds_builtin_roles_and_resources(app: FastAPI) -> None:
+    """Issue #24: `sync_resources`/`reconcile_builtin_roles` run on every boot,
+    independent of `security.enabled` (the `app` fixture has it disabled).
+    """
+    with TestClient(app):
+        roles = RoleRepository(app.state.db)
+        slugs = {r.slug for r in roles.list_all()}
+        assert slugs == {slug.value for slug in RoleSlug}
+        assert all(r.builtin for r in roles.list_all())
+
+
+def test_lifespan_with_auth_disabled_creates_no_bootstrap_admin(app: FastAPI) -> None:
+    """`app` (`ANSINA_SECURITY__ENABLED=false`) — dev mode needs no credential."""
+    with TestClient(app):
+        assert UserRepository(app.state.db).list_all() == []
+
+
+def test_lifespan_with_auth_enabled_and_no_override_auto_generates_bootstrap_admin(
+    clean_env: None, tmp_cwd: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The production-default path (`security.enabled` at its `True` default, no
+    `ANSINA_SECURITY__API_TOKEN` configured): Ansina generates its own bootstrap
+    token, prints it once, and that token authenticates a real request through the
+    fully-wired app — not just `ansina.auth.bootstrap` in isolation
+    (`tests/unit/auth/test_bootstrap.py` covers that).
+    """
+    app = create_app(load_settings())
+    with TestClient(app) as client:
+        users = UserRepository(app.state.db).list_all()
+        assert len(users) == 1
+
+        output = capsys.readouterr().out
+        match = re.search(r"^   (\S+)$", output, re.MULTILINE)
+        assert match is not None, f"bootstrap token banner not found:\n{output}"
+        token = match.group(1)
+
+        response = client.get("/version", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 200
+
+
+def test_lifespan_with_an_api_token_creates_the_bootstrap_admin(
+    authed_app: FastAPI, authed_token: str
+) -> None:
+    with TestClient(authed_app):
+        users = UserRepository(authed_app.state.db).list_all()
+        assert len(users) == 1
+        identities = ExternalIdentityRepository(authed_app.state.db)
+        identity = identities.get_by_provider_subject(
+            "local-bootstrap", "bootstrap-admin"
+        )
+        assert identity is not None
+        roles = RoleAssignmentRepository(authed_app.state.db).roles_for_user(
+            users[0].id
+        )
+        assert [r.slug for r in roles] == [RoleSlug.ADMIN.value]
+        found = CredentialRepository(authed_app.state.db).find_user_by_api_token(
+            authed_token
+        )
+        assert found is not None
+        assert found.id == users[0].id

@@ -72,3 +72,9 @@ class BrainError(AnsinaError):
     """
 
     code: ClassVar[str] = "ansina.brain.error"
+
+
+class AuthError(AnsinaError):
+    """The RBAC identity/permission layer rejected an operation. See `ansina.auth`."""
+
+    code: ClassVar[str] = "ansina.auth.error"

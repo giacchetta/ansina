@@ -42,12 +42,20 @@ async def ansina_error_handler(_request: Request, exc: Exception) -> Response:
     subclasses.
     """
     assert isinstance(exc, AnsinaError)  # narrows for the branches below; see docstring
+    headers = None
+    retry_after = exc.details.get("retry_after_seconds")
+    if isinstance(retry_after, int | float):
+        # `SudoLockedOutError` (issue #26) is the first `AnsinaError` shaped as a
+        # rate limit — a real `Retry-After` header alongside the body's own copy of
+        # the same figure, for any client that honors it without parsing JSON.
+        headers = {"Retry-After": str(int(retry_after))}
     return problem_response(
         status=status_for_error(exc),
         code=exc.code,
         title=type(exc).__name__,
         detail=str(exc),
         extra=exc.details or None,
+        headers=headers,
     )
 
 

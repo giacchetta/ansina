@@ -42,16 +42,16 @@ def test_configure_logging_is_idempotent(clean_env: None, tmp_cwd: Path) -> None
 def test_configure_logging_registers_configured_token(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "configured-secret-token-value")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "configured-secret-token-value-x1")
     stream = io.StringIO()
     monkeypatch.setattr("sys.stderr", stream)
 
     try:
         configure_logging(load_settings())
         log = get_logger("ansina.tests.setup")
-        log.info("token in use: configured-secret-token-value")
+        log.info("token in use: configured-secret-token-value-x1")
 
-        assert "configured-secret-token-value" not in stream.getvalue()
+        assert "configured-secret-token-value-x1" not in stream.getvalue()
     finally:
         clear_secrets()
 

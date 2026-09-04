@@ -50,3 +50,47 @@ def test_ordinary_message_is_not_over_redacted() -> None:
 def test_ordinary_key_equals_word_survives() -> None:
     message = "normal message key=value no secret here"
     assert redact(message) == message
+
+
+def test_password_hash_key_value_is_redacted() -> None:
+    result = redact('password_hash="some-opaque-hash-value" logged by accident')
+    assert "some-opaque-hash-value" not in result
+
+
+def test_token_hash_key_value_is_redacted() -> None:
+    result = redact("token_hash=deadbeefcafef00dbaadf00d1234")
+    assert "deadbeefcafef00dbaadf00d1234" not in result
+
+
+def test_bare_hash_key_value_is_redacted() -> None:
+    result = redact("hash=deadbeefcafef00dbaadf00d1234")
+    assert "deadbeefcafef00dbaadf00d1234" not in result
+
+
+def test_salt_key_value_is_redacted() -> None:
+    result = redact("salt=0123456789abcdef0123456789abcdef")
+    assert "0123456789abcdef0123456789abcdef" not in result
+
+
+def test_sudo_token_header_key_value_is_redacted() -> None:
+    """Issue #26: `x-sudo-token: <value>` needs no new pattern — the existing
+    `token`-keyed assignment pattern already matches it (the hyphen before `token` is
+    a non-word boundary, so `\\btoken` matches inside `x-sudo-token` the same way it
+    already matches inside `Authorization: Bearer`).
+    """
+    result = redact("x-sudo-token: abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ")
+    assert "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ" not in result
+    assert result == "x-sudo-token: ***"
+
+
+def test_argon2_phc_hash_is_redacted_wherever_it_appears() -> None:
+    """Not just after a recognized key name — issue #24's redaction test covers a raw
+    PHC-format hash landing in a log line via an exception message or row dump too.
+    """
+    phc = (
+        "$argon2id$v=19$m=65536,t=3,p=4$"
+        "n/uwm3486M9Vu0z3xpnCdw$d59ni8dENGl/jazIaIt0uyhZ9vVjcXEltXQOtFFcS10"
+    )
+    result = redact(f"unexpected row dump: {phc}")
+    assert phc not in result
+    assert REDACTED in result

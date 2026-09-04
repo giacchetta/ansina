@@ -26,13 +26,18 @@ def _write(migrations_dir: Path, filename: str, sql: str) -> None:
     (migrations_dir / filename).write_text(sql, encoding="utf-8")
 
 
-def test_fresh_database_reaches_version_1(db: Database) -> None:
+def test_fresh_database_reaches_version_2(db: Database) -> None:
     run_migrations(db)
 
     rows = (
         db.connection().execute("SELECT version, name FROM schema_version").fetchall()
     )
-    assert [tuple(row) for row in rows] == [(1, "init")]
+    assert [tuple(row) for row in rows] == [
+        (1, "init"),
+        (2, "rbac"),
+        (3, "sudo"),
+        (4, "user_tombstone"),
+    ]
 
 
 def test_second_run_is_idempotent(db: Database) -> None:
@@ -40,7 +45,7 @@ def test_second_run_is_idempotent(db: Database) -> None:
     run_migrations(db)
 
     rows = db.connection().execute("SELECT version FROM schema_version").fetchall()
-    assert [row[0] for row in rows] == [1]
+    assert [row[0] for row in rows] == [1, 2, 3, 4]
 
 
 def test_applies_only_pending_migrations(db: Database, tmp_path: Path) -> None:

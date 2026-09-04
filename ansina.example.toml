@@ -90,14 +90,53 @@ retry_max_backoff_seconds = 30.0
 # price_per_1m_input_tokens = 0.15
 # price_per_1m_output_tokens = 0.60
 
-# Secrets (e.g. the API bearer token, the Brain's api_key) are never read from this
-# file — setting one here is a hard startup error. Set them via the environment
-# instead, e.g.:
+[security]
+# RBAC identity model (issue #24). true (the default) means authentication is
+# enforced: on first boot with no users, Ansina generates its own high-entropy
+# bootstrap API token, prints it to stdout exactly once, and stores only its hash —
+# never in this file, never recoverable afterward. false disables authentication
+# entirely (every route except /healthz and /readyz reachable with no token) and is
+# only accepted when [server] host is loopback (127.0.0.1, ::1, localhost) — Ansina
+# refuses to expose an unauthenticated API off the local machine.
+enabled = true
+
+# On first boot with no users, this resolves to a single synthetic Admin identity so
+# the service stays reachable. Set this to false once a real Admin account exists to
+# revoke that bootstrap identity's credential (its user record and audit trail are
+# kept, only the credential is removed).
+bootstrap_admin_enabled = true
+
+[security.password]
+# Tunable argon2id work factors (issue #24). Defaults follow the OWASP-recommended
+# argon2id baseline — high enough to make brute-forcing a stolen hash expensive, low
+# enough not to dominate a login request.
+time_cost = 3
+memory_cost_kib = 65536
+parallelism = 4
+
+[security.sudo]
+# Sudo step-up (issue #26): a Maintain caller must present a live grant on any
+# sensitive auth.* action (Admin never does). Get one via POST /auth/sudo (body:
+# {"password": "..."}), present it back as the X-Sudo-Token header.
+
+# How long an issued grant stays valid.
+ttl_seconds = 600.0
+
+# N consecutive failed step-up attempts within attempt_window_seconds locks further
+# attempts out for lockout_seconds (429 with a Retry-After header).
+max_failed_attempts = 5
+attempt_window_seconds = 300.0
+lockout_seconds = 900.0
+
+# api_token (issue #24) is an *optional* override of the auto-generated bootstrap
+# token above — e.g. for a scripted/orchestrated install or CI that needs a token
+# known ahead of time. Prefer letting Ansina generate its own; a manually-supplied
+# value must look like a securely generated one (32+ chars, letters/digits/-/_ only,
+# high enough entropy) — a human-typed phrase like "Hello, World" is rejected
+# outright. Like every secret, it is env-only — setting it in this file is a hard
+# startup error:
 #   ANSINA_SECURITY__API_TOKEN=...
 #   ANSINA_BRAIN__API_KEY=...
 #
-# Binding [server] host to anything other than loopback (127.0.0.1, ::1, localhost)
-# while no ANSINA_SECURITY__API_TOKEN is set is also a hard startup error — Ansina
-# refuses to expose an unauthenticated API off the local machine. /healthz and /readyz
-# stay reachable without a token either way; every other route requires one once a
-# token is configured.
+# Generate a strong one with e.g.:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"

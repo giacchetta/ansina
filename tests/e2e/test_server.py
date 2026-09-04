@@ -7,12 +7,14 @@ Never imports `ansina.api` internals (blueprint §5) — this is the gate that a
 from __future__ import annotations
 
 import os
+import re
 import signal
 import socket
 import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -21,11 +23,30 @@ from pathlib import Path
 import httpx
 import pytest
 
+# The one exception to this module's "never import `ansina.api` internals" rule
+# (blueprint §5): `ansina.auth.hashing` is the domain-layer credential-hashing
+# scheme, not an API-layer internal — reusing it here to seed a token directly into
+# the running server's SQLite file means this test never re-implements salted-SHA256
+# by hand, and fails loudly (an import error, not a silently-wrong hash) if that
+# scheme ever changes shape.
+from ansina.auth.hashing import Argon2Params, hash_password, hash_token, new_token_salt
+
 _STARTUP_TIMEOUT_S = 15.0
 _POLL_INTERVAL_S = 0.1
 
-# Long enough to clear `SecuritySettings.api_token`'s `min_length=16`.
-_E2E_TOKEN = "e2e-test-token-0123456789"
+# Long enough and high-entropy enough to clear `SecuritySettings.api_token`'s
+# strength bar (>=32 chars, base64url charset, >=2.5 bits/char) — see
+# `config/settings.py`'s `_TOKEN_MIN_LENGTH`/`_TOKEN_CHARSET`/
+# `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
+_E2E_TOKEN = "e2e-test-token-0123456789abcdefghij"
+_E2E_READ_TOKEN = "e2e-read-role-token-0123456789abcd"
+_E2E_MAINTAIN_TOKEN = "e2e-maintain-role-token-0123456789ab"
+_E2E_MAINTAIN_PASSWORD = "correct horse battery staple e2e"
+# Cheap, test-only argon2id work factors (matches `tests/unit/auth/conftest.py`'s
+# `cheap_argon2` fixture) — the running server's own configured params never matter
+# for *verifying* this hash: argon2-cffi parses them back out of the PHC-format
+# string itself (see `ansina.auth.hashing`'s module docstring).
+_E2E_CHEAP_ARGON2 = Argon2Params(time_cost=1, memory_cost_kib=8, parallelism=1)
 
 
 def _free_port() -> int:
@@ -106,14 +127,23 @@ def _launch_server(
 
 @pytest.fixture
 def server(tmp_path: Path) -> Iterator[str]:
-    """No ANSINA_SECURITY__API_TOKEN — auth disabled, every route reachable."""
-    with _launch_server(tmp_path) as srv:
+    """`ANSINA_SECURITY__ENABLED=false` — auth disabled, every route reachable.
+
+    Since issue #24, an *unset* `ANSINA_SECURITY__API_TOKEN` no longer implies "no
+    auth" — `security.enabled` defaults to `true` and Ansina would instead
+    auto-generate and enforce its own bootstrap token — so dev mode has to be
+    requested explicitly here.
+    """
+    with _launch_server(tmp_path, env={"ANSINA_SECURITY__ENABLED": "false"}) as srv:
         yield srv.base_url
 
 
 @pytest.fixture
 def authed_server(tmp_path: Path) -> Iterator[str]:
-    """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced."""
+    """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced via that
+    operator-supplied override, not the auto-generated path (see
+    `test_bootstrap_token_is_generated_printed_once_and_authenticates` for that one).
+    """
     with _launch_server(
         tmp_path, env={"ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN}
     ) as srv:
@@ -165,7 +195,33 @@ def test_openapi_schema(server: str) -> None:
         "/heart/tick",
         "/heart/tick/pause",
         "/heart/tick/resume",
+        "/auth/sudo",
+        "/auth/sudo/grants",
+        "/auth/users",
+        "/auth/users/{user_id}",
+        "/auth/users/{user_id}/password",
+        "/auth/users/{user_id}/tokens",
+        "/auth/users/{user_id}/roles/{role_id}",
+        "/auth/groups",
+        "/auth/groups/{group_id}",
+        "/auth/groups/{group_id}/members/{user_id}",
+        "/auth/groups/{group_id}/roles/{role_id}",
+        "/auth/roles",
+        "/auth/permissions",
     }
+
+
+def test_docs_and_redoc_are_gone(server: str) -> None:
+    """Issue #25: `create_app` disables FastAPI's default `/docs`/`/redoc`/`/docs/
+    oauth2-redirect` — plain Starlette routes that can't carry a `require(...)`
+    authorization declaration, and non-functional with auth enabled regardless (no
+    `fastapi.security` scheme is declared for Swagger UI's "Authorize" button to use).
+    `/openapi.json` (`test_openapi_schema`) is the one FastAPI default kept, re-served
+    as a gated route of our own.
+    """
+    assert httpx.get(f"{server}/docs").status_code == 404
+    assert httpx.get(f"{server}/redoc").status_code == 404
+    assert httpx.get(f"{server}/docs/oauth2-redirect").status_code == 404
 
 
 def test_request_id_is_echoed(server: str) -> None:
@@ -225,11 +281,320 @@ def test_authed_protected_route_accepts_valid_token(authed_server: str) -> None:
     assert response.json()["name"] == "ansina"
 
 
+def test_read_role_token_progresses_401_then_403_then_200(
+    authed_server: str, tmp_path: Path
+) -> None:
+    """Issue #25's acceptance criterion, black-box end to end: no token is 401, a
+    `Read`-role token gets 403 on a mutating route it holds no grant for, and 200 on a
+    `GET` it does. `tmp_path` is the same directory `authed_server`'s own fixture
+    already launched the server against (pytest caches a function-scoped fixture once
+    per test), so `ansina.db` is the real file the running process is reading and
+    writing — the user is seeded directly into it via plain `sqlite3`, the same
+    technique `test_migration_survives_a_restart` already uses, plus `ansina.auth.
+    hashing` for the credential hash (see this module's docstring for why that one
+    import is allowed).
+    """
+    db_path = tmp_path / "ansina.db"
+    salt = new_token_salt()
+    token_hash = hash_token(_E2E_READ_TOKEN, salt)
+    with sqlite3.connect(db_path) as conn:
+        user_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO users (id, username) VALUES (?, ?)", (user_id, "e2e-reader")
+        )
+        (role_id,) = conn.execute("SELECT id FROM roles WHERE slug = 'read'").fetchone()
+        conn.execute(
+            "INSERT INTO role_assignments (id, subject_type, subject_id, role_id) "
+            "VALUES (?, 'user', ?, ?)",
+            (uuid.uuid4().hex, user_id, role_id),
+        )
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash, salt) "
+            "VALUES (?, ?, 'api_token', ?, ?)",
+            (uuid.uuid4().hex, user_id, token_hash, salt),
+        )
+        conn.commit()
+
+    # 401: no token at all.
+    no_token_response = httpx.post(f"{authed_server}/heart/tick/pause")
+    assert no_token_response.status_code == 401
+    assert no_token_response.json()["code"] == "ansina.unauthorized"
+
+    # 403: a valid Read-role token, but Read holds no grant for POST.
+    read_headers = {"Authorization": f"Bearer {_E2E_READ_TOKEN}"}
+    forbidden_response = httpx.post(
+        f"{authed_server}/heart/tick/pause", headers=read_headers
+    )
+    assert forbidden_response.status_code == 403
+    assert forbidden_response.headers["content-type"] == "application/problem+json"
+    assert forbidden_response.json()["code"] == "ansina.forbidden"
+
+    # 200: the same token, on the GET verb Read does grant.
+    ok_response = httpx.get(f"{authed_server}/version", headers=read_headers)
+    assert ok_response.status_code == 200
+    assert ok_response.json()["name"] == "ansina"
+
+
+def test_sudo_step_up_round_trip(authed_server: str, tmp_path: Path) -> None:
+    """Issue #26's headline AC, black-box end to end: a `Maintain` caller is refused
+    the sensitive break-glass route with no grant (403 `ansina.auth.sudo_required`),
+    obtains one via `POST /auth/sudo`, succeeds with it (204), and is refused again
+    once that grant is revoked — while an `Admin` token reaches the same route with no
+    grant at all. `Maintain`/password seeded directly into the running server's SQLite
+    file, the same technique `test_read_role_token_progresses_401_then_403_then_200`
+    already establishes.
+    """
+    db_path = tmp_path / "ansina.db"
+    salt = new_token_salt()
+    token_hash = hash_token(_E2E_MAINTAIN_TOKEN, salt)
+    password_hash = hash_password(_E2E_MAINTAIN_PASSWORD, _E2E_CHEAP_ARGON2)
+    with sqlite3.connect(db_path) as conn:
+        user_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO users (id, username) VALUES (?, ?)",
+            (user_id, "e2e-maintainer"),
+        )
+        (role_id,) = conn.execute(
+            "SELECT id FROM roles WHERE slug = 'maintain'"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO role_assignments (id, subject_type, subject_id, role_id) "
+            "VALUES (?, 'user', ?, ?)",
+            (uuid.uuid4().hex, user_id, role_id),
+        )
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash, salt) "
+            "VALUES (?, ?, 'api_token', ?, ?)",
+            (uuid.uuid4().hex, user_id, token_hash, salt),
+        )
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash, salt) "
+            "VALUES (?, ?, 'password', ?, NULL)",
+            (uuid.uuid4().hex, user_id, password_hash),
+        )
+        conn.commit()
+
+    maintain_headers = {"Authorization": f"Bearer {_E2E_MAINTAIN_TOKEN}"}
+
+    # 403: Maintain's role grants DELETE on auth.sudo.grants, but there's no live
+    # sudo grant yet.
+    no_grant_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants", headers=maintain_headers
+    )
+    assert no_grant_response.status_code == 403
+    assert no_grant_response.json()["code"] == "ansina.auth.sudo_required"
+
+    # Step up.
+    step_up_response = httpx.post(
+        f"{authed_server}/auth/sudo",
+        headers=maintain_headers,
+        json={"password": _E2E_MAINTAIN_PASSWORD},
+    )
+    assert step_up_response.status_code == 200
+    grant_token = step_up_response.json()["token"]
+
+    # 204: the same sensitive route, now presenting a live grant.
+    granted_headers = {**maintain_headers, "X-Sudo-Token": grant_token}
+    revoke_all_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants", headers=granted_headers
+    )
+    assert revoke_all_response.status_code == 204
+
+    # The break-glass call above revoked every active grant, including the one that
+    # just authorized it — presenting it again is refused.
+    again_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants", headers=granted_headers
+    )
+    assert again_response.status_code == 403
+    assert again_response.json()["code"] == "ansina.auth.sudo_required"
+
+    # Admin (the bootstrap identity `authed_server` already authenticates as via
+    # _E2E_TOKEN) reaches the same sensitive route with no grant at all, by design.
+    admin_response = httpx.delete(
+        f"{authed_server}/auth/sudo/grants",
+        headers={"Authorization": f"Bearer {_E2E_TOKEN}"},
+    )
+    assert admin_response.status_code == 204
+
+
+def test_rbac_management_round_trip(authed_server: str) -> None:
+    """Issue #27's headline flow, black-box end to end. Every other test above that
+    needs a non-bootstrap identity (`test_read_role_token_progresses_401_then_403_
+    then_200`, `test_sudo_step_up_round_trip`) seeds one directly into the running
+    server's SQLite file, because until this issue there was no other way to create
+    one. This test creates its `Maintain` user entirely over HTTP instead — the
+    point of shipping this management API at all. The bootstrap Admin creates a
+    user, sets its password, issues it an API token, and assigns it `Maintain`; that
+    user is then refused a mutating `/auth/*` call with no sudo grant, succeeds once
+    stepped up, is refused an attempt to self-escalate to `Admin`, and the bootstrap
+    Admin itself cannot be deleted as the sole remaining Admin.
+    """
+    admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+
+    created = httpx.post(
+        f"{authed_server}/auth/users",
+        headers=admin_headers,
+        json={"username": "e2e-rbac-user"},
+    )
+    assert created.status_code == 201
+    user_id = created.json()["id"]
+
+    set_password = httpx.put(
+        f"{authed_server}/auth/users/{user_id}/password",
+        headers=admin_headers,
+        json={"password": "a perfectly good passphrase"},
+    )
+    assert set_password.status_code == 204
+
+    issued = httpx.post(
+        f"{authed_server}/auth/users/{user_id}/tokens",
+        headers=admin_headers,
+        json={"label": "e2e"},
+    )
+    assert issued.status_code == 201
+    user_token = issued.json()["token"]
+
+    roles = httpx.get(f"{authed_server}/auth/roles", headers=admin_headers)
+    assert roles.status_code == 200
+    maintain_role_id = next(r["id"] for r in roles.json() if r["slug"] == "maintain")
+    admin_role_id = next(r["id"] for r in roles.json() if r["slug"] == "admin")
+
+    assign_maintain = httpx.post(
+        f"{authed_server}/auth/users/{user_id}/roles/{maintain_role_id}",
+        headers=admin_headers,
+    )
+    assert assign_maintain.status_code == 204
+
+    user_headers = {"Authorization": f"Bearer {user_token}"}
+
+    # 403 sudo_required: Maintain holds the grant, but hasn't stepped up yet.
+    no_grant = httpx.post(
+        f"{authed_server}/auth/users", headers=user_headers, json={"username": "nobody"}
+    )
+    assert no_grant.status_code == 403
+    assert no_grant.json()["code"] == "ansina.auth.sudo_required"
+
+    step_up = httpx.post(
+        f"{authed_server}/auth/sudo",
+        headers=user_headers,
+        json={"password": "a perfectly good passphrase"},
+    )
+    assert step_up.status_code == 200
+    granted_headers = {**user_headers, "X-Sudo-Token": step_up.json()["token"]}
+
+    with_grant = httpx.post(
+        f"{authed_server}/auth/users",
+        headers=granted_headers,
+        json={"username": "e2e-second-user"},
+    )
+    assert with_grant.status_code == 201
+
+    # A sudo'd Maintain still cannot self-escalate to Admin.
+    self_escalate = httpx.post(
+        f"{authed_server}/auth/users/{user_id}/roles/{admin_role_id}",
+        headers=granted_headers,
+    )
+    assert self_escalate.status_code == 403
+    assert self_escalate.json()["code"] == "ansina.auth.self_escalation"
+
+    # The bootstrap Admin is the sole Admin — deleting it is refused.
+    admins = httpx.get(f"{authed_server}/auth/users", headers=admin_headers)
+    bootstrap_id = next(
+        u["id"] for u in admins.json() if u["username"] == "bootstrap-admin"
+    )
+    delete_last_admin = httpx.delete(
+        f"{authed_server}/auth/users/{bootstrap_id}", headers=admin_headers
+    )
+    assert delete_last_admin.status_code == 409
+    assert delete_last_admin.json()["code"] == "ansina.auth.last_admin"
+
+
+def test_bootstrap_token_is_generated_printed_once_and_authenticates(
+    tmp_path: Path,
+) -> None:
+    """Issue #24 (redesign): first boot with `security.enabled` at its default
+    (`true`) and no `ANSINA_SECURITY__API_TOKEN` configured auto-generates a
+    bootstrap token, prints it to stdout exactly once, and that token immediately
+    authenticates a real request — the whole generate -> print -> DB-backed-verify
+    chain working end to end, not just its pieces in isolation.
+
+    Captures the child's combined stdout/stderr to a file rather than a pipe:
+    reading a live process's stdout pipe risks blocking on buffering, where a file
+    can be read at any time without coordinating with the writer.
+    """
+    port = _free_port()
+    (tmp_path / "ansina.toml").write_text(
+        f'[server]\nhost = "127.0.0.1"\nport = {port}\n'
+        f'[database]\npath = "{(tmp_path / "ansina.db").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "server-output.log"
+    base_url = f"http://127.0.0.1:{port}"
+
+    with output_path.open("w", encoding="utf-8") as output_file:
+        process = subprocess.Popen(  # fixed argv, no shell, no untrusted input
+            [sys.executable, "-m", "ansina"],
+            cwd=tmp_path,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            env=os.environ,
+        )
+        try:
+            deadline = time.monotonic() + _STARTUP_TIMEOUT_S
+            last_error: Exception | None = None
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    pytest.fail(
+                        f"ansina exited early (code {process.returncode}):\n"
+                        f"{output_path.read_text(encoding='utf-8')}"
+                    )
+                try:
+                    response = httpx.get(f"{base_url}/healthz", timeout=1.0)
+                    if response.status_code == 200:
+                        break
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                time.sleep(_POLL_INTERVAL_S)
+            else:
+                process.kill()
+                raise TimeoutError(f"ansina never became healthy: {last_error}")
+
+            output = output_path.read_text(encoding="utf-8")
+            # The banner's token line (see `ansina.auth.bootstrap._BANNER`): exactly
+            # three leading spaces, nothing else on the line.
+            match = re.search(r"^   (\S+)$", output, re.MULTILINE)
+            assert match is not None, f"bootstrap token banner not found:\n{output}"
+            token = match.group(1)
+
+            response = httpx.get(
+                f"{base_url}/version", headers={"Authorization": f"Bearer {token}"}
+            )
+            assert response.status_code == 200
+            assert response.json()["name"] == "ansina"
+
+            response = httpx.get(
+                f"{base_url}/version",
+                headers={"Authorization": f"Bearer {token}x"},
+            )
+            assert response.status_code == 401
+
+            # The raw token appears exactly once in the entire captured output — the
+            # banner itself — never inside a JSON log line alongside it.
+            assert output.count(token) == 1
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
 def test_migration_survives_a_restart(tmp_path: Path) -> None:
     """A real, black-box run of issue #6's acceptance criteria: on first boot the
     database file is created and migrated, and a second boot against the same file
-    does not re-apply migration 0001 — checked from outside the process, via a plain
-    `sqlite3` connection to the file the server wrote.
+    does not re-apply already-applied migrations — checked from outside the process,
+    via a plain `sqlite3` connection to the file the server wrote.
     """
     with _launch_server(tmp_path) as srv:
         response = httpx.get(f"{srv.base_url}/readyz")
@@ -241,7 +606,11 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         (journal_mode,) = conn.execute("PRAGMA journal_mode").fetchone()
         assert journal_mode.lower() == "wal"
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
-        assert rows == [(1,)]
+        # (1,) = storage's own bookkeeping table (issue #6); (2,) = the RBAC identity
+        # model (issue #24); (3,) = sudo grants/lockouts (issue #26); (4,) = the user
+        # deletion tombstone (issue #27) — bump this alongside `storage/migrations/`
+        # whenever a new migration lands.
+        assert rows == [(1,), (2,), (3,), (4,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -250,7 +619,8 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
-        assert rows == [(1,)]  # still exactly one row — 0001 was not re-applied
+        # still exactly these rows — nothing re-applied
+        assert rows == [(1,), (2,), (3,), (4,)]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:
