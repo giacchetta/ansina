@@ -6,7 +6,7 @@ UV := $(shell command -v uv 2>/dev/null || echo "$(UV_INSTALL_DIR)/uv")
 
 .PHONY: help
 help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: uv
 uv: ## Install uv (Astral installer) if not already on PATH — macOS and Linux
@@ -56,8 +56,46 @@ precommit: ## Run pre-commit hooks against all files
 	$(UV) run pre-commit run --all-files
 
 .PHONY: check
-check: lint format-check typecheck test ## Run everything CI runs
+check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs
+
+# `tui/` is a standalone project (issue #31): own pyproject.toml, own uv.lock, own
+# .venv, own CI job. `make check` stays daemon-only above so it keeps mirroring the
+# `check` CI job exactly — these targets are the `tui` CI job's local mirror instead.
+# `--directory tui` (not `--project tui`) throughout: it actually changes the
+# subprocess's cwd, which matters for pytest's `--cov=src/ansina_tui` in
+# `tui/pyproject.toml` — that path is resolved relative to cwd, not to the
+# pyproject.toml that declared it.
+.PHONY: tui-sync
+tui-sync: uv ## Install/sync tui/'s dependencies into tui/.venv
+	$(UV) sync --directory tui
+
+.PHONY: tui-lint
+tui-lint: ## Lint tui/ with ruff
+	$(UV) run --directory tui ruff check .
+
+.PHONY: tui-format
+tui-format: ## Auto-format tui/ with ruff
+	$(UV) run --directory tui ruff format .
+
+.PHONY: tui-format-check
+tui-format-check: ## Check tui/'s formatting without modifying files
+	$(UV) run --directory tui ruff format --check .
+
+.PHONY: tui-typecheck
+tui-typecheck: ## Run mypy in strict mode on tui/ (config-driven, see tui/pyproject.toml)
+	$(UV) run --directory tui mypy
+
+.PHONY: tui-test
+tui-test: ## Run tui/'s test suite (100% coverage enforced)
+	$(UV) run --directory tui pytest
+
+.PHONY: tui-check
+tui-check: tui-lint tui-format-check tui-typecheck tui-test ## Run everything the tui CI job runs
+
+.PHONY: check-all
+check-all: check tui-check ## Run both the daemon's and tui/'s full check suites
 
 .PHONY: clean
 clean: ## Remove caches, build artifacts, and the virtualenv
 	rm -rf .venv .ruff_cache .mypy_cache .pytest_cache htmlcov .coverage dist build src/*.egg-info
+	rm -rf tui/.venv tui/.ruff_cache tui/.mypy_cache tui/.pytest_cache tui/htmlcov tui/.coverage tui/dist tui/build

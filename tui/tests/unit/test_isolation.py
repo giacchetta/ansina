@@ -1,0 +1,48 @@
+"""Pins the milestone's load-bearing constraint: `tui/` never imports `ansina` — it
+talks HTTP only, exactly like any third-party client (see `README.md`)."""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import httpx
+from typer.testing import CliRunner
+
+from ansina_tui.main import app
+
+runner = CliRunner()
+
+
+def _no_ansina_daemon_module_imported() -> bool:
+    return not any(
+        name == "ansina" or name.startswith("ansina.") for name in sys.modules
+    )
+
+
+def test_ansina_daemon_package_never_imported_by_help(tmp_xdg_home: Path) -> None:
+    runner.invoke(app, ["--help"])
+    assert _no_ansina_daemon_module_imported()
+
+
+def test_ansina_daemon_package_never_imported_by_status(
+    tmp_xdg_home: Path,
+    mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
+    json_response: Callable[..., httpx.Response],
+    patch_status_transport: Callable[[httpx.BaseTransport], None],
+) -> None:
+    patch_status_transport(
+        mock_transport(
+            {
+                "/healthz": json_response(200, {"status": "ok"}),
+                "/readyz": json_response(200, {"status": "ready", "checks": {}}),
+                "/version": json_response(200, {"name": "ansina", "version": "0.1.0"}),
+            }
+        )
+    )
+
+    runner.invoke(app, ["--json", "status"])
+
+    assert _no_ansina_daemon_module_imported()
