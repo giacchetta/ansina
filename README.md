@@ -11,7 +11,7 @@ flowchart LR
     Client["Client"] -->|Bearer token<br/>+ optional X-Sudo-Token| MW["RequestIdMiddleware"]
     MW --> Auth["BearerAuthMiddleware<br/>(401 · resolves Principal,<br/>elevates on a live grant)"]
     Auth --> Authz["require(resource)<br/>(403 · role check ·<br/>sudo_required)"]
-    Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]<br/>/auth/sudo[/grants]<br/>/auth/users · /auth/groups<br/>/auth/roles · /auth/permissions"]
+    Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]<br/>/auth/sudo[/grants]<br/>/auth/users · /auth/groups<br/>/auth/roles · /auth/permissions<br/>/auth/me"]
     Routes --> DB[("SQLite<br/>WAL")]
     Routes --> Tick["TickLoop<br/>(idle / act / escalate)"]
     Routes -.error.-> Problem["RFC 9457<br/>problem+json"]
@@ -62,6 +62,7 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
 | `POST`/`DELETE /auth/groups/{id}/roles/{role_id}` | token + sudo for `Maintain` | Maintain | Attach/detach a role to a group — same rules, applied to every current member. |
 | `GET /auth/roles` | token | Maintain | The role catalog (builtin only in M2) with each role's current `role_permissions` grants. Read-only — no create/update/delete route exists. |
 | `GET /auth/permissions` | token | Maintain | The full `(resource, verb)` catalog — the discovery surface a future custom-role editor builds on. |
+| `GET /auth/me` | token | Read | The caller's own identity (user, roles, sudo status) — every role reaches this, never sudo-gated. See the `me.*` carve-out below. |
 
 `PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default at both layers: **authentication** (a valid bearer token identifying *some* user — 401 `problem+json`, `ansina.unauthorized`) and, per user role, **authorization** (that user's role holding a grant for this route's resource and HTTP verb — 403 `problem+json`, `ansina.forbidden`). Four fixed roles, increasing in scope: `Read` (GET only) → `Write` (+POST/PUT/PATCH) → `Maintain`/`Admin` (+DELETE and the RBAC management surface, `/auth/*`). A route with no `require(...)` authorization declaration fails to boot at all — the same "fail loudly before uvicorn binds a port" gate `HeartUnavailableError` uses — so a new endpoint can never ship ungated by accident.
 
@@ -76,6 +77,8 @@ Auth is enforced by default: on first boot Ansina generates and prints its own b
 - **The last remaining `Admin` can never lose that role** — deleting, deactivating, or demoting (directly or via a group) the sole holder of `admin` is refused with 409 `ansina.auth.last_admin`.
 
 Roles themselves are read-only over this API (`GET /auth/roles`): builtin-role grants are owned by the reconciler that seeds them at every boot, and creating/editing/deleting roles (custom or builtin) is out of scope for M2, deferred to a follow-up milestone that builds write routes on the same tables `GET /auth/roles`/`GET /auth/permissions` already expose.
+
+**The `me.*` self-resource carve-out** (issue #30): `auth.policy.permitted_verbs` grants every verb on any `me.*` resource to every builtin role, `Read` included — the one exception to the `auth.*` "Maintain/Admin only" rule above. This is not an escalation: the subject of a `me.*` action is always the authenticated caller themselves, so no `me.*` route can reach another user's data, by construction. `GET /auth/me` is the first route built on it, returning the already-resolved `Principal` with no extra database read; a future self-service token surface (`/auth/me/tokens`) builds on the same prefix.
 
 ## ⚙️ Configuration
 

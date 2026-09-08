@@ -49,3 +49,14 @@ def test_lists_every_catalogued_resource_crossed_with_every_verb(
         "DELETE",
     }
     assert "system.version" in by_resource
+    # Issue #30: `me.profile` is catalogued with no hand-written seed anywhere — the
+    # route's own `require(...)` declaration is the only source, same as every other
+    # resource here.
+    assert "me.profile" in by_resource
+    assert set(by_resource["me.profile"]["verbs"]) == {
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+    }

@@ -208,6 +208,7 @@ def test_openapi_schema(server: str) -> None:
         "/auth/groups/{group_id}/roles/{role_id}",
         "/auth/roles",
         "/auth/permissions",
+        "/auth/me",
     }
 
 
@@ -281,20 +282,13 @@ def test_authed_protected_route_accepts_valid_token(authed_server: str) -> None:
     assert response.json()["name"] == "ansina"
 
 
-def test_read_role_token_progresses_401_then_403_then_200(
-    authed_server: str, tmp_path: Path
-) -> None:
-    """Issue #25's acceptance criterion, black-box end to end: no token is 401, a
-    `Read`-role token gets 403 on a mutating route it holds no grant for, and 200 on a
-    `GET` it does. `tmp_path` is the same directory `authed_server`'s own fixture
-    already launched the server against (pytest caches a function-scoped fixture once
-    per test), so `ansina.db` is the real file the running process is reading and
-    writing — the user is seeded directly into it via plain `sqlite3`, the same
-    technique `test_migration_survives_a_restart` already uses, plus `ansina.auth.
-    hashing` for the credential hash (see this module's docstring for why that one
-    import is allowed).
+def _seed_read_role_user(db_path: Path) -> None:
+    """Seed a `Read`-role user (`e2e-reader`) with an api_token credential directly
+    into the running server's own SQLite file — the technique
+    `test_migration_survives_a_restart` already uses, plus `ansina.auth.hashing` for
+    the credential hash (see this module's docstring for why that one import is
+    allowed). Shared by every e2e test that needs a non-bootstrap `Read` identity.
     """
-    db_path = tmp_path / "ansina.db"
     salt = new_token_salt()
     token_hash = hash_token(_E2E_READ_TOKEN, salt)
     with sqlite3.connect(db_path) as conn:
@@ -315,6 +309,19 @@ def test_read_role_token_progresses_401_then_403_then_200(
         )
         conn.commit()
 
+
+def test_read_role_token_progresses_401_then_403_then_200(
+    authed_server: str, tmp_path: Path
+) -> None:
+    """Issue #25's acceptance criterion, black-box end to end: no token is 401, a
+    `Read`-role token gets 403 on a mutating route it holds no grant for, and 200 on a
+    `GET` it does. `tmp_path` is the same directory `authed_server`'s own fixture
+    already launched the server against (pytest caches a function-scoped fixture once
+    per test), so `ansina.db` is the real file the running process is reading and
+    writing.
+    """
+    _seed_read_role_user(tmp_path / "ansina.db")
+
     # 401: no token at all.
     no_token_response = httpx.post(f"{authed_server}/heart/tick/pause")
     assert no_token_response.status_code == 401
@@ -333,6 +340,25 @@ def test_read_role_token_progresses_401_then_403_then_200(
     ok_response = httpx.get(f"{authed_server}/version", headers=read_headers)
     assert ok_response.status_code == 200
     assert ok_response.json()["name"] == "ansina"
+
+
+def test_read_role_token_can_read_its_own_identity(
+    authed_server: str, tmp_path: Path
+) -> None:
+    """Issue #30's headline AC, black-box end to end: a `Read`-role token — forbidden
+    from every other `auth.*` route — gets 200 from `GET /auth/me` with its own
+    identity and roles, no sudo grant involved.
+    """
+    _seed_read_role_user(tmp_path / "ansina.db")
+    read_headers = {"Authorization": f"Bearer {_E2E_READ_TOKEN}"}
+
+    response = httpx.get(f"{authed_server}/auth/me", headers=read_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["username"] == "e2e-reader"
+    assert body["roles"] == ["read"]
+    assert body["sudo_active"] is False
 
 
 def test_sudo_step_up_round_trip(authed_server: str, tmp_path: Path) -> None:
