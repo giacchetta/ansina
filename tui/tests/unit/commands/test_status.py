@@ -58,9 +58,9 @@ def test_status_renders_with_no_token(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(mock_transport(_routes(json_response)))
+    patch_transport(mock_transport(_routes(json_response)))
 
     result = runner.invoke(app, ["status"])
 
@@ -72,11 +72,11 @@ def test_status_ready_with_no_checks_key_renders_with_an_empty_check_list(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
     routes = _routes(json_response)
     routes["/readyz"] = json_response(200, {"status": "ready"})
-    patch_status_transport(mock_transport(routes))
+    patch_transport(mock_transport(routes))
 
     result = runner.invoke(app, ["status"])
 
@@ -88,11 +88,11 @@ def test_status_renders_with_a_token(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANSINA_TOKEN", "test-token")
-    patch_status_transport(mock_transport(_routes(json_response)))
+    patch_transport(mock_transport(_routes(json_response)))
 
     result = runner.invoke(app, ["status"])
 
@@ -103,9 +103,9 @@ def test_status_version_401_degrades_to_unknown(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(mock_transport(_routes(json_response, version_status=401)))
+    patch_transport(mock_transport(_routes(json_response, version_status=401)))
 
     result = runner.invoke(app, ["status"])
 
@@ -117,9 +117,9 @@ def test_status_json_emits_parseable_json_on_stdout_only(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(mock_transport(_routes(json_response)))
+    patch_transport(mock_transport(_routes(json_response)))
 
     result = runner.invoke(app, ["--json", "status"])
 
@@ -135,9 +135,9 @@ def test_status_not_ready_exits_6_and_lists_failing_check(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(mock_transport(_routes(json_response, ready=False)))
+    patch_transport(mock_transport(_routes(json_response, ready=False)))
 
     result = runner.invoke(app, ["status"])
 
@@ -150,9 +150,9 @@ def test_status_not_healthy_exits_7_even_when_ready_would_be_true(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(mock_transport(_routes(json_response, healthy=False)))
+    patch_transport(mock_transport(_routes(json_response, healthy=False)))
 
     result = runner.invoke(app, ["status"])
 
@@ -162,9 +162,9 @@ def test_status_not_healthy_exits_7_even_when_ready_would_be_true(
 def test_status_unreachable_host_exits_5_with_a_clear_message_not_a_traceback(
     tmp_xdg_home: Path,
     unreachable_transport: httpx.MockTransport,
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(unreachable_transport)
+    patch_transport(unreachable_transport)
 
     result = runner.invoke(app, ["status"])
 

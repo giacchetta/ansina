@@ -47,10 +47,12 @@ def _default_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _parse_expiry(raw: str | None) -> datetime | None:
+def parse_expiry(raw: str | None) -> datetime | None:
     """`sudo_expires_at` as stored in `hosts.toml`. A missing or malformed value is
     treated as "no live grant" — the safe default is to not attach `X-Sudo-Token`,
-    never to attach one whose freshness we couldn't verify."""
+    never to attach one whose freshness we couldn't verify. Exported (not `_`-private)
+    since `ansina_tui.session` (issue #32) reuses this exact parse to report sudo
+    state without duplicating it."""
     if raw is None:
         return None
     try:
@@ -77,7 +79,7 @@ class ApiClient:
         self._host = host
         self._token = token
         self._sudo_token = sudo_token
-        self._sudo_expiry = _parse_expiry(sudo_expires_at)
+        self._sudo_expiry = parse_expiry(sudo_expires_at)
         self._now = now
         self._client = httpx.Client(base_url=host, transport=transport, timeout=timeout)
 

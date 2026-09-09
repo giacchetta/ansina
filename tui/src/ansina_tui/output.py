@@ -18,8 +18,9 @@ from rich.table import Table
 class Emitter:
     """The one object every command uses to talk to the terminal."""
 
-    def __init__(self, *, json_mode: bool = False) -> None:
+    def __init__(self, *, json_mode: bool = False, verbose: bool = False) -> None:
         self.json_mode = json_mode
+        self.verbose = verbose
         self._stdout = Console(file=sys.stdout, highlight=False)
         self._stderr = Console(file=sys.stderr, stderr=True, highlight=False)
 
@@ -34,6 +35,18 @@ class Emitter:
         for label, value in rows:
             table.add_row(label, value)
         self._stdout.print(table)
+
+    def table(self, columns: Sequence[str], rows: Sequence[Sequence[str]]) -> None:
+        """A headered multi-column table (`auth token list`). Suppressed in JSON
+        mode — same discipline as `rows`."""
+        if self.json_mode:
+            return
+        rich_table = Table(show_header=True, header_style="bold")
+        for column in columns:
+            rich_table.add_column(column)
+        for row in rows:
+            rich_table.add_row(*row)
+        self._stdout.print(rich_table)
 
     def line(self, text: str) -> None:
         """One line of plain stdout output, suppressed in JSON mode."""
@@ -52,3 +65,15 @@ class Emitter:
         """A diagnostic. Always goes to stderr, JSON mode or not — that's the whole
         point of the discipline: stdout is reserved for the JSON payload."""
         self._stderr.print(f"[bold red]error:[/bold red] {message}")
+
+    def warn(self, message: str) -> None:
+        """A non-fatal diagnostic (e.g. `logout`'s local-only caveat). Stderr,
+        always — same reasoning as `error`."""
+        self._stderr.print(f"[bold yellow]warning:[/bold yellow] {message}")
+
+    def debug(self, text: str) -> None:
+        """`--verbose`-only diagnostic detail (e.g. a request id). Never carries a
+        secret — see `tests/unit/commands/auth/` for the pinning tests that check
+        this across every auth command."""
+        if self.verbose:
+            self._stderr.print(f"[dim]{text}[/dim]")

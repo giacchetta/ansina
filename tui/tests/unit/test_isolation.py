@@ -29,11 +29,11 @@ def test_ansina_daemon_package_never_imported_by_help(tmp_xdg_home: Path) -> Non
 
 def test_ansina_daemon_package_never_imported_by_status(
     tmp_xdg_home: Path,
-    mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
+    mock_transport: Callable[[dict[str | tuple[str, str], Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(
+    patch_transport(
         mock_transport(
             {
                 "/healthz": json_response(200, {"status": "ok"}),
@@ -44,5 +44,31 @@ def test_ansina_daemon_package_never_imported_by_status(
     )
 
     runner.invoke(app, ["--json", "status"])
+
+    assert _no_ansina_daemon_module_imported()
+
+
+def test_ansina_daemon_package_never_imported_by_an_auth_run(
+    tmp_xdg_home: Path,
+    mock_transport: Callable[[dict[str | tuple[str, str], Any]], httpx.MockTransport],
+    json_response: Callable[..., httpx.Response],
+    patch_transport: Callable[[httpx.BaseTransport], None],
+) -> None:
+    patch_transport(
+        mock_transport(
+            {
+                "/auth/me": json_response(
+                    200,
+                    {
+                        "username": "alice",
+                        "roles": ["read"],
+                        "auth_method": "api_token",
+                    },
+                )
+            }
+        )
+    )
+
+    runner.invoke(app, ["--json", "auth", "login", "--with-token"], input="tok\n")
 
     assert _no_ansina_daemon_module_imported()

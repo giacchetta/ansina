@@ -16,6 +16,7 @@ from ansina_tui.config import (
     load_hosts,
     resolve_host,
     resolve_token,
+    save_config,
     save_hosts,
 )
 
@@ -105,6 +106,7 @@ def test_save_hosts_fixes_a_stale_insecure_mode(tmp_xdg_home: Path) -> None:
 def test_save_then_load_hosts_round_trips_every_field(tmp_xdg_home: Path) -> None:
     entry = HostEntry(
         token="tok-123",
+        token_id="cred-1",
         username="alice",
         roles=("admin", "read"),
         sudo_token="sudo-abc",
@@ -115,6 +117,10 @@ def test_save_then_load_hosts_round_trips_every_field(tmp_xdg_home: Path) -> Non
     loaded = load_hosts()
 
     assert loaded == {"http://127.0.0.1:8000": entry}
+
+
+def test_host_entry_token_id_defaults_to_none() -> None:
+    assert HostEntry(token="t").token_id is None
 
 
 def test_dump_toml_escapes_quotes_and_backslashes(tmp_xdg_home: Path) -> None:
@@ -166,6 +172,22 @@ def test_resolve_token_falls_back_to_stored_token() -> None:
 
 def test_resolve_token_none_when_nothing_stored() -> None:
     assert resolve_token("http://x", {}, {}) is None
+
+
+def test_save_config_writes_default_host(tmp_xdg_home: Path) -> None:
+    save_config(Config(default_host="http://example:9000"))
+
+    assert load_config().default_host == "http://example:9000"
+
+
+def test_save_config_writes_nothing_when_default_host_is_none(
+    tmp_xdg_home: Path,
+) -> None:
+    save_config(Config(default_host=None))
+
+    path = tmp_xdg_home / "ansina" / "config.toml"
+    assert path.read_text() == ""
+    assert load_config() == Config(default_host=None)
 
 
 def test_env_token_is_never_written_back_to_disk(tmp_xdg_home: Path) -> None:

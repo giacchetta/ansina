@@ -88,10 +88,10 @@ def test_subcommand_dispatch_skips_the_tui_branch_even_when_interactive(
     monkeypatch: pytest.MonkeyPatch,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
     monkeypatch.setattr(main_module, "_is_interactive", lambda: True)
-    patch_status_transport(
+    patch_transport(
         mock_transport(
             {
                 "/healthz": json_response(200, {"status": "ok"}),
@@ -111,9 +111,9 @@ def test_host_flag_threads_through_to_the_command_layer(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(
+    patch_transport(
         mock_transport(
             {
                 "/healthz": json_response(200, {"status": "ok"}),
@@ -127,6 +127,33 @@ def test_host_flag_threads_through_to_the_command_layer(
 
     assert result.exit_code == ExitCode.OK
     assert '"host": "http://custom:9999"' in result.stdout
+
+
+def test_bare_auth_is_a_usage_error_not_silent_success(
+    fake_launch: list[object],
+) -> None:
+    result = runner.invoke(app, ["auth"])
+
+    assert result.exit_code == ExitCode.USAGE
+    assert fake_launch == []
+    assert "Usage" in result.stderr
+
+
+def test_bare_auth_token_is_a_usage_error(fake_launch: list[object]) -> None:
+    result = runner.invoke(app, ["auth", "token"])
+
+    assert result.exit_code == ExitCode.USAGE
+    assert "Usage" in result.stderr
+
+
+def test_auth_help_writes_to_stdout_and_never_launches(
+    fake_launch: list[object],
+) -> None:
+    result = runner.invoke(app, ["auth", "--help"])
+
+    assert result.exit_code == 0
+    assert "Usage" in result.stdout
+    assert fake_launch == []
 
 
 def test_is_interactive_reflects_the_real_tty_state() -> None:

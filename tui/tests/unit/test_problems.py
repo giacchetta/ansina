@@ -85,6 +85,22 @@ def test_malformed_body_is_not_a_problem() -> None:
     assert parse_problem([1, 2, 3]) is None
 
 
+def test_bootstrap_identity_message_names_the_real_fix() -> None:
+    problem = parse_problem({"code": "ansina.auth.bootstrap_identity"})
+    assert problem is not None
+    assert "break-glass" in problem.message
+    assert "configured admin" in problem.message
+
+
+def test_token_already_issued_and_not_found_have_recognized_messages() -> None:
+    already_issued = parse_problem({"code": "ansina.auth.token_already_issued"})
+    not_found = parse_problem({"code": "ansina.auth.not_found"})
+    assert already_issued is not None
+    assert not_found is not None
+    assert "already holds" in already_issued.message
+    assert not_found.message == "No such token."
+
+
 def test_exit_code_for_maps_401_and_403_specifically() -> None:
     assert exit_code_for(401) == ExitCode.NOT_AUTHENTICATED
     assert exit_code_for(403) == ExitCode.FORBIDDEN

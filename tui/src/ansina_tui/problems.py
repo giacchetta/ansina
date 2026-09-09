@@ -17,17 +17,35 @@ from typing import Any
 from ansina_tui.exits import ExitCode
 
 # code -> human message. Sourced from:
-#   ansina.unauthorized          api/problems.py CODE_UNAUTHORIZED
-#   ansina.forbidden              auth/authorization.py ForbiddenError.code
-#   ansina.auth.sudo_required     auth/authorization.py SudoRequiredError.code
-#   ansina.auth.sudo_locked_out   auth/sudo.py SudoLockedOutError.code
-#   ansina.heart.disabled         api/problems.py CODE_HEART_DISABLED
-#   ansina.not_ready              api/problems.py CODE_NOT_READY
+#   ansina.unauthorized             api/problems.py CODE_UNAUTHORIZED
+#   ansina.forbidden                 auth/authorization.py ForbiddenError.code
+#   ansina.auth.sudo_required        auth/authorization.py SudoRequiredError.code
+#   ansina.auth.sudo_locked_out      auth/sudo.py SudoLockedOutError.code
+#   ansina.auth.bootstrap_identity   auth/management.py BootstrapIdentityError.code
+#   ansina.auth.token_already_issued auth/management.py TokenAlreadyIssuedError.code
+#   ansina.auth.not_found            auth/management.py NotFoundError.code
+#   ansina.heart.disabled            api/problems.py CODE_HEART_DISABLED
+#   ansina.not_ready                 api/problems.py CODE_NOT_READY
+#
+# `ansina.unauthorized` is overloaded — `POST /auth/sudo` also returns it for a wrong
+# step-up password (routes/sudo.py), where "Run `auth login`" is the wrong hint since
+# the caller is already authenticated. `commands/auth/sudo.py` overrides this one
+# message per-call rather than the table carrying two meanings for one code.
 _KNOWN_MESSAGES: dict[str, str] = {
     "ansina.unauthorized": "Not authenticated. Run `auth login` or set ANSINA_TOKEN.",
     "ansina.forbidden": "Your role doesn't grant this action.",
     "ansina.auth.sudo_required": "Sudo required. Run `ansina-tui auth sudo` first.",
     "ansina.auth.sudo_locked_out": "Sudo locked out after too many failed attempts.",
+    "ansina.auth.bootstrap_identity": (
+        "The bootstrap identity is a break-glass credential capped at one token, "
+        "ever — log in as the configured admin or an ordinary Admin user to mint "
+        "one of your own."
+    ),
+    "ansina.auth.token_already_issued": (
+        "That account already holds an API token. Revoke it first, or mint your "
+        "own via `auth token mint` once logged in as that account."
+    ),
+    "ansina.auth.not_found": "No such token.",
     "ansina.heart.disabled": "The Heart is disabled on this daemon.",
     "ansina.not_ready": "The daemon is not ready yet.",
 }

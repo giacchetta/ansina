@@ -71,19 +71,25 @@ def json_response() -> Callable[..., httpx.Response]:
     return _make
 
 
+RouteKey = str | tuple[str, str]  # "/path" (any method) or ("METHOD", "/path")
+
+
 @pytest.fixture
-def mock_transport() -> Callable[[Mapping[str, Any]], httpx.MockTransport]:
-    """Build an `httpx.MockTransport` dispatching on request path only (every route
-    this project talks to is a fixed, method-agnostic path in day-0 scope)."""
+def mock_transport() -> Callable[[Mapping[RouteKey, Any]], httpx.MockTransport]:
+    """Build an `httpx.MockTransport` dispatching on request path, or on
+    `(method, path)` when a route needs to answer differently per verb (issue #32:
+    `/auth/me/tokens` is `GET`+`POST`, `/auth/sudo` is `POST`+`DELETE`) — a
+    `(method, path)` entry is checked first, then the method-agnostic `path` entry."""
 
     def _build(
-        routes: Mapping[str, JsonHandler | httpx.Response],
+        routes: Mapping[RouteKey, JsonHandler | httpx.Response],
     ) -> httpx.MockTransport:
         def _handler(request: httpx.Request) -> httpx.Response:
-            route = routes.get(request.url.path)
+            path = request.url.path
+            route = routes.get((request.method, path), routes.get(path))
             if route is None:
                 return httpx.Response(
-                    404, json={"detail": f"no route for {request.url.path}"}
+                    404, json={"detail": f"no route for {request.method} {path}"}
                 )
             if isinstance(route, httpx.Response):
                 return route
@@ -92,6 +98,31 @@ def mock_transport() -> Callable[[Mapping[str, Any]], httpx.MockTransport]:
         return httpx.MockTransport(_handler)
 
     return _build
+
+
+@pytest.fixture
+def captured_requests() -> list[httpx.Request]:
+    """Populated by `capturing_transport` — lets a pinning test assert on outgoing
+    headers (e.g. that an expired sudo grant is never attached to a request, or that
+    no secret appears in one)."""
+    return []
+
+
+@pytest.fixture
+def capturing_transport(
+    captured_requests: list[httpx.Request],
+) -> Callable[[httpx.BaseTransport], httpx.MockTransport]:
+    """Wrap any transport (typically one built by `mock_transport`) so every request
+    that passes through it is also appended to `captured_requests`."""
+
+    def _wrap(inner: httpx.BaseTransport) -> httpx.MockTransport:
+        def _handler(request: httpx.Request) -> httpx.Response:
+            captured_requests.append(request)
+            return inner.handle_request(request)
+
+        return httpx.MockTransport(_handler)
+
+    return _wrap
 
 
 @pytest.fixture
@@ -106,19 +137,37 @@ def unreachable_transport() -> httpx.MockTransport:
 
 
 @pytest.fixture
-def patch_status_transport(
+def patch_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[httpx.BaseTransport], None]:
-    """Make `commands.status.status_command` build its `ApiClient` against a given
-    transport instead of a real network socket — the CLI layer has no `--transport`
-    flag of its own; this is the test-only seam."""
+    """Make `ansina_tui.session.build_client` construct its `ApiClient` against a
+    given transport instead of a real network socket — the CLI layer has no
+    `--transport` flag of its own; this is the test-only seam every command shares
+    via `session.build_client` (issue #32; replaces #31's `patch_status_transport`,
+    now that `commands/status.py` is built on `session.py` too)."""
 
-    def _patch(transport: httpx.BaseTransport) -> None:
-        import ansina_tui.commands.status as status_module
+    def _patch(fake_transport: httpx.BaseTransport) -> None:
+        import ansina_tui.session as session_module
 
-        def _factory(host: str, *, token: str | None = None) -> ApiClient:
-            return ApiClient(host, token=token, transport=transport)
+        def _factory(
+            host: str,
+            *,
+            token: str | None = None,
+            sudo_token: str | None = None,
+            sudo_expires_at: str | None = None,
+            now: Callable[[], datetime] = lambda: datetime.now(UTC),
+            transport: httpx.BaseTransport | None = None,
+        ) -> ApiClient:
+            del transport  # the fixture's own transport always wins in tests
+            return ApiClient(
+                host,
+                token=token,
+                sudo_token=sudo_token,
+                sudo_expires_at=sudo_expires_at,
+                now=now,
+                transport=fake_transport,
+            )
 
-        monkeypatch.setattr(status_module, "ApiClient", _factory)
+        monkeypatch.setattr(session_module, "ApiClient", _factory)
 
     return _patch

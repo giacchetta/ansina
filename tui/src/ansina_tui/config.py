@@ -53,6 +53,10 @@ class HostEntry:
     """One host's stored credentials in `hosts.toml`."""
 
     token: str | None = None
+    token_id: str | None = None  # the credential's own id, set only when `auth token
+    # mint` stored the token it just minted — lets `auth token revoke` warn when the
+    # id being revoked is the one currently in use (issue #32). Unknown (`None`) for a
+    # token stored via `auth login`, which is never told its own credential id.
     username: str | None = None
     roles: tuple[str, ...] = ()
     sudo_token: str | None = None
@@ -73,6 +77,18 @@ def load_config() -> Config:
     data = tomllib.loads(path.read_text())
     default_host = data.get("default_host")
     return Config(default_host=default_host if isinstance(default_host, str) else None)
+
+
+def save_config(config: Config) -> None:
+    """Write `config.toml`. No secrets ever land here (`Config` holds only
+    `default_host`), so — unlike `save_hosts` — no restrictive mode is needed."""
+    directory = config_dir()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = directory / _CONFIG_FILE
+    lines = []
+    if config.default_host is not None:
+        lines.append(f"default_host = {_toml_string(config.default_host)}")
+    path.write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
 def load_hosts() -> dict[str, HostEntry]:
@@ -135,11 +151,13 @@ def _host_entry_from_table(table: object) -> HostEntry:
         return HostEntry()
     roles = table.get("roles", [])
     token = table.get("token")
+    token_id = table.get("token_id")
     username = table.get("username")
     sudo_token = table.get("sudo_token")
     sudo_expires_at = table.get("sudo_expires_at")
     return HostEntry(
         token=token if isinstance(token, str) else None,
+        token_id=token_id if isinstance(token_id, str) else None,
         username=username if isinstance(username, str) else None,
         roles=tuple(roles) if isinstance(roles, list) else (),
         sudo_token=sudo_token if isinstance(sudo_token, str) else None,
@@ -156,6 +174,7 @@ def _dump_toml(hosts: Mapping[str, HostEntry]) -> str:
         lines.append(f"[hosts.{_toml_string(host)}]")
         for name, value in (
             ("token", entry.token),
+            ("token_id", entry.token_id),
             ("username", entry.username),
             ("sudo_token", entry.sudo_token),
             ("sudo_expires_at", entry.sudo_expires_at),

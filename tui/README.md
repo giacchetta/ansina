@@ -43,6 +43,38 @@ ansina-tui --json status | jq .
 Global options (`--host`, `--json`, `--verbose`, `--version`) are root-level, like `git`'s or
 `docker`'s — they go **before** the subcommand, not after.
 
+## `auth`
+
+Store a credential once, see who you are, mint/rotate your own tokens, and step up to sudo —
+without ever hand-assembling a header or pasting a grant token between commands.
+
+```bash
+ansina-tui auth login --with-token < token.txt   # or pipe/paste one, or a no-echo prompt
+ansina-tui auth status                           # host, identity, roles, sudo state
+ansina-tui auth token mint --label laptop        # shown once, then never again
+ansina-tui auth token list                       # metadata only — never a secret
+ansina-tui auth token revoke <id>
+ansina-tui auth sudo                             # no-echo password prompt or stdin
+ansina-tui auth sudo --status                    # local only, never touches the daemon
+ansina-tui auth sudo --revoke
+ansina-tui auth logout                           # local only — see below
+```
+
+A token or password is **never** a flag value or a bare argument — only `--with-token`
+(reading stdin), a piped stdin, or a no-echo prompt. `auth logout` drops the local credential
+and any sudo grant but does **not** revoke the token server-side (a token you log out of on one
+machine may still be in use on another) — `auth token revoke` is the server-side action, and it
+warns before revoking the token currently in use as this host's own credential.
+
+Two identities need special handling, both from issue #28: the **bootstrap identity** (the
+one-time banner token printed at first boot) is a break-glass credential capped at exactly one
+token, ever — `auth token mint`/`revoke` against it renders a 403 explaining the real fix (log
+in as the configured admin or an ordinary Admin instead). The **configured admin**
+(`ANSINA_SECURITY__ADMIN_USERNAME`/`API_TOKEN`) is an ordinary user — `auth token mint`/`revoke`
+*is* its documented credential-rotation recipe. `auth token list`'s `last_used_at` is coalesced
+server-side (`[security] token_last_used_resolution_seconds`, default 300s) and can lag actual
+use by a few minutes.
+
 ## Exit codes
 
 Pinned by test (`tests/unit/test_exits.py`) — safe to script against.

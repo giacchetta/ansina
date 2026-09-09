@@ -14,36 +14,27 @@ import os
 import typer
 
 from ansina_tui.client import ApiClient, ApiResponse, HostUnreachableError
-from ansina_tui.config import (
-    InsecureCredentialsFileError,
-    load_config,
-    load_hosts,
-    resolve_host,
-    resolve_token,
-)
+from ansina_tui.config import InsecureCredentialsFileError
 from ansina_tui.context import AppContext
 from ansina_tui.exits import ExitCode
 from ansina_tui.output import Emitter
+from ansina_tui.session import build_client, resolve_session
 
 
 def status_command(ctx: typer.Context) -> None:
     """Show daemon health, per-check readiness, and version."""
     app_context: AppContext = ctx.obj
-    emitter = Emitter(json_mode=app_context.json_output)
+    emitter = Emitter(json_mode=app_context.json_output, verbose=app_context.verbose)
 
     try:
-        config = load_config()
-        hosts = load_hosts()
+        session = resolve_session(app_context, env=os.environ)
     except InsecureCredentialsFileError as exc:
         emitter.error(str(exc))
         raise typer.Exit(ExitCode.USAGE) from exc
 
-    host = resolve_host(app_context.host, os.environ, config)
-    token = resolve_token(host, hosts, os.environ)
-
-    with ApiClient(host, token=token) as client:
+    with build_client(session) as client:
         try:
-            exit_code = _report_status(client, host, emitter)
+            exit_code = _report_status(client, session.host, emitter)
         except HostUnreachableError as exc:
             emitter.error(str(exc))
             raise typer.Exit(ExitCode.HOST_UNREACHABLE) from exc

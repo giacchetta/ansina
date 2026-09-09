@@ -15,6 +15,8 @@ import sys
 import typer
 
 from ansina_tui import __version__
+from ansina_tui.clihelp import print_help_to_stderr
+from ansina_tui.commands.auth import auth_app
 from ansina_tui.commands.status import status_command
 from ansina_tui.context import AppContext
 from ansina_tui.exits import ExitCode
@@ -66,32 +68,17 @@ def main(
     ctx.obj = AppContext(host=host, json_output=json_output, verbose=verbose)
 
     if ctx.resilient_parsing or ctx.invoked_subcommand is not None:
-        return  # a subcommand (`status …`, later `auth`/`api`), or a completion probe
+        return  # a subcommand (`status …`, `auth …`, later `api`), or a completion
+        # probe
 
     if not _is_interactive():
         # Textual cannot render into a pipe. Help goes to stderr (never stdout, which
         # a caller may be piping elsewhere) so a script that typos the command gets a
         # clear error instead of a hang.
-        _print_help_to_stderr(ctx)
+        print_help_to_stderr(ctx)
         raise typer.Exit(ExitCode.USAGE)
 
     launch_tui(ctx.obj)
-
-
-def _print_help_to_stderr(ctx: typer.Context) -> None:
-    """Typer's rich-formatted `ctx.get_help()` prints directly to `sys.stdout` as a
-    side effect of formatting (`typer.rich_utils.rich_format_help` builds its own
-    `Console` and prints through it — the returned string is not the whole story), so
-    `typer.echo(ctx.get_help(), err=True)` doesn't actually route it to stderr. Rich's
-    `Console` resolves `sys.stdout` dynamically at print time when no file was bound
-    explicitly, so swapping it for the duration of this call redirects the same
-    rich-styled output to stderr instead."""
-    original_stdout = sys.stdout
-    sys.stdout = sys.stderr
-    try:
-        ctx.get_help()
-    finally:
-        sys.stdout = original_stdout
 
 
 def launch_tui(app_context: AppContext) -> None:
@@ -101,6 +88,7 @@ def launch_tui(app_context: AppContext) -> None:
 
 
 app.command("status")(status_command)
+app.add_typer(auth_app, name="auth")
 
 
 if __name__ == "__main__":

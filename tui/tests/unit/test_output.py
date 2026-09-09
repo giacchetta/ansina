@@ -74,3 +74,44 @@ def test_human_mode_error_goes_to_stderr(capsys: pytest.CaptureFixture[str]) -> 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "something failed" in captured.err
+
+
+def test_warn_always_goes_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    emitter = Emitter(json_mode=True)
+
+    emitter.warn("careful")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "careful" in captured.err
+
+
+def test_debug_is_silent_unless_verbose(capsys: pytest.CaptureFixture[str]) -> None:
+    quiet = Emitter(verbose=False)
+    quiet.debug("request id: abc")
+    assert capsys.readouterr().err == ""
+
+    loud = Emitter(verbose=True)
+    loud.debug("request id: abc")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "request id: abc" in captured.err
+
+
+def test_table_renders_columns_and_rows(capsys: pytest.CaptureFixture[str]) -> None:
+    emitter = Emitter(json_mode=False)
+
+    emitter.table(["id", "label"], [["tok-1", "laptop"], ["tok-2", "(none)"]])
+
+    captured = capsys.readouterr()
+    assert "tok-1" in captured.out
+    assert "laptop" in captured.out
+    assert "tok-2" in captured.out
+
+
+def test_table_suppressed_in_json_mode(capsys: pytest.CaptureFixture[str]) -> None:
+    emitter = Emitter(json_mode=True)
+
+    emitter.table(["id"], [["tok-1"]])
+
+    assert capsys.readouterr().out == ""

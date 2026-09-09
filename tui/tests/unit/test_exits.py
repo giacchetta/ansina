@@ -48,9 +48,9 @@ def test_ok_produced_by_status_against_a_healthy_ready_daemon(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(mock_transport(_healthy_ready_routes(json_response)))
+    patch_transport(mock_transport(_healthy_ready_routes(json_response)))
     result = runner.invoke(app, ["status"])
     assert result.exit_code == ExitCode.OK
 
@@ -81,9 +81,9 @@ def test_forbidden_produced_by_problems_exit_code_for() -> None:
 def test_host_unreachable_produced_by_status_against_a_dead_transport(
     tmp_xdg_home: Path,
     unreachable_transport: httpx.MockTransport,
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
-    patch_status_transport(unreachable_transport)
+    patch_transport(unreachable_transport)
     result = runner.invoke(app, ["status"])
     assert result.exit_code == ExitCode.HOST_UNREACHABLE
 
@@ -92,7 +92,7 @@ def test_not_ready_produced_by_status_against_a_ready_false_daemon(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
     routes = _healthy_ready_routes(json_response)
     routes["/readyz"] = json_response(
@@ -106,7 +106,7 @@ def test_not_ready_produced_by_status_against_a_ready_false_daemon(
             "checks": {"database": False},
         },
     )
-    patch_status_transport(mock_transport(routes))
+    patch_transport(mock_transport(routes))
     result = runner.invoke(app, ["status"])
     assert result.exit_code == ExitCode.NOT_READY
 
@@ -115,11 +115,11 @@ def test_not_healthy_produced_by_status_against_a_failing_healthz(
     tmp_xdg_home: Path,
     mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
     json_response: Callable[..., httpx.Response],
-    patch_status_transport: Callable[[httpx.BaseTransport], None],
+    patch_transport: Callable[[httpx.BaseTransport], None],
 ) -> None:
     routes = _healthy_ready_routes(json_response)
     routes["/healthz"] = json_response(500, {"detail": "boom"})
-    patch_status_transport(mock_transport(routes))
+    patch_transport(mock_transport(routes))
     result = runner.invoke(app, ["status"])
     assert result.exit_code == ExitCode.NOT_HEALTHY
 
