@@ -12,11 +12,11 @@ other, calling `resolve()` to elevate a `Principal` when a request carries a liv
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, ClassVar
 
+from ansina.auth.clock import Clock, iso, parse_iso, utc_now
 from ansina.auth.repositories import SudoGrantRepository, SudoLockoutRepository
 from ansina.auth.step_up import StepUpRegistry, build_step_up_verifiers
 from ansina.errors import AuthError
@@ -36,8 +36,6 @@ logger = get_logger(__name__)
 # 32 raw bytes -> 43 base64url characters, the same generation shape
 # `auth.bootstrap`'s bootstrap token already uses.
 _GRANT_TOKEN_BYTES = 32
-
-Clock = Callable[[], datetime]
 
 
 class SudoLockedOutError(AuthError):
@@ -62,23 +60,6 @@ class IssuedGrant:
     expires_at: str
 
 
-def _iso(dt: datetime) -> str:
-    """Millisecond-precision ISO 8601 UTC, matching `0002_rbac.sql`'s
-    `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` column defaults closely enough that the
-    two sort identically as text — `SudoGrantRepository.find_active`'s `expires_at > ?`
-    comparison depends on that.
-    """
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-
-
-def _parse_iso(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
 class SudoService:
     """Issues, checks, and revokes sudo grants; enforces the failed-attempt lockout.
     Constructed once in `create_app` and stashed on `app.state.sudo`.
@@ -90,7 +71,7 @@ class SudoService:
         settings: SudoSettings,
         *,
         registry: StepUpRegistry,
-        clock: Clock = _utc_now,
+        clock: Clock = utc_now,
     ) -> None:
         self._grants = SudoGrantRepository(db)
         self._lockouts = SudoLockoutRepository(db)
@@ -106,7 +87,7 @@ class SudoService:
         """
         if lockout is None or lockout.locked_until is None:
             return None
-        return lockout if _parse_iso(lockout.locked_until) > now else None
+        return lockout if parse_iso(lockout.locked_until) > now else None
 
     def step_up(
         self, principal: Principal, payload: Mapping[str, Any]
@@ -124,7 +105,7 @@ class SudoService:
         existing = self._active_lockout(self._lockouts.get(user_id), now)
         if existing is not None:
             assert existing.locked_until is not None  # narrowed by _active_lockout
-            retry_after = (_parse_iso(existing.locked_until) - now).total_seconds()
+            retry_after = (parse_iso(existing.locked_until) - now).total_seconds()
             logger.warning(
                 "sudo step-up refused — user is locked out",
                 extra={"actor": principal.actor, "user_id": user_id},
@@ -154,8 +135,8 @@ class SudoService:
             user_id,
             token,
             verifier.name,
-            issued_at=_iso(now),
-            expires_at=_iso(expires_at),
+            issued_at=iso(now),
+            expires_at=iso(expires_at),
         )
         logger.info(
             "sudo step-up granted",
@@ -177,7 +158,7 @@ class SudoService:
         current = self._lockouts.get(user_id)
         window = timedelta(seconds=self._settings.attempt_window_seconds)
         if current is not None and current.first_failed_at is not None:
-            first_failed_at = _parse_iso(current.first_failed_at)
+            first_failed_at = parse_iso(current.first_failed_at)
         else:
             first_failed_at = now
 
@@ -200,8 +181,8 @@ class SudoService:
         self._lockouts.set(
             user_id,
             failed_count=failed_count,
-            first_failed_at=_iso(first_failed_at),
-            locked_until=_iso(locked_until) if locked_until is not None else None,
+            first_failed_at=iso(first_failed_at),
+            locked_until=iso(locked_until) if locked_until is not None else None,
         )
 
     def resolve(self, user_id: str, token: str) -> SudoGrant | None:
@@ -210,17 +191,17 @@ class SudoService:
         elevate rather than rejecting the request outright (see `api.auth`'s
         docstring for why that's deliberate).
         """
-        return self._grants.find_active(user_id, token, now=_iso(self._clock()))
+        return self._grants.find_active(user_id, token, now=iso(self._clock()))
 
     def revoke_for_user(self, user_id: str) -> None:
         """`DELETE /auth/sudo` — the caller stepping back down deliberately."""
-        self._grants.revoke_for_user(user_id, now=_iso(self._clock()))
+        self._grants.revoke_for_user(user_id, now=iso(self._clock()))
 
     def revoke_all(self) -> None:
         """The break-glass path (`DELETE /auth/sudo/grants`) — revokes every user's
         active grant, including the caller's own.
         """
-        self._grants.revoke_all(now=_iso(self._clock()))
+        self._grants.revoke_all(now=iso(self._clock()))
 
 
 def build_sudo_service(db: Database, settings: Settings) -> SudoService:

@@ -37,7 +37,10 @@ _POLL_INTERVAL_S = 0.1
 # Long enough and high-entropy enough to clear `SecuritySettings.api_token`'s
 # strength bar (>=32 chars, base64url charset, >=2.5 bits/char) — see
 # `config/settings.py`'s `_TOKEN_MIN_LENGTH`/`_TOKEN_CHARSET`/
-# `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
+# `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`. As of issue #28 this is the *configured admin's*
+# credential (`ANSINA_SECURITY__API_TOKEN`, paired with `ADMIN_USERNAME` below) — an
+# ordinary Admin user, unrelated to the bootstrap identity's own auto-generated one.
+_E2E_ADMIN_USERNAME = "e2e-configured-admin"
 _E2E_TOKEN = "e2e-test-token-0123456789abcdefghij"
 _E2E_READ_TOKEN = "e2e-read-role-token-0123456789abcd"
 _E2E_MAINTAIN_TOKEN = "e2e-maintain-role-token-0123456789ab"
@@ -140,12 +143,17 @@ def server(tmp_path: Path) -> Iterator[str]:
 
 @pytest.fixture
 def authed_server(tmp_path: Path) -> Iterator[str]:
-    """ANSINA_SECURITY__API_TOKEN set in the child process — auth enforced via that
-    operator-supplied override, not the auto-generated path (see
+    """`ANSINA_SECURITY__ADMIN_USERNAME`/`API_TOKEN` set in the child process — auth
+    enforced via that configured-admin identity (issue #28), not the
+    always-auto-generated bootstrap identity (see
     `test_bootstrap_token_is_generated_printed_once_and_authenticates` for that one).
     """
     with _launch_server(
-        tmp_path, env={"ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN}
+        tmp_path,
+        env={
+            "ANSINA_SECURITY__ADMIN_USERNAME": _E2E_ADMIN_USERNAME,
+            "ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN,
+        },
     ) as srv:
         yield srv.base_url
 
@@ -201,6 +209,7 @@ def test_openapi_schema(server: str) -> None:
         "/auth/users/{user_id}",
         "/auth/users/{user_id}/password",
         "/auth/users/{user_id}/tokens",
+        "/auth/users/{user_id}/tokens/{token_id}",
         "/auth/users/{user_id}/roles/{role_id}",
         "/auth/groups",
         "/auth/groups/{group_id}",
@@ -209,6 +218,8 @@ def test_openapi_schema(server: str) -> None:
         "/auth/roles",
         "/auth/permissions",
         "/auth/me",
+        "/auth/me/tokens",
+        "/auth/me/tokens/{token_id}",
     }
 
 
@@ -434,8 +445,9 @@ def test_sudo_step_up_round_trip(authed_server: str, tmp_path: Path) -> None:
     assert again_response.status_code == 403
     assert again_response.json()["code"] == "ansina.auth.sudo_required"
 
-    # Admin (the bootstrap identity `authed_server` already authenticates as via
-    # _E2E_TOKEN) reaches the same sensitive route with no grant at all, by design.
+    # Admin (the configured admin `authed_server` already authenticates as via
+    # _E2E_TOKEN — issue #28, unrelated to the bootstrap identity) reaches the same
+    # sensitive route with no grant at all, by design.
     admin_response = httpx.delete(
         f"{authed_server}/auth/sudo/grants",
         headers={"Authorization": f"Bearer {_E2E_TOKEN}"},
@@ -449,11 +461,14 @@ def test_rbac_management_round_trip(authed_server: str) -> None:
     then_200`, `test_sudo_step_up_round_trip`) seeds one directly into the running
     server's SQLite file, because until this issue there was no other way to create
     one. This test creates its `Maintain` user entirely over HTTP instead — the
-    point of shipping this management API at all. The bootstrap Admin creates a
-    user, sets its password, issues it an API token, and assigns it `Maintain`; that
-    user is then refused a mutating `/auth/*` call with no sudo grant, succeeds once
-    stepped up, is refused an attempt to self-escalate to `Admin`, and the bootstrap
-    Admin itself cannot be deleted as the sole remaining Admin.
+    point of shipping this management API at all. The configured admin
+    (`_E2E_TOKEN`, issue #28) creates a user, sets its password, issues it an API
+    token, and assigns it `Maintain`; that user is then refused a mutating `/auth/*`
+    call with no sudo grant, succeeds once stepped up, is refused an attempt to
+    self-escalate to `Admin`, and — once it's the sole remaining Admin (this fixture
+    seeds two: the bootstrap identity and the configured admin, so the configured
+    admin's own direct grant is stripped first, via the sudo'd Maintain itself, to
+    reach that state) — the bootstrap Admin cannot be deleted.
     """
     admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
 
@@ -523,16 +538,169 @@ def test_rbac_management_round_trip(authed_server: str) -> None:
     assert self_escalate.status_code == 403
     assert self_escalate.json()["code"] == "ansina.auth.self_escalation"
 
-    # The bootstrap Admin is the sole Admin — deleting it is refused.
+    # `authed_server` seeds two Admins (issue #28): the bootstrap identity and the
+    # configured admin `_E2E_TOKEN` itself authenticates as — so deleting bootstrap
+    # while the configured admin still holds its own direct grant would not be
+    # refused, the other one remains. Strip the configured admin's own grant first
+    # (via the sudo'd Maintain actor already on hand — using `admin_headers` itself
+    # would also invalidate `admin_headers` for the very next call) so bootstrap
+    # really is the sole remaining Admin, the scenario this assertion is about.
     admins = httpx.get(f"{authed_server}/auth/users", headers=admin_headers)
     bootstrap_id = next(
         u["id"] for u in admins.json() if u["username"] == "bootstrap-admin"
     )
+    configured_admin_id = next(
+        u["id"] for u in admins.json() if u["username"] == _E2E_ADMIN_USERNAME
+    )
+    strip_configured_admin = httpx.delete(
+        f"{authed_server}/auth/users/{configured_admin_id}/roles/{admin_role_id}",
+        headers=granted_headers,
+    )
+    assert strip_configured_admin.status_code == 204
+
     delete_last_admin = httpx.delete(
-        f"{authed_server}/auth/users/{bootstrap_id}", headers=admin_headers
+        f"{authed_server}/auth/users/{bootstrap_id}", headers=granted_headers
     )
     assert delete_last_admin.status_code == 409
     assert delete_last_admin.json()["code"] == "ansina.auth.last_admin"
+
+
+def test_self_service_token_round_trip(authed_server: str) -> None:
+    """Issue #28's headline flow, black-box end to end: mint a token via
+    `POST /auth/me/tokens`, authenticate a real request with it, watch
+    `last_used_at` move off `null`, then revoke it and confirm it stops
+    authenticating on the very next request.
+    """
+    admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+
+    minted = httpx.post(
+        f"{authed_server}/auth/me/tokens", headers=admin_headers, json={"label": "cli"}
+    )
+    assert minted.status_code == 201
+    body = minted.json()
+    assert body["last_used_at"] is None
+    new_token = body["token"]
+    token_id = body["id"]
+
+    authed = httpx.get(
+        f"{authed_server}/auth/me", headers={"Authorization": f"Bearer {new_token}"}
+    )
+    assert authed.status_code == 200
+
+    listed = httpx.get(
+        f"{authed_server}/auth/me/tokens",
+        headers={"Authorization": f"Bearer {new_token}"},
+    )
+    assert listed.status_code == 200
+    minted_entry = next(t for t in listed.json() if t["id"] == token_id)
+    assert minted_entry["last_used_at"] is not None
+    assert "hash" not in minted_entry
+    assert "salt" not in minted_entry
+
+    revoked = httpx.delete(
+        f"{authed_server}/auth/me/tokens/{token_id}",
+        headers={"Authorization": f"Bearer {new_token}"},
+    )
+    assert revoked.status_code == 204
+
+    rejected = httpx.get(
+        f"{authed_server}/auth/me", headers={"Authorization": f"Bearer {new_token}"}
+    )
+    assert rejected.status_code == 401
+    assert rejected.json()["code"] == "ansina.unauthorized"
+
+
+def test_bootstrap_and_configured_admin_are_fully_independent(
+    tmp_path: Path,
+) -> None:
+    """Issue #28: one boot with both mechanisms configured produces two
+    independently-authenticating identities — the printed bootstrap banner token and
+    the env-supplied configured-admin token — and revoking one never affects the
+    other.
+    """
+    output_path = tmp_path / "server-output.log"
+    port = _free_port()
+    (tmp_path / "ansina.toml").write_text(
+        f'[server]\nhost = "127.0.0.1"\nport = {port}\n'
+        f'[database]\npath = "{(tmp_path / "ansina.db").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    with output_path.open("w", encoding="utf-8") as output_file:
+        process = subprocess.Popen(  # fixed argv, no shell, no untrusted input
+            [sys.executable, "-m", "ansina"],
+            cwd=tmp_path,
+            stdout=output_file,
+            stderr=subprocess.STDOUT,
+            env={
+                **os.environ,
+                "ANSINA_SECURITY__ADMIN_USERNAME": _E2E_ADMIN_USERNAME,
+                "ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN,
+            },
+        )
+        try:
+            deadline = time.monotonic() + _STARTUP_TIMEOUT_S
+            last_error: Exception | None = None
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    pytest.fail(
+                        f"ansina exited early (code {process.returncode}):\n"
+                        f"{output_path.read_text(encoding='utf-8')}"
+                    )
+                try:
+                    response = httpx.get(f"{base_url}/healthz", timeout=1.0)
+                    if response.status_code == 200:
+                        break
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                time.sleep(_POLL_INTERVAL_S)
+            else:
+                process.kill()
+                raise TimeoutError(f"ansina never became healthy: {last_error}")
+
+            output = output_path.read_text(encoding="utf-8")
+            match = re.search(r"^   (\S+)$", output, re.MULTILINE)
+            assert match is not None, f"bootstrap token banner not found:\n{output}"
+            bootstrap_token = match.group(1)
+
+            for token in (bootstrap_token, _E2E_TOKEN):
+                response = httpx.get(
+                    f"{base_url}/version",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status_code == 200
+
+            # Revoking the configured admin's own token never touches bootstrap's.
+            me = httpx.get(
+                f"{base_url}/auth/me/tokens",
+                headers={"Authorization": f"Bearer {_E2E_TOKEN}"},
+            )
+            configured_token_id = me.json()[0]["id"]
+            revoked = httpx.delete(
+                f"{base_url}/auth/me/tokens/{configured_token_id}",
+                headers={"Authorization": f"Bearer {_E2E_TOKEN}"},
+            )
+            assert revoked.status_code == 204
+
+            still_bootstrap = httpx.get(
+                f"{base_url}/version",
+                headers={"Authorization": f"Bearer {bootstrap_token}"},
+            )
+            assert still_bootstrap.status_code == 200
+
+            now_rejected = httpx.get(
+                f"{base_url}/version",
+                headers={"Authorization": f"Bearer {_E2E_TOKEN}"},
+            )
+            assert now_rejected.status_code == 401
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def test_bootstrap_token_is_generated_printed_once_and_authenticates(

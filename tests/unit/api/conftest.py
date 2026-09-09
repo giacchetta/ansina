@@ -21,8 +21,13 @@ from ansina.config import load_settings
 # Long enough and high-entropy enough to clear `SecuritySettings.api_token`'s
 # strength bar (>=32 chars, base64url charset, >=2.5 bits/char) — see
 # `config/settings.py`'s `_TOKEN_MIN_LENGTH`/`_TOKEN_CHARSET`/
-# `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
+# `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`. As of issue #28 this is the *configured admin's*
+# credential (`ANSINA_SECURITY__API_TOKEN`), not an override of the bootstrap
+# identity's own — the two are unrelated as of #28's redesign. The name is kept
+# unchanged (`authed_token`) despite what it represents shifting, to avoid touching
+# every one of its many call sites for a rename alone.
 TEST_TOKEN = "unit-test-token-0123456789abcdefgh"
+TEST_ADMIN_USERNAME = "configured-admin"
 
 
 @pytest.fixture
@@ -49,13 +54,24 @@ def authed_token() -> str:
 
 
 @pytest.fixture
+def authed_admin_username() -> str:
+    return TEST_ADMIN_USERNAME
+
+
+@pytest.fixture
 def authed_app(
     clean_env: None,
     tmp_cwd: Path,
     monkeypatch: pytest.MonkeyPatch,
     authed_token: str,
+    authed_admin_username: str,
 ) -> FastAPI:
-    """Same as `app`, but with `ANSINA_SECURITY__API_TOKEN` set — auth enforced."""
+    """Same as `app`, but with the configured-admin env vars set (issue #28) — auth
+    enforced, and `authed_token` authenticates as an ordinary Admin user
+    (`authed_admin_username`), not the synthetic bootstrap identity. Both are required
+    together as of #28 (`SecuritySettings._validate_admin_username_pairing`).
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", authed_admin_username)
     monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", authed_token)
     return create_app(load_settings())
 

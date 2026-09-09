@@ -320,23 +320,34 @@ def test_lifespan_with_auth_enabled_and_no_override_auto_generates_bootstrap_adm
         assert response.status_code == 200
 
 
-def test_lifespan_with_an_api_token_creates_the_bootstrap_admin(
-    authed_app: FastAPI, authed_token: str
+def test_lifespan_with_admin_username_and_api_token_creates_both_admins(
+    authed_app: FastAPI, authed_token: str, authed_admin_username: str
 ) -> None:
+    """Issue #28: `authed_app` sets both `ANSINA_SECURITY__ADMIN_USERNAME` and
+    `ANSINA_SECURITY__API_TOKEN` — two admins exist after boot, not one: the
+    always-auto-generated bootstrap identity, and the configured admin `authed_token`
+    itself authenticates as. The two are unrelated identities with unrelated
+    credentials.
+    """
     with TestClient(authed_app):
-        users = UserRepository(authed_app.state.db).list_all()
-        assert len(users) == 1
-        identities = ExternalIdentityRepository(authed_app.state.db)
-        identity = identities.get_by_provider_subject(
+        db = authed_app.state.db
+        users = UserRepository(db).list_all()
+        assert len(users) == 2
+
+        identities = ExternalIdentityRepository(db)
+        bootstrap_identity = identities.get_by_provider_subject(
             "local-bootstrap", "bootstrap-admin"
         )
-        assert identity is not None
-        roles = RoleAssignmentRepository(authed_app.state.db).roles_for_user(
-            users[0].id
-        )
-        assert [r.slug for r in roles] == [RoleSlug.ADMIN.value]
-        found = CredentialRepository(authed_app.state.db).find_user_by_api_token(
-            authed_token
-        )
+        assert bootstrap_identity is not None
+
+        configured_admin = UserRepository(db).get_by_username(authed_admin_username)
+        assert configured_admin is not None
+        assert configured_admin.id != bootstrap_identity.user_id
+
+        for user_id in (bootstrap_identity.user_id, configured_admin.id):
+            roles = RoleAssignmentRepository(db).roles_for_user(user_id)
+            assert [r.slug for r in roles] == [RoleSlug.ADMIN.value]
+
+        found = CredentialRepository(db).find_user_by_api_token(authed_token)
         assert found is not None
-        assert found.id == users[0].id
+        assert found.id == configured_admin.id

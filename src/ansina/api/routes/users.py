@@ -1,20 +1,27 @@
-"""User management. See issue #27.
+"""User management. See issue #27, token routes narrowed by issue #28.
 
 `GET` routes are `sensitive=False` — a `Maintain` caller can always list/inspect users
-with no sudo grant. Every mutating route (`POST`/`PATCH`/`DELETE`, plus the two
+with no sudo grant. Every mutating route (`POST`/`PATCH`/`DELETE`, plus the three
 credential routes) is `sensitive=True`, all sharing the `auth.users` resource so the
 route-coverage audit's grant reconciliation treats them as one management surface.
 
 `DELETE` is a one-way tombstone (`UserRepository.soft_delete`), not a row removal — see
 `storage/migrations/0004_user_tombstone.sql`'s docstring for why. A tombstoned user is
-treated as gone by every route here except `GET` (which still shows it, `deleted_at`
-included, for audit visibility): `PATCH`/`DELETE`/the credential routes all 404 on one.
+treated as gone by every route here except the bare `GET /{id}` (which still shows it,
+`deleted_at` included, for audit visibility): `PATCH`/`DELETE`/every credential route
+(including the token routes' own `GET`) 404 on one.
+
+The token routes (`ansina.api.tokens`, shared with `api.routes.me`'s self-service
+surface) are Admin/sudo'd-Maintain-on-behalf-of. Issue #28 narrows the issuing one:
+it mints a user's *first* `api_token` credential, never a second
+(`ansina.auth.management.assert_no_existing_api_token`) — beyond that, the user mints
+their own via `POST /auth/me/tokens`. Revoking a user's last token drops the count
+back to zero, which is what makes this surface double as the lost-credential recovery
+path.
 """
 
 from __future__ import annotations
 
-import secrets
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import anyio.to_thread
@@ -23,11 +30,17 @@ from fastapi.params import Depends
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from ansina.api import tokens as tokens_api
 from ansina.api.authorization import require
+from ansina.auth.clock import iso, utc_now
 from ansina.auth.hashing import Argon2Params
-from ansina.auth.management import NotFoundError, assert_admin_remains
+from ansina.auth.management import (
+    NotFoundError,
+    assert_admin_remains,
+    assert_no_existing_api_token,
+    assert_not_bootstrap_identity,
+)
 from ansina.auth.repositories import CredentialRepository, UserRepository
-from ansina.logging import register_secret
 
 if TYPE_CHECKING:
     from ansina.auth.models import User
@@ -49,13 +62,6 @@ def _require_read() -> Depends:
 
 def _require_write() -> Depends:
     return Depends(require(_RESOURCE, description=_DESCRIPTION, sensitive=True))
-
-
-def _now_iso() -> str:
-    """Millisecond-precision ISO 8601 UTC, matching `auth.sudo`'s own `_iso` format and
-    `0002_rbac.sql`'s column defaults closely enough to sort identically as text.
-    """
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class UserOut(BaseModel):
@@ -91,20 +97,6 @@ class UpdateUserRequest(BaseModel):
 
 class SetPasswordRequest(BaseModel):
     password: str = Field(min_length=1)
-
-
-class IssueTokenRequest(BaseModel):
-    label: str = ""
-
-
-class IssuedTokenResponse(BaseModel):
-    """The raw token, visible exactly once — never recoverable afterward, same
-    discipline as `auth.bootstrap`'s bootstrap-token banner and `POST /auth/sudo`'s
-    grant token.
-    """
-
-    token: str
-    label: str
 
 
 def _get_live_user(db: Database, user_id: str) -> User:
@@ -158,7 +150,7 @@ def _update_user(db: Database, user_id: str, payload: UpdateUserRequest) -> User
 def _delete_user(db: Database, user_id: str) -> None:
     user = _get_live_user(db, user_id)
     assert_admin_remains(db, frozenset({user.id}))
-    UserRepository(db).soft_delete(user.id, deleted_at=_now_iso())
+    UserRepository(db).soft_delete(user.id, deleted_at=iso(utc_now()))
 
 
 def _set_password(
@@ -171,13 +163,29 @@ def _set_password(
 
 
 def _issue_token(
-    db: Database, user_id: str, payload: IssueTokenRequest
-) -> IssuedTokenResponse:
+    db: Database, user_id: str, payload: tokens_api.IssueTokenRequest
+) -> tokens_api.IssuedTokenResponse:
     user = _get_live_user(db, user_id)
-    token = secrets.token_urlsafe(32)
-    register_secret(token)
-    CredentialRepository(db).create_api_token(user.id, token, label=payload.label)
-    return IssuedTokenResponse(token=token, label=payload.label)
+    # Invariant A (bootstrap identity) checked ahead of invariant B (already holds a
+    # token) deliberately: the bootstrap identity always holds exactly one token from
+    # first boot, so B would otherwise always win and its 409 message — "revoke it
+    # first, or have the user mint their own via POST /auth/me/tokens" — is actively
+    # wrong advice for an identity that can't reach either of those routes either.
+    # `tokens_api.issue_token` re-checks this same guard; the duplication is cheap and
+    # keeps that function's own invariant self-contained regardless of caller.
+    assert_not_bootstrap_identity(db, user.id)
+    assert_no_existing_api_token(db, user.id)  # issue #28's invariant B
+    return tokens_api.issue_token(db, user.id, payload.label)
+
+
+def _list_tokens(db: Database, user_id: str) -> list[tokens_api.TokenOut]:
+    user = _get_live_user(db, user_id)
+    return tokens_api.list_tokens(db, user.id)
+
+
+def _revoke_token(db: Database, user_id: str, token_id: str) -> None:
+    user = _get_live_user(db, user_id)
+    tokens_api.revoke_token(db, user.id, token_id)
 
 
 @router.get("", response_model=list[UserOut], dependencies=[_require_read()])
@@ -226,13 +234,34 @@ async def set_password(
 
 @router.post(
     "/{user_id}/tokens",
-    response_model=IssuedTokenResponse,
+    response_model=tokens_api.IssuedTokenResponse,
     status_code=201,
     dependencies=[_require_write()],
 )
 async def issue_token(
-    request: Request, user_id: str, payload: IssueTokenRequest
-) -> IssuedTokenResponse:
+    request: Request, user_id: str, payload: tokens_api.IssueTokenRequest
+) -> tokens_api.IssuedTokenResponse:
     return await anyio.to_thread.run_sync(
         _issue_token, request.app.state.db, user_id, payload
     )
+
+
+@router.get(
+    "/{user_id}/tokens",
+    response_model=list[tokens_api.TokenOut],
+    dependencies=[_require_read()],
+)
+async def list_user_tokens(request: Request, user_id: str) -> list[tokens_api.TokenOut]:
+    return await anyio.to_thread.run_sync(_list_tokens, request.app.state.db, user_id)
+
+
+@router.delete(
+    "/{user_id}/tokens/{token_id}",
+    status_code=204,
+    dependencies=[_require_write()],
+)
+async def revoke_user_token(request: Request, user_id: str, token_id: str) -> Response:
+    await anyio.to_thread.run_sync(
+        _revoke_token, request.app.state.db, user_id, token_id
+    )
+    return Response(status_code=204)

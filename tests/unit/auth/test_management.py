@@ -1,22 +1,32 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from ansina.auth.bootstrap import ensure_bootstrap_admin
 from ansina.auth.management import (
+    BootstrapIdentityError,
     LastAdminError,
     SelfEscalationError,
+    TokenAlreadyIssuedError,
     assert_admin_remains,
     assert_may_assign_role,
+    assert_no_existing_api_token,
+    assert_not_bootstrap_identity,
 )
 from ansina.auth.models import RoleSlug, SubjectType, User, Verb
 from ansina.auth.principal import Principal
+from ansina.auth.reconciler import reconcile_builtin_roles
 from ansina.auth.repositories import (
+    CredentialRepository,
     ResourceRepository,
     RoleAssignmentRepository,
     RolePermissionRepository,
     RoleRepository,
     UserRepository,
 )
+from ansina.config import load_settings
 from ansina.storage.database import Database
 
 _CALLER = User(
@@ -172,3 +182,56 @@ def test_removing_a_non_admin_never_raises(db: Database) -> None:
     other = UserRepository(db).create("plain-user")
 
     assert_admin_remains(db, frozenset({other.id}))  # must not raise
+
+
+# --- assert_not_bootstrap_identity (issue #28's invariant A) --------------------------
+
+
+def test_refuses_the_bootstrap_identity(
+    db: Database, clean_env: None, tmp_cwd: Path
+) -> None:
+    reconcile_builtin_roles(db)
+    ensure_bootstrap_admin(db, load_settings())
+    bootstrap = UserRepository(db).get_by_username("bootstrap-admin")
+    assert bootstrap is not None
+
+    with pytest.raises(BootstrapIdentityError) as excinfo:
+        assert_not_bootstrap_identity(db, bootstrap.id)
+
+    assert excinfo.value.code == "ansina.auth.bootstrap_identity"
+
+
+def test_allows_an_ordinary_user(db: Database) -> None:
+    user = UserRepository(db).create("ordinary")
+
+    assert_not_bootstrap_identity(db, user.id)  # must not raise
+
+
+# --- assert_no_existing_api_token (issue #28's invariant B) ---------------------------
+
+
+def test_refuses_a_user_who_already_holds_a_token(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(user.id, "already-has-one")
+
+    with pytest.raises(TokenAlreadyIssuedError) as excinfo:
+        assert_no_existing_api_token(db, user.id)
+
+    assert excinfo.value.code == "ansina.auth.token_already_issued"
+
+
+def test_allows_a_user_with_no_tokens_yet(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert_no_existing_api_token(db, user.id)  # must not raise
+
+
+def test_allows_again_after_the_only_token_is_revoked(db: Database) -> None:
+    """The recovery path: revoking a user's last token drops the count back to
+    zero, so an Admin can issue a fresh one.
+    """
+    user = UserRepository(db).create("alice")
+    credential = CredentialRepository(db).create_api_token(user.id, "the-one-token")
+    CredentialRepository(db).delete_api_token(credential.id, user.id)
+
+    assert_no_existing_api_token(db, user.id)  # must not raise

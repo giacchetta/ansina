@@ -16,7 +16,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from ansina.auth.authorization import ForbiddenError, SudoRequiredError
-from ansina.auth.management import LastAdminError, NotFoundError, SelfEscalationError
+from ansina.auth.management import (
+    BootstrapIdentityError,
+    LastAdminError,
+    NotFoundError,
+    SelfEscalationError,
+    TokenAlreadyIssuedError,
+)
 from ansina.auth.repositories import DuplicateError, UnknownSubjectError
 from ansina.auth.sudo import SudoLockedOutError
 from ansina.errors import AnsinaError, ConfigurationError
@@ -40,6 +46,8 @@ CODE_LAST_ADMIN = LastAdminError.code
 CODE_NOT_FOUND_AUTH = NotFoundError.code
 CODE_DUPLICATE = DuplicateError.code
 CODE_UNKNOWN_SUBJECT = UnknownSubjectError.code
+CODE_BOOTSTRAP_IDENTITY = BootstrapIdentityError.code
+CODE_TOKEN_ALREADY_ISSUED = TokenAlreadyIssuedError.code
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
@@ -59,10 +67,17 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # 403, same family as ForbiddenError — the caller is otherwise entitled to mutate
     # this resource, but not to hand out a grant it doesn't itself hold (issue #27).
     SelfEscalationError: 403,
+    # 403, same family again — the caller is otherwise entitled to call this token
+    # route, but the bootstrap identity's one credential is off-limits to it
+    # (issue #28's invariant A).
+    BootstrapIdentityError: 403,
     # 409: the request is well-formed and the caller is otherwise authorized, but
     # applying it would leave the RBAC model in a state with no recovery path.
     LastAdminError: 409,
     DuplicateError: 409,
+    # 409, same family — the target already holds an api_token; issue #28's
+    # invariant B makes this route first-credential-only.
+    TokenAlreadyIssuedError: 409,
     # 404: a path referenced a user/group/role id, or a role_assignments subject, that
     # doesn't exist.
     NotFoundError: 404,

@@ -39,6 +39,7 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/auth/users/{user_id}",
         "/auth/users/{user_id}/password",
         "/auth/users/{user_id}/tokens",
+        "/auth/users/{user_id}/tokens/{token_id}",
         "/auth/users/{user_id}/roles/{role_id}",
         "/auth/groups",
         "/auth/groups/{group_id}",
@@ -47,6 +48,8 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/auth/roles",
         "/auth/permissions",
         "/auth/me",
+        "/auth/me/tokens",
+        "/auth/me/tokens/{token_id}",
     }
 
 

@@ -664,8 +664,13 @@ class CredentialRepository:
         self, user_id: str, raw_token: str, *, label: str = ""
     ) -> Credential:
         """Deletes every existing `api_token` credential for `user_id` and issues a
-        fresh one. Used by `auth.bootstrap` to keep the synthetic Admin's token in sync
-        with a rotated `ANSINA_SECURITY__API_TOKEN`.
+        fresh one.
+
+        Unused by `auth.bootstrap` as of issue #28 — the bootstrap identity's
+        credential is never rotated (see that module's docstring), and the configured
+        admin (also #28) is a plain, first-boot-only creation, never a replace. Kept,
+        unremoved, as a repository primitive a future caller (e.g. an Admin-forced
+        token replacement) could still want.
         """
         with self._db.transaction() as cursor:
             cursor.execute(
@@ -674,6 +679,26 @@ class CredentialRepository:
             )
         return self.create_api_token(user_id, raw_token, label=label)
 
+    def list_api_tokens(self, user_id: str) -> list[Credential]:
+        """Every `api_token` credential for `user_id`, oldest first — metadata only
+        (never a secret, but `hash`/`salt` are still present on the returned rows;
+        callers rendering this to an API response must project them out — see
+        `ansina.api.tokens.TokenOut`).
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                """
+                SELECT * FROM credentials
+                WHERE user_id = ? AND type = 'api_token'
+                ORDER BY created_at, id
+                """,
+                (user_id,),
+            )
+            .fetchall()
+        )
+        return [Credential.from_row(row) for row in rows]
+
     def delete_credentials(self, user_id: str, credential_type: CredentialType) -> None:
         with self._db.transaction() as cursor:
             cursor.execute(
@@ -681,29 +706,67 @@ class CredentialRepository:
                 (user_id, credential_type.value),
             )
 
-    def find_user_by_api_token(self, token: str) -> User | None:
-        """Scans every active `api_token` credential, comparing in constant time.
-        Fine at M2 scale — a token-id-prefix index is the change to make if this table
-        ever grows large enough for the scan to matter.
+    def delete_api_token(self, credential_id: str, user_id: str) -> bool:
+        """Deletes one `api_token` credential, scoped by **both** id and `user_id` —
+        that scoping is what stops a caller revoking someone else's token. Returns
+        whether a row actually went, so the caller (issue #28's
+        `ansina.api.tokens.revoke_token`) can 404 on "doesn't exist or belongs to
+        someone else" without a separate lookup first.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM credentials WHERE id = ? AND user_id = ? "
+                "AND type = 'api_token'",
+                (credential_id, user_id),
+            )
+            return cursor.rowcount > 0
+
+    def touch_last_used(self, credential_id: str, *, now: str) -> None:
+        """Updates `last_used_at` on one credential — issue #28's coalesced
+        bookkeeping. The caller (`ansina.auth.authenticator.ApiTokenAuthenticator`)
+        decides whether the existing value is stale enough to warrant a write; this
+        method only performs it.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE credentials SET last_used_at = ? WHERE id = ?",
+                (now, credential_id),
+            )
+
+    def find_api_token_credential(self, token: str) -> Credential | None:
+        """Scans every `api_token` credential, comparing in constant time, and
+        returns the matched row itself — issue #28's authenticator needs the
+        credential's id and `last_used_at` to run its coalesced staleness check, not
+        just the owning user. Fine at M2 scale — a token-id-prefix index is the
+        change to make if this table ever grows large enough for the scan to matter.
         """
         rows = (
             self._db.connection()
-            .execute(
-                "SELECT user_id, hash, salt FROM credentials WHERE type = 'api_token'"
-            )
+            .execute("SELECT * FROM credentials WHERE type = 'api_token'")
             .fetchall()
         )
         for row in rows:
             if row["salt"] is not None and verify_token_hash(
                 token, row["salt"], row["hash"]
             ):
-                user_row = (
-                    self._db.connection()
-                    .execute("SELECT * FROM users WHERE id = ?", (row["user_id"],))
-                    .fetchone()
-                )
-                return User.from_row(user_row) if user_row is not None else None
+                return Credential.from_row(row)
         return None
+
+    def find_user_by_api_token(self, token: str) -> User | None:
+        """The matched credential's owning user, or `None`. Delegates to
+        `find_api_token_credential` (issue #28) so the constant-time scan exists in
+        exactly one place; kept as its own method since most callers only ever want
+        the user, not the credential row itself.
+        """
+        credential = self.find_api_token_credential(token)
+        if credential is None:
+            return None
+        user_row = (
+            self._db.connection()
+            .execute("SELECT * FROM users WHERE id = ?", (credential.user_id,))
+            .fetchone()
+        )
+        return User.from_row(user_row) if user_row is not None else None
 
 
 class SudoGrantRepository:

@@ -21,13 +21,22 @@ from ansina.auth.authenticator import (
     resolve_principal,
 )
 from ansina.auth.authorization import ForbiddenError, SudoRequiredError, authorize
-from ansina.auth.bootstrap import ensure_bootstrap_admin
+from ansina.auth.bootstrap import (
+    ensure_bootstrap_admin,
+    ensure_configured_admin,
+    is_bootstrap_identity,
+)
+from ansina.auth.clock import Clock, iso, parse_iso, utc_now
 from ansina.auth.management import (
+    BootstrapIdentityError,
     LastAdminError,
     NotFoundError,
     SelfEscalationError,
+    TokenAlreadyIssuedError,
     assert_admin_remains,
     assert_may_assign_role,
+    assert_no_existing_api_token,
+    assert_not_bootstrap_identity,
 )
 from ansina.auth.principal import AuthMethod, Principal
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
@@ -43,6 +52,8 @@ __all__ = [
     "ApiTokenAuthenticator",
     "AuthMethod",
     "Authenticator",
+    "BootstrapIdentityError",
+    "Clock",
     "ForbiddenError",
     "LastAdminError",
     "NotFoundError",
@@ -54,14 +65,22 @@ __all__ = [
     "SudoLockedOutError",
     "SudoRequiredError",
     "SudoService",
+    "TokenAlreadyIssuedError",
     "assert_admin_remains",
     "assert_may_assign_role",
+    "assert_no_existing_api_token",
+    "assert_not_bootstrap_identity",
     "authorize",
     "build_authenticators",
     "build_step_up_verifiers",
     "build_sudo_service",
     "ensure_bootstrap_admin",
+    "ensure_configured_admin",
+    "is_bootstrap_identity",
+    "iso",
+    "parse_iso",
     "reconcile_builtin_roles",
     "resolve_principal",
     "sync_resources",
+    "utc_now",
 ]

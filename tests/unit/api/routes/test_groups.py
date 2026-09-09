@@ -169,12 +169,27 @@ def test_delete_a_non_admin_group_succeeds(
 
 
 def test_deleting_an_admin_group_that_would_leave_zero_admins_is_409(
-    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+    authed_app: FastAPI,
+    authed_client: TestClient,
+    authed_token: str,
+    authed_admin_username: str,
+    sudoed_maintain: Callable[[], dict[str, str]],
 ) -> None:
+    """`authed_app` (issue #28) seeds two admins: the bootstrap identity and the
+    configured admin `authed_token` itself authenticates as. Setup below uses
+    `authed_token` as before (it isn't the actor under test), but the final
+    destructive call must come from a third, sudo'd `Maintain` identity — one of
+    `authed_token`'s own account would never trigger this guard, since the other
+    admin always remains — and the configured admin's own direct grant is stripped
+    the same way bootstrap's already is, so bootstrap really is the sole remaining
+    admin once the group is gone.
+    """
     headers = {"Authorization": f"Bearer {authed_token}"}
     db = authed_app.state.db
     bootstrap = UserRepository(db).get_by_username("bootstrap-admin")
     assert bootstrap is not None
+    configured_admin = UserRepository(db).get_by_username(authed_admin_username)
+    assert configured_admin is not None
 
     group = authed_client.post(
         "/auth/groups", headers=headers, json={"slug": "admins", "name": "Admins"}
@@ -190,8 +205,13 @@ def test_deleting_an_admin_group_that_would_leave_zero_admins_is_409(
         f"/auth/groups/{group['id']}/members/{bootstrap.id}", headers=headers
     )
     RoleAssignmentRepository(db).unassign(SubjectType.USER, bootstrap.id, admin_role.id)
+    RoleAssignmentRepository(db).unassign(
+        SubjectType.USER, configured_admin.id, admin_role.id
+    )
 
-    response = authed_client.delete(f"/auth/groups/{group['id']}", headers=headers)
+    response = authed_client.delete(
+        f"/auth/groups/{group['id']}", headers=sudoed_maintain()
+    )
 
     assert response.status_code == 409
     assert response.json()["code"] == "ansina.auth.last_admin"
@@ -266,12 +286,21 @@ def test_remove_member_from_unknown_group_is_404(
 
 
 def test_removing_the_last_admin_via_group_membership_is_409(
-    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+    authed_app: FastAPI,
+    authed_client: TestClient,
+    authed_token: str,
+    authed_admin_username: str,
+    sudoed_maintain: Callable[[], dict[str, str]],
 ) -> None:
+    """See `test_deleting_an_admin_group_that_would_leave_zero_admins_is_409`'s
+    docstring for why the actor and setup differ from a single-admin-fixture world.
+    """
     headers = {"Authorization": f"Bearer {authed_token}"}
     db = authed_app.state.db
     bootstrap = UserRepository(db).get_by_username("bootstrap-admin")
     assert bootstrap is not None
+    configured_admin = UserRepository(db).get_by_username(authed_admin_username)
+    assert configured_admin is not None
     group = authed_client.post(
         "/auth/groups", headers=headers, json={"slug": "admins3", "name": "Admins3"}
     ).json()
@@ -284,9 +313,12 @@ def test_removing_the_last_admin_via_group_membership_is_409(
         f"/auth/groups/{group['id']}/members/{bootstrap.id}", headers=headers
     )
     RoleAssignmentRepository(db).unassign(SubjectType.USER, bootstrap.id, admin_role.id)
+    RoleAssignmentRepository(db).unassign(
+        SubjectType.USER, configured_admin.id, admin_role.id
+    )
 
     response = authed_client.delete(
-        f"/auth/groups/{group['id']}/members/{bootstrap.id}", headers=headers
+        f"/auth/groups/{group['id']}/members/{bootstrap.id}", headers=sudoed_maintain()
     )
 
     assert response.status_code == 409

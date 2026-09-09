@@ -163,7 +163,10 @@ def test_verification_is_db_backed_not_a_single_static_secret(
 
 
 def test_revoking_a_credential_rejects_its_token_on_the_next_request(
-    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+    authed_app: FastAPI,
+    authed_client: TestClient,
+    authed_token: str,
+    authed_admin_username: str,
 ) -> None:
     # Sanity: the token works before revocation.
     assert (
@@ -173,11 +176,13 @@ def test_revoking_a_credential_rejects_its_token_on_the_next_request(
         == 200
     )
 
+    # `authed_token` (issue #28) authenticates as the *configured admin*, not the
+    # bootstrap identity — its own user is the one to revoke here.
     db = authed_app.state.db
-    bootstrap_user = UserRepository(db).get_by_username("bootstrap-admin")
-    assert bootstrap_user is not None
+    configured_admin = UserRepository(db).get_by_username(authed_admin_username)
+    assert configured_admin is not None
     CredentialRepository(db).delete_credentials(
-        bootstrap_user.id, CredentialType.API_TOKEN
+        configured_admin.id, CredentialType.API_TOKEN
     )
 
     response = authed_client.get(

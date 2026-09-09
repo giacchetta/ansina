@@ -698,6 +698,132 @@ def test_credential_delete_credentials(db: Database) -> None:
     assert credentials.find_user_by_api_token("a-token") is None
 
 
+# --- CredentialRepository: issue #28's self-service token surface ------------------
+
+
+def test_credential_list_api_tokens_returns_only_that_users_own(db: Database) -> None:
+    users = UserRepository(db)
+    credentials = CredentialRepository(db)
+    alice = users.create("alice")
+    bob = users.create("bob")
+    credentials.create_api_token(alice.id, "alice-token", label="alice's")
+    credentials.create_api_token(bob.id, "bob-token", label="bob's")
+
+    listed = credentials.list_api_tokens(alice.id)
+
+    assert [c.label for c in listed] == ["alice's"]
+
+
+def test_credential_list_api_tokens_excludes_a_password_credential(
+    db: Database, cheap_argon2: Argon2Params
+) -> None:
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+    credentials.set_password(user.id, "hunter2", cheap_argon2)
+    credentials.create_api_token(user.id, "a-token")
+
+    listed = credentials.list_api_tokens(user.id)
+
+    assert len(listed) == 1
+    assert listed[0].type is CredentialType.API_TOKEN
+
+
+def test_credential_list_api_tokens_empty_for_no_tokens(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert CredentialRepository(db).list_api_tokens(user.id) == []
+
+
+def test_credential_list_api_tokens_orders_oldest_first(db: Database) -> None:
+    """Two tokens created within the same millisecond would otherwise tie on
+    `created_at` — this sets distinct values directly so the `ORDER BY created_at,
+    id` guarantee is actually exercised, not accidentally passed by insertion timing.
+    """
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+    newer = credentials.create_api_token(user.id, "newer", label="newer")
+    older = credentials.create_api_token(user.id, "older", label="older")
+    with db.transaction() as cursor:
+        cursor.execute(
+            "UPDATE credentials SET created_at = ? WHERE id = ?",
+            ("2020-01-01T00:00:00.000Z", older.id),
+        )
+        cursor.execute(
+            "UPDATE credentials SET created_at = ? WHERE id = ?",
+            ("2030-01-01T00:00:00.000Z", newer.id),
+        )
+
+    listed = credentials.list_api_tokens(user.id)
+
+    assert [c.label for c in listed] == ["older", "newer"]
+
+
+def test_credential_touch_last_used_sets_the_column(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credential = CredentialRepository(db).create_api_token(user.id, "a-token")
+    assert credential.last_used_at is None
+
+    CredentialRepository(db).touch_last_used(
+        credential.id, now="2026-01-01T00:00:00.000Z"
+    )
+
+    listed = CredentialRepository(db).list_api_tokens(user.id)
+    assert listed[0].last_used_at == "2026-01-01T00:00:00.000Z"
+
+
+def test_credential_find_api_token_credential_returns_the_full_row(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    created = CredentialRepository(db).create_api_token(user.id, "a-token", label="cli")
+
+    found = CredentialRepository(db).find_api_token_credential("a-token")
+
+    assert found is not None
+    assert found.id == created.id
+    assert found.user_id == user.id
+    assert found.label == "cli"
+
+
+def test_credential_find_api_token_credential_returns_none_for_an_unknown_token(
+    db: Database,
+) -> None:
+    assert CredentialRepository(db).find_api_token_credential("nope") is None
+
+
+def test_credential_delete_api_token_removes_it_and_returns_true(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credential = CredentialRepository(db).create_api_token(user.id, "a-token")
+
+    deleted = CredentialRepository(db).delete_api_token(credential.id, user.id)
+
+    assert deleted is True
+    assert CredentialRepository(db).find_user_by_api_token("a-token") is None
+
+
+def test_credential_delete_api_token_returns_false_for_an_unknown_id(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert CredentialRepository(db).delete_api_token("no-such-id", user.id) is False
+
+
+def test_credential_delete_api_token_is_scoped_to_the_owning_user(
+    db: Database,
+) -> None:
+    """The `user_id` scoping is what stops one user revoking another's token — a
+    mismatched owner returns `False` and leaves the credential live."""
+    owner = UserRepository(db).create("owner")
+    other = UserRepository(db).create("other")
+    credential = CredentialRepository(db).create_api_token(owner.id, "owned-token")
+
+    deleted = CredentialRepository(db).delete_api_token(credential.id, other.id)
+
+    assert deleted is False
+    assert CredentialRepository(db).find_user_by_api_token("owned-token") is not None
+
+
 # --- ExternalIdentityRepository --------------------------------------------------
 
 

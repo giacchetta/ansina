@@ -91,20 +91,56 @@ retry_max_backoff_seconds = 30.0
 # price_per_1m_output_tokens = 0.60
 
 [security]
-# RBAC identity model (issue #24). true (the default) means authentication is
-# enforced: on first boot with no users, Ansina generates its own high-entropy
-# bootstrap API token, prints it to stdout exactly once, and stores only its hash —
-# never in this file, never recoverable afterward. false disables authentication
-# entirely (every route except /healthz and /readyz reachable with no token) and is
-# only accepted when [server] host is loopback (127.0.0.1, ::1, localhost) — Ansina
-# refuses to expose an unauthenticated API off the local machine.
+# RBAC identity model (issue #24, redesigned by #28). true (the default) means
+# authentication is enforced: on first boot, Ansina *always* generates its own
+# high-entropy bootstrap API token, prints it to stdout exactly once, and stores only
+# its hash — never in this file, never recoverable afterward, and never overridable
+# or rotatable by any config below. false disables authentication entirely (every
+# route except /healthz and /readyz reachable with no token) and is only accepted
+# when [server] host is loopback (127.0.0.1, ::1, localhost) — Ansina refuses to
+# expose an unauthenticated API off the local machine.
 enabled = true
 
-# On first boot with no users, this resolves to a single synthetic Admin identity so
-# the service stays reachable. Set this to false once a real Admin account exists to
-# revoke that bootstrap identity's credential (its user record and audit trail are
-# kept, only the credential is removed).
+# The bootstrap identity is Ansina's permanent break-glass credential — it can never
+# hold more than one token, and nothing below rotates it. Set this to false once a
+# real Admin account exists (e.g. the configured admin below, or one created via the
+# TUI/API) to revoke its credential (the user record and audit trail are kept, only
+# the credential is removed); setting it back to true regenerates a fresh one if it's
+# currently credential-less, but never touches a live one.
 bootstrap_admin_enabled = true
+
+# admin_username / api_token (issue #28) together provision a second, *ordinary*
+# Admin user once, at first boot — the "configured admin," distinct from the
+# synthetic bootstrap identity above. This is what a scripted install or CI wants: a
+# known, reproducible Admin credential that doesn't require scraping the one-time
+# bootstrap banner off stdout. Required together — set neither, or both. Never the
+# reserved username "bootstrap-admin". There is no rotation: once created, this
+# identity is an ordinary user and mints/revokes its own tokens the same way any
+# other user does, via POST/DELETE /auth/me/tokens. On any boot after the first
+# (where a non-bootstrap user already exists), both are silently ignored — a
+# systemd unit or container that keeps the same environment across every restart
+# must not fail on a routine one.
+#
+# admin_username has no secrecy requirement and may be set in this file:
+#   admin_username = "ops-admin"
+#
+# api_token, like every secret, is env-only — setting it in this file is a hard
+# startup error. Must look like a securely generated value (32+ chars,
+# letters/digits/-/_ only, high enough entropy) — a human-typed phrase like
+# "Hello, World" is rejected outright:
+#   ANSINA_SECURITY__ADMIN_USERNAME=ops-admin
+#   ANSINA_SECURITY__API_TOKEN=...
+#   ANSINA_BRAIN__API_KEY=...
+#
+# Generate a strong one with e.g.:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# How long a token's last_used_at may go stale before the next successful
+# authentication updates it (issue #28) — coalesced rather than written on every
+# request, since the authentication lookup already full-scans credentials on every
+# request and a write there would serialize SQLite writers against the tick loop.
+# 0 means "write on every authentication."
+token_last_used_resolution_seconds = 300.0
 
 [security.password]
 # Tunable argon2id work factors (issue #24). Defaults follow the OWASP-recommended
@@ -127,16 +163,3 @@ ttl_seconds = 600.0
 max_failed_attempts = 5
 attempt_window_seconds = 300.0
 lockout_seconds = 900.0
-
-# api_token (issue #24) is an *optional* override of the auto-generated bootstrap
-# token above — e.g. for a scripted/orchestrated install or CI that needs a token
-# known ahead of time. Prefer letting Ansina generate its own; a manually-supplied
-# value must look like a securely generated one (32+ chars, letters/digits/-/_ only,
-# high enough entropy) — a human-typed phrase like "Hello, World" is rejected
-# outright. Like every secret, it is env-only — setting it in this file is a hard
-# startup error:
-#   ANSINA_SECURITY__API_TOKEN=...
-#   ANSINA_BRAIN__API_KEY=...
-#
-# Generate a strong one with e.g.:
-#   python -c "import secrets; print(secrets.token_urlsafe(32))"

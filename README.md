@@ -11,7 +11,7 @@ flowchart LR
     Client["Client"] -->|Bearer token<br/>+ optional X-Sudo-Token| MW["RequestIdMiddleware"]
     MW --> Auth["BearerAuthMiddleware<br/>(401 · resolves Principal,<br/>elevates on a live grant)"]
     Auth --> Authz["require(resource)<br/>(403 · role check ·<br/>sudo_required)"]
-    Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]<br/>/auth/sudo[/grants]<br/>/auth/users · /auth/groups<br/>/auth/roles · /auth/permissions<br/>/auth/me"]
+    Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]<br/>/auth/sudo[/grants]<br/>/auth/users[/tokens] · /auth/groups<br/>/auth/roles · /auth/permissions<br/>/auth/me[/tokens]"]
     Routes --> DB[("SQLite<br/>WAL")]
     Routes --> Tick["TickLoop<br/>(idle / act / escalate)"]
     Routes -.error.-> Problem["RFC 9457<br/>problem+json"]
@@ -52,7 +52,9 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
 | `PATCH /auth/users/{id}` | token + sudo for `Maintain` | Maintain | Update `display_name`/`active`. Refused (409) if it would demote the last `Admin`. |
 | `DELETE /auth/users/{id}` | token + sudo for `Maintain` | Maintain | One-way tombstone — see below. Refused (409) on the last `Admin`. |
 | `PUT /auth/users/{id}/password` | token + sudo for `Maintain` | Maintain | Set/replace the user's password credential. |
-| `POST /auth/users/{id}/tokens` | token + sudo for `Maintain` | Maintain | Issue a fresh API token — the raw value is returned **once**. |
+| `POST /auth/users/{id}/tokens` | token + sudo for `Maintain` | Maintain | Issue the user's *first* API token — the raw value is returned **once**. 409 if they already hold one; beyond the first, the user mints their own via `POST /auth/me/tokens`. |
+| `GET /auth/users/{id}/tokens` | token | Maintain | List a user's tokens — metadata only, never a hash/salt. |
+| `DELETE /auth/users/{id}/tokens/{token_id}` | token + sudo for `Maintain` | Maintain | Revoke one of a user's tokens — the recovery path once their last one is revoked, `POST` can issue a fresh one again. |
 | `GET /auth/groups`, `GET /auth/groups/{id}` | token | Maintain | List/inspect groups. |
 | `POST /auth/groups` | token + sudo for `Maintain` | Maintain | Create a group (`slug`, `name`, optional `description`). |
 | `PATCH /auth/groups/{id}` | token + sudo for `Maintain` | Maintain | Update `name`/`description`. |
@@ -63,10 +65,13 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
 | `GET /auth/roles` | token | Maintain | The role catalog (builtin only in M2) with each role's current `role_permissions` grants. Read-only — no create/update/delete route exists. |
 | `GET /auth/permissions` | token | Maintain | The full `(resource, verb)` catalog — the discovery surface a future custom-role editor builds on. |
 | `GET /auth/me` | token | Read | The caller's own identity (user, roles, sudo status) — every role reaches this, never sudo-gated. See the `me.*` carve-out below. |
+| `POST /auth/me/tokens` | token | Read | Mint your own API token — the raw value is returned **once**. Refused (403) for the bootstrap identity. |
+| `GET /auth/me/tokens` | token | Read | List your own tokens — metadata only, never a hash/salt. |
+| `DELETE /auth/me/tokens/{token_id}` | token | Read | Revoke one of your own tokens. Refused (403) for the bootstrap identity. |
 
 `PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default at both layers: **authentication** (a valid bearer token identifying *some* user — 401 `problem+json`, `ansina.unauthorized`) and, per user role, **authorization** (that user's role holding a grant for this route's resource and HTTP verb — 403 `problem+json`, `ansina.forbidden`). Four fixed roles, increasing in scope: `Read` (GET only) → `Write` (+POST/PUT/PATCH) → `Maintain`/`Admin` (+DELETE and the RBAC management surface, `/auth/*`). A route with no `require(...)` authorization declaration fails to boot at all — the same "fail loudly before uvicorn binds a port" gate `HeartUnavailableError` uses — so a new endpoint can never ship ungated by accident.
 
-Auth is enforced by default: on first boot Ansina generates and prints its own bootstrap API token, assigned the `Admin` role (or hashes an operator-supplied `ANSINA_SECURITY__API_TOKEN` instead, if one is set); a missing/wrong token gets a 401. `ANSINA_SECURITY__ENABLED=false` disables both authentication and authorization entirely (loopback-only) for local dev — `/version` then returns 200 without a token.
+Auth is enforced by default: on first boot Ansina *always* generates and prints its own bootstrap API token, assigned the `Admin` role — a permanent break-glass credential, never overridable and never rotated. Separately, setting `ANSINA_SECURITY__ADMIN_USERNAME` + `ANSINA_SECURITY__API_TOKEN` together provisions a second, ordinary Admin user once at first boot (the "configured admin") — the credential a scripted install or CI actually wants, since it never requires scraping the one-time banner off stdout. A missing/wrong token gets a 401. `ANSINA_SECURITY__ENABLED=false` disables both authentication and authorization entirely (loopback-only) for local dev — `/version` then returns 200 without a token.
 
 **Sudo step-up**, mirroring Linux `sudo`: `Admin` and `Maintain` hold identical role grants, but any request touching the identity/access-control surface (an `auth.*` resource marked `sensitive=True`) additionally requires `Maintain` to present a live sudo grant — `Admin` never does. Get one via `POST /auth/sudo` (body: `{"password": "..."}`, re-verified against your own account), then present the returned `token` as `X-Sudo-Token` on the sensitive call; a missing, wrong, expired, or revoked grant answers 403 `ansina.auth.sudo_required` rather than a misleading 401 — your bearer token is still fine, you just haven't stepped up. Grants expire after `[security.sudo] ttl_seconds` (default 10 minutes) and can be revoked early via `DELETE /auth/sudo`; five consecutive failed step-up attempts lock further attempts out for `lockout_seconds`, answering 429 with a `Retry-After` header. Verification itself sits behind a pluggable `StepUpVerifier` port — M2 ships password only, a future second factor is a new verifier, not a rewrite of the grant/TTL/revocation machinery.
 
@@ -78,7 +83,7 @@ Auth is enforced by default: on first boot Ansina generates and prints its own b
 
 Roles themselves are read-only over this API (`GET /auth/roles`): builtin-role grants are owned by the reconciler that seeds them at every boot, and creating/editing/deleting roles (custom or builtin) is out of scope for M2, deferred to a follow-up milestone that builds write routes on the same tables `GET /auth/roles`/`GET /auth/permissions` already expose.
 
-**The `me.*` self-resource carve-out** (issue #30): `auth.policy.permitted_verbs` grants every verb on any `me.*` resource to every builtin role, `Read` included — the one exception to the `auth.*` "Maintain/Admin only" rule above. This is not an escalation: the subject of a `me.*` action is always the authenticated caller themselves, so no `me.*` route can reach another user's data, by construction. `GET /auth/me` is the first route built on it, returning the already-resolved `Principal` with no extra database read; a future self-service token surface (`/auth/me/tokens`) builds on the same prefix.
+**The `me.*` self-resource carve-out** (issue #30): `auth.policy.permitted_verbs` grants every verb on any `me.*` resource to every builtin role, `Read` included — the one exception to the `auth.*` "Maintain/Admin only" rule above. This is not an escalation: the subject of a `me.*` action is always the authenticated caller themselves, so no `me.*` route can reach another user's data, by construction. `GET /auth/me` returns the already-resolved `Principal` with no extra database read; `me.tokens` (issue #28) builds on the same prefix for self-service API tokens — mint, list, revoke your own, no Admin hand-holding required. The one caller refused on `me.tokens` regardless of role is the bootstrap identity itself, which holds exactly one token, ever, managed only by `bootstrap_admin_enabled`.
 
 ## ⚙️ Configuration
 
