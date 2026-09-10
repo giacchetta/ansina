@@ -162,22 +162,85 @@ def test_is_interactive_reflects_the_real_tty_state() -> None:
     assert main_module._is_interactive() == (sys.stdin.isatty() and sys.stdout.isatty())
 
 
-def test_launch_tui_builds_the_app_with_the_context_host_and_runs_it(
+def test_launch_tui_builds_the_app_with_the_whole_context_and_runs_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[object] = []
 
     class _FakeApp:
-        def __init__(self, host: str | None = None) -> None:
-            calls.append(("init", host))
+        def __init__(self, app_context: AppContext) -> None:
+            calls.append(("init", app_context))
 
         def run(self) -> None:
             calls.append(("run",))
 
     monkeypatch.setattr("ansina_tui.ui.app.AnsinaTuiApp", _FakeApp)
+    context = AppContext(host="http://x", json_output=False, verbose=False)
 
-    main_module.launch_tui(
-        AppContext(host="http://x", json_output=False, verbose=False)
+    main_module.launch_tui(context)
+
+    assert calls == [("init", context), ("run",)]
+
+
+def test_refresh_defaults_to_five_seconds(
+    tmp_xdg_home: Path,
+    fake_launch: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "_is_interactive", lambda: True)
+
+    result = runner.invoke(app, [])
+
+    assert result.exit_code == ExitCode.OK
+    context = fake_launch[0]
+    assert isinstance(context, AppContext)
+    assert context.refresh == 5.0
+
+
+def test_refresh_flag_threads_through_to_the_app_context(
+    tmp_xdg_home: Path,
+    fake_launch: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "_is_interactive", lambda: True)
+
+    result = runner.invoke(app, ["--refresh", "10"])
+
+    assert result.exit_code == ExitCode.OK
+    context = fake_launch[0]
+    assert isinstance(context, AppContext)
+    assert context.refresh == 10.0
+
+
+def test_refresh_zero_or_negative_is_a_usage_error(
+    fake_launch: list[object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "_is_interactive", lambda: True)
+
+    result = runner.invoke(app, ["--refresh", "0"])
+
+    assert result.exit_code == ExitCode.USAGE
+    assert fake_launch == []
+    assert "--refresh must be greater than 0" in result.stderr
+
+
+def test_refresh_is_ignored_by_subcommands(
+    tmp_xdg_home: Path,
+    mock_transport: Callable[[dict[str, Any]], httpx.MockTransport],
+    json_response: Callable[..., httpx.Response],
+    patch_transport: Callable[[httpx.BaseTransport], None],
+) -> None:
+    patch_transport(
+        mock_transport(
+            {
+                "/healthz": json_response(200, {"status": "ok"}),
+                "/readyz": json_response(200, {"status": "ready", "checks": {}}),
+                "/version": json_response(200, {"name": "ansina", "version": "0.1.0"}),
+            }
+        )
     )
 
-    assert calls == [("init", "http://x"), ("run",)]
+    result = runner.invoke(app, ["--refresh", "0", "status"])
+
+    assert result.exit_code == ExitCode.OK

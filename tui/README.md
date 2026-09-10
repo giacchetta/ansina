@@ -30,6 +30,27 @@ uv run --project tui ansina-tui status       # CLI → health/readiness/version
 uv run --project tui ansina-tui --help       # CLI help, stdout, never the TUI
 ```
 
+## TUI (bare invocation)
+
+Bare `ansina-tui` on a TTY opens a tabbed Textual app with one tab, **Overview**: host,
+`/healthz`, `/readyz` per-check rows, `/version`, and your identity from `GET /auth/me`,
+refreshed on a timer (`--refresh` seconds, default `5`) and immediately on `r`. `q` quits.
+
+The header always shows the host and connection state, and every daemon hiccup renders as a
+designed message, never a traceback: host unreachable, no credential stored (names
+`auth login`), a rejected token, an insufficient role, or a not-ready daemon all show up as
+plain text or a per-check table in the relevant section instead of crashing the app.
+
+The TUI is **read-only** in M4 — no pause/resume, no user/role management. Mutating actions
+stay on the CLI (`api`, or a future dedicated subcommand), where confirmation and sudo
+prompting are unambiguous.
+
+```bash
+ansina-tui                        # bare, on a TTY → the TUI
+ansina-tui --refresh 10           # slower Overview refresh
+ansina-tui --host http://x:8000   # against a specific daemon
+```
+
 ## `status`
 
 The day-0 smoke test: `GET /healthz` → `GET /readyz` → `GET /version`, rendered as a table.
@@ -41,7 +62,8 @@ ansina-tui --json status | jq .
 ```
 
 Global options (`--host`, `--json`, `--verbose`, `--version`) are root-level, like `git`'s or
-`docker`'s — they go **before** the subcommand, not after.
+`docker`'s — they go **before** the subcommand, not after. `--refresh` is TUI-only (there is no
+subcommand of its own to carry it under the no-args rule) and is otherwise ignored.
 
 ## `auth`
 

@@ -13,9 +13,10 @@ import os
 
 import typer
 
-from ansina_tui.client import ApiClient, ApiResponse, HostUnreachableError
+from ansina_tui.client import ApiClient, HostUnreachableError
 from ansina_tui.config import InsecureCredentialsFileError
 from ansina_tui.context import AppContext
+from ansina_tui.daemon_state import readiness_checks, version_display
 from ansina_tui.exits import ExitCode
 from ansina_tui.output import Emitter
 from ansina_tui.session import build_client, resolve_session
@@ -49,8 +50,8 @@ def _report_status(client: ApiClient, host: str, emitter: Emitter) -> ExitCode:
 
     healthy = health.ok
     is_ready = ready.ok
-    checks = _readiness_checks(ready)
-    version_display = _version_display(version)
+    checks = readiness_checks(ready)
+    version_text = version_display(version)
 
     if emitter.json_mode:
         emitter.json(
@@ -59,7 +60,7 @@ def _report_status(client: ApiClient, host: str, emitter: Emitter) -> ExitCode:
                 "healthy": healthy,
                 "ready": is_ready,
                 "checks": checks,
-                "version": version_display,
+                "version": version_text,
             }
         )
     else:
@@ -72,7 +73,7 @@ def _report_status(client: ApiClient, host: str, emitter: Emitter) -> ExitCode:
             (f"  {name}", "ok" if passing else "fail")
             for name, passing in checks.items()
         )
-        rows.append(("version", version_display))
+        rows.append(("version", version_text))
         emitter.rows(rows)
 
     if not healthy:
@@ -80,24 +81,3 @@ def _report_status(client: ApiClient, host: str, emitter: Emitter) -> ExitCode:
     if not is_ready:
         return ExitCode.NOT_READY
     return ExitCode.OK
-
-
-def _readiness_checks(ready: ApiResponse) -> dict[str, bool]:
-    """The per-check map from `/readyz`'s body. Present as a top-level `checks` key
-    either way `/readyz` can answer: the 200 `ReadyStatus` shape carries it directly,
-    and the 503 problem shape carries it as an RFC 9457 extension member — which
-    lands in the same flat parsed body (`ansina.api.routes.health.readyz`), so one
-    read of `json_body` covers both."""
-    if isinstance(ready.json_body, dict):
-        checks = ready.json_body.get("checks")
-        if isinstance(checks, dict):
-            return {str(name): bool(passing) for name, passing in checks.items()}
-    return {}
-
-
-def _version_display(version: ApiResponse) -> str:
-    if version.ok and isinstance(version.json_body, dict):
-        name = version.json_body.get("name", "ansina")
-        number = version.json_body.get("version", "unknown")
-        return f"{name} {number}"
-    return "unknown"

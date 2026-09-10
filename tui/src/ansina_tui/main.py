@@ -58,6 +58,13 @@ def main(
     verbose: bool = typer.Option(
         False, "--verbose", help="Verbose diagnostics on stderr."
     ),
+    refresh: float = typer.Option(
+        5.0,
+        "--refresh",
+        help="TUI Overview refresh interval, in seconds. Ignored (unvalidated) by "
+        "every subcommand — the no-args rule leaves no subcommand of its own to "
+        "carry it, and only a real TUI launch ever reads it.",
+    ),
     version: bool = typer.Option(
         False,
         "--version",
@@ -66,11 +73,13 @@ def main(
         help="Show the version and exit.",
     ),
 ) -> None:
-    ctx.obj = AppContext(host=host, json_output=json_output, verbose=verbose)
+    ctx.obj = AppContext(
+        host=host, json_output=json_output, verbose=verbose, refresh=refresh
+    )
 
     if ctx.resilient_parsing or ctx.invoked_subcommand is not None:
         return  # a subcommand (`status …`, `auth …`, later `api`), or a completion
-        # probe
+        # probe — `--refresh` is TUI-only, so it's validated below, never here.
 
     if not _is_interactive():
         # Textual cannot render into a pipe. Help goes to stderr (never stdout, which
@@ -79,13 +88,17 @@ def main(
         print_help_to_stderr(ctx)
         raise typer.Exit(ExitCode.USAGE)
 
+    if refresh <= 0:
+        typer.echo("--refresh must be greater than 0.", err=True)
+        raise typer.Exit(ExitCode.USAGE)
+
     launch_tui(ctx.obj)
 
 
 def launch_tui(app_context: AppContext) -> None:
     from ansina_tui.ui.app import AnsinaTuiApp
 
-    AnsinaTuiApp(host=app_context.host).run()
+    AnsinaTuiApp(app_context).run()
 
 
 app.command("status")(status_command)

@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from typer.testing import CliRunner
 
+from ansina_tui.context import AppContext
 from ansina_tui.main import app
 
 runner = CliRunner()
@@ -85,5 +86,24 @@ def test_ansina_daemon_package_never_imported_by_an_api_run(
     )
 
     runner.invoke(app, ["--json", "api", "/version"])
+
+    assert _no_ansina_daemon_module_imported()
+
+
+async def test_ansina_daemon_package_never_imported_by_the_tui(
+    tmp_xdg_home: Path,
+    unreachable_transport: httpx.MockTransport,
+    patch_transport: Callable[[httpx.BaseTransport], None],
+) -> None:
+    """The one surface #31-#33 never pinned: the TUI itself (issue #34), driven
+    headlessly via `App.run_test()` rather than the CLI's `CliRunner`."""
+    from ansina_tui.ui.app import AnsinaTuiApp
+
+    patch_transport(unreachable_transport)
+    context = AppContext(host="http://x", json_output=False, verbose=False)
+
+    tui_app = AnsinaTuiApp(context)
+    async with tui_app.run_test():
+        await tui_app.workers.wait_for_complete()
 
     assert _no_ansina_daemon_module_imported()
