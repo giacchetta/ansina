@@ -196,3 +196,68 @@ def test_request_supports_json_body_and_params(
 
     assert captured[0].method == "POST"
     assert captured[0].url.params["b"] == "2"
+
+
+def test_request_supports_a_raw_content_body(
+    json_response: Callable[..., httpx.Response],
+) -> None:
+    captured: list[httpx.Request] = []
+    transport = _capturing_transport(captured, json_response(200, {"ok": True}))
+    client = ApiClient("http://x", transport=transport)
+
+    client.request("POST", "/thing", content=b"raw bytes")
+
+    assert captured[0].content == b"raw bytes"
+
+
+def test_request_merges_a_callers_extra_headers(
+    json_response: Callable[..., httpx.Response],
+) -> None:
+    captured: list[httpx.Request] = []
+    transport = _capturing_transport(captured, json_response(200, {"ok": True}))
+    client = ApiClient("http://x", transport=transport)
+
+    client.request("GET", "/thing", headers={"X-Custom": "value"})
+
+    assert captured[0].headers["x-custom"] == "value"
+
+
+def test_a_callers_authorization_header_cannot_replace_the_stored_token(
+    json_response: Callable[..., httpx.Response],
+) -> None:
+    captured: list[httpx.Request] = []
+    transport = _capturing_transport(captured, json_response(200, {"ok": True}))
+    client = ApiClient("http://x", token="real-token", transport=transport)
+
+    client.request("GET", "/thing", headers={"Authorization": "Bearer evil"})
+
+    assert captured[0].headers["authorization"] == "Bearer real-token"
+
+
+def test_a_callers_authorization_header_passes_through_when_no_token_is_configured(
+    json_response: Callable[..., httpx.Response],
+) -> None:
+    """No token is stored at all — a caller-supplied `-H Authorization: ...` (issue
+    #33's `api` command) is still useful against a route that accepts it, so nothing
+    here strips or blocks it; only a *configured* token ever wins over it."""
+    captured: list[httpx.Request] = []
+    transport = _capturing_transport(captured, json_response(200, {"ok": True}))
+    client = ApiClient("http://x", transport=transport)
+
+    client.request("GET", "/thing", headers={"Authorization": "Bearer caller"})
+
+    assert captured[0].headers["authorization"] == "Bearer caller"
+
+
+def test_response_carries_the_raw_text_and_response_headers(
+    json_response: Callable[..., httpx.Response],
+) -> None:
+    transport = httpx.MockTransport(
+        lambda request: json_response(200, {"a": 1}, headers={"X-Foo": "bar"})
+    )
+    client = ApiClient("http://x", transport=transport)
+
+    result = client.get("/thing")
+
+    assert result.text == '{"a":1}'
+    assert result.headers["x-foo"] == "bar"

@@ -54,6 +54,20 @@ class Emitter:
             return
         self._stdout.print(text)
 
+    def body(self, text: str) -> None:
+        """A response body verbatim (`commands/api.py`), on stdout, **never**
+        suppressed by JSON mode — this *is* the JSON-mode payload for `api`, and stays
+        the plain-mode payload too — and never through `rich`, so a piped payload can't
+        pick up line-wrapping or color codes. An empty string writes nothing at all
+        (a 204/empty body), matching `emitter.json`'s always-write-something contrast:
+        `body` mirrors whatever the daemon actually sent, including sending nothing."""
+        if not text:
+            return
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+
     def json(self, data: Mapping[str, Any]) -> None:
         """The single JSON payload for `--json` mode. Writes directly to
         `sys.stdout`, bypassing `rich` entirely."""

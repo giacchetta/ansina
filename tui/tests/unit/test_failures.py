@@ -4,6 +4,8 @@ Retry-After figure when the daemon sent one (issue #26's sudo lockout)."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from ansina_tui.client import ApiResponse
@@ -19,6 +21,8 @@ def _response(status_code: int, body: object | None) -> ApiResponse:
         request_id="req-xyz",
         json_body=body,
         problem=parse_problem(body),
+        text="" if body is None else json.dumps(body),
+        headers={},
     )
 
 

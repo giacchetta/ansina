@@ -72,3 +72,18 @@ def test_ansina_daemon_package_never_imported_by_an_auth_run(
     runner.invoke(app, ["--json", "auth", "login", "--with-token"], input="tok\n")
 
     assert _no_ansina_daemon_module_imported()
+
+
+def test_ansina_daemon_package_never_imported_by_an_api_run(
+    tmp_xdg_home: Path,
+    mock_transport: Callable[[dict[str | tuple[str, str], Any]], httpx.MockTransport],
+    json_response: Callable[..., httpx.Response],
+    patch_transport: Callable[[httpx.BaseTransport], None],
+) -> None:
+    patch_transport(
+        mock_transport({"/version": json_response(200, {"name": "ansina"})})
+    )
+
+    runner.invoke(app, ["--json", "api", "/version"])
+
+    assert _no_ansina_daemon_module_imported()

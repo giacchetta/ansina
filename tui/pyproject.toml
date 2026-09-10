@@ -55,6 +55,13 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "ANN", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN"]
 
+[tool.ruff.lint.flake8-bugbear]
+# `typer.Option([], ...)`/`typer.Argument(...)` is the standard Typer idiom for a
+# repeatable option (issue #33's `-f`/`-H`) — without this, B008 misfires on it the
+# same way it would on any mutable-looking default, even though Typer/Click never
+# mutates the literal itself (each invocation gets its own list from Click's parser).
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
 [tool.mypy]
 strict = true
 python_version = "3.14"

@@ -115,3 +115,45 @@ def test_table_suppressed_in_json_mode(capsys: pytest.CaptureFixture[str]) -> No
     emitter.table(["id"], [["tok-1"]])
 
     assert capsys.readouterr().out == ""
+
+
+def test_body_writes_verbatim_and_is_not_suppressed_by_json_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    emitter = Emitter(json_mode=True)
+
+    emitter.body('{"a":1}')
+
+    captured = capsys.readouterr()
+    assert captured.out == '{"a":1}\n'
+    assert captured.err == ""
+
+
+def test_body_writes_verbatim_in_human_mode_too(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    emitter = Emitter(json_mode=False)
+
+    emitter.body("plain text")
+
+    assert capsys.readouterr().out == "plain text\n"
+
+
+def test_body_does_not_duplicate_a_trailing_newline(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    emitter = Emitter()
+
+    emitter.body("already has one\n")
+
+    assert capsys.readouterr().out == "already has one\n"
+
+
+def test_body_writes_nothing_for_an_empty_string(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    emitter = Emitter()
+
+    emitter.body("")
+
+    assert capsys.readouterr().out == ""

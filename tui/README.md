@@ -75,6 +75,45 @@ in as the configured admin or an ordinary Admin instead). The **configured admin
 server-side (`[security] token_last_used_resolution_seconds`, default 300s) and can lag actual
 use by a few minutes.
 
+## `api`
+
+`curl` ergonomics without the `curl` ceremony: reach **any** daemon route with no per-route
+special-casing and no allow-list to keep in sync — a route added by a later milestone is
+reachable the day it merges. This is also the milestone's CI/CD surface, so it never blocks for
+input: a sensitive route with no live sudo grant fails fast with a hint, it does not prompt.
+
+```bash
+ansina-tui api /version                              # GET, authenticated automatically
+ansina-tui api /version | jq .                        # raw JSON, pipes cleanly
+ansina-tui api -i /healthz                             # status line + response headers
+ansina-tui api -X POST /heart/tick/pause               # explicit method
+ansina-tui api -f username=bob -f password=hunter2 /auth/users   # -f body -> POST by default
+echo '{"active": false}' | ansina-tui api -X PATCH /auth/users/<id> --input -
+ansina-tui --json api /auth/me | jq .roles              # a non-2xx body pipes into jq too
+```
+
+Method defaults to `GET`, or `POST` when a body is supplied (`-f`/`--input`) — the `gh api`
+convention. `-f/--field key=value` is repeatable and assembled into a JSON object body; its
+values are **always JSON strings** — for a typed field (a boolean, a number, a nested object),
+build the body yourself and send it with `--input <file|->` instead. `-f` and `--input` are
+mutually exclusive (exit 2 together). `-H/--header 'Name: value'` is repeatable and merges over
+the auth headers the client attaches — it can **never** replace `Authorization` or
+`X-Sudo-Token`; a colliding `-H` is warned about, not silently dropped.
+
+Output: pretty-printed JSON on a TTY with no `--json`; raw (exactly as the daemon sent it) under
+`--json` or a piped stdout — so `--json | jq` and a plain pipe both carry the body and nothing
+else, on a non-2xx response too. `-i/--include` prepends the status line and response headers,
+and is itself suppressed under `--json`/piped stdout, same as every other human-only rendering.
+
+Auth is automatic: the stored bearer token, and a live sudo grant's `X-Sudo-Token` whenever one
+is stored (see `auth sudo` above) — the sudo dance (`POST /auth/sudo`, extract the grant, paste
+it into the next call) disappears entirely. A 403 `ansina.auth.sudo_required` prints the
+`auth sudo` hint and exits 4; it never prompts for a password mid-request.
+
+Out of scope, deliberately: client-side validation of paths/bodies/verbs against the OpenAPI
+document (the server is the authority), response filtering/pagination/templating, and dedicated
+`heart`/`user`/`group`/`role` subcommands — everything above is already reachable through `api`.
+
 ## Exit codes
 
 Pinned by test (`tests/unit/test_exits.py`) — safe to script against.

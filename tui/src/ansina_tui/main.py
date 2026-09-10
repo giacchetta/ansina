@@ -16,6 +16,7 @@ import typer
 
 from ansina_tui import __version__
 from ansina_tui.clihelp import print_help_to_stderr
+from ansina_tui.commands.api import api_command
 from ansina_tui.commands.auth import auth_app
 from ansina_tui.commands.status import status_command
 from ansina_tui.context import AppContext
@@ -89,6 +90,7 @@ def launch_tui(app_context: AppContext) -> None:
 
 app.command("status")(status_command)
 app.add_typer(auth_app, name="auth")
+app.command("api")(api_command)
 
 
 if __name__ == "__main__":
