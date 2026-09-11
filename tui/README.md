@@ -74,8 +74,10 @@ without ever hand-assembling a header or pasting a grant token between commands.
 ansina-tui auth login --with-token < token.txt   # or pipe/paste one, or a no-echo prompt
 ansina-tui auth status                           # host, identity, roles, sudo state
 ansina-tui auth token mint --label laptop        # shown once, then never again
+ansina-tui auth token mint --label ci --no-store # print it, but don't store it here
 ansina-tui auth token list                       # metadata only — never a secret
 ansina-tui auth token revoke <id>
+ansina-tui auth token revoke <id> --yes          # skip the in-use confirmation
 ansina-tui auth sudo                             # no-echo password prompt or stdin
 ansina-tui auth sudo --status                    # local only, never touches the daemon
 ansina-tui auth sudo --revoke
@@ -86,7 +88,20 @@ A token or password is **never** a flag value or a bare argument — only `--wit
 (reading stdin), a piped stdin, or a no-echo prompt. `auth logout` drops the local credential
 and any sudo grant but does **not** revoke the token server-side (a token you log out of on one
 machine may still be in use on another) — `auth token revoke` is the server-side action, and it
-warns before revoking the token currently in use as this host's own credential.
+warns before revoking the token currently in use as this host's own credential (`--yes` skips
+that confirmation, e.g. for scripting). `auth sudo --revoke` and `--status` are mutually
+exclusive (exit `2` together). Bare `auth` or `auth token` with no subcommand is a usage error
+(exit `2`), not silent success.
+
+`auth login`'s first success on a fresh install also sets `config.toml`'s `default_host`, so
+every later command can omit `--host`. `auth logout` is local-only; if `ANSINA_TOKEN` is set in
+the environment it warns that logout can't unset it — unset the variable yourself for a shell to
+be fully logged out.
+
+`auth token mint`'s `--store`/`--no-store` decides whether the freshly minted token becomes this
+host's active credential: pass one explicitly to skip the prompt (useful for scripting/CI, where
+`--no-store` is also what a non-interactive run defaults to); omitted and interactive, it asks
+before storing.
 
 Two identities need special handling, both from issue #28: the **bootstrap identity** (the
 one-time banner token printed at first boot) is a break-glass credential capped at exactly one

@@ -4,11 +4,11 @@
 
 > A self-owned AI agent: an always-on in-process **Heart** plus a remote **Brain**, exposed over a single internal REST API. No chat channels.
 
-> **Status:** M2 — RBAC & Access Control complete (issues #24–#27): identity/permission data model, enforcement, sudo step-up, and the Users/Groups/Roles management API. M1 (Heart & Brain) landed before it. See the [roadmap](docs/architecture/blueprint.md#4-roadmap).
+> **Status:** M4 — Ansina CLI/TUI complete (issues #30, #28, #31–#35): the `ansina-tui` control surface (TUI + CLI) over the REST API, self-service tokens, and the `me.*` self-resource policy class. M4 ran **before** M3 despite the number — see the [roadmap](docs/architecture/blueprint.md#4-roadmap). M2 (RBAC & Access Control) and M1 (Heart & Brain) landed before it.
 
 ```mermaid
 flowchart LR
-    Client["Client"] -->|Bearer token<br/>+ optional X-Sudo-Token| MW["RequestIdMiddleware"]
+    Client["Client<br/>(ansina-tui · curl)"] -->|Bearer token<br/>+ optional X-Sudo-Token| MW["RequestIdMiddleware"]
     MW --> Auth["BearerAuthMiddleware<br/>(401 · resolves Principal,<br/>elevates on a live grant)"]
     Auth --> Authz["require(resource)<br/>(403 · role check ·<br/>sudo_required)"]
     Authz --> Routes["/healthz · /readyz · /version<br/>/openapi.json<br/>/heart/tick[/pause|/resume]<br/>/auth/sudo[/grants]<br/>/auth/users[/tokens] · /auth/groups<br/>/auth/roles · /auth/permissions<br/>/auth/me[/tokens]"]
@@ -32,6 +32,65 @@ uv run ansina        # look for the banner, then Ctrl-C
 export TOKEN=<the token from the banner>
 curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
 ```
+
+## 🖥️ Control surface (`ansina-tui`)
+
+The curl ceremony above is exactly what `ansina-tui` replaces — one binary, two surfaces, over
+the same REST API:
+
+```mermaid
+flowchart LR
+    A["$ ansina-tui"] -->|no args, TTY| B[Textual TUI]
+    A -->|any arg| C[CLI command]
+    A -->|no args, piped| D["help → stderr, exit 2"]
+    C -->|HTTP| E[(Ansina daemon)]
+    B -->|HTTP| E
+```
+
+**The one rule to know:** bare `ansina-tui` opens the TUI; *any* argument at all — a
+subcommand, `--help`, `--version` — is the CLI, never the TUI. Bare on a non-TTY prints help
+to **stderr** and exits `2` (Textual can't render into a pipe).
+
+```bash
+uv tool install ./tui              # global `ansina-tui`
+# or, without installing:
+uv run --project tui ansina-tui
+```
+
+| Binary | From | What it is |
+|---|---|---|
+| `ansina` / `python -m ansina` | root project (unchanged by this milestone) | the daemon |
+| `ansina-tui` / `python -m ansina_tui` | `tui/` | TUI (bare) / CLI (subcommands) |
+
+| Command | Purpose | Example |
+|---|---|---|
+| `ansina-tui status` | health → readiness → version; works with **no token** | `ansina-tui status` |
+| `ansina-tui auth …` | `login`/`status`/`logout`/`sudo`/`token mint\|list\|revoke` | `ansina-tui auth login --with-token < token.txt` |
+| `ansina-tui api …` | raw REST wrapper reaching **every** route — the CI/CD surface | `ansina-tui api /auth/me \| jq .roles` |
+
+Global options (`--host`, `--json`, `--verbose`, `--version`) are root-level, like `git`'s —
+before the subcommand, not after. The TUI is **read-only** in M4: mutations stay on the CLI,
+where confirmation and sudo prompting are unambiguous.
+
+A credential lives in `~/.config/ansina/hosts.toml` at mode `0600` — **refused on read** if
+group/world-readable. `ANSINA_TOKEN`/`ANSINA_HOST` override it for one invocation and are
+never written back. A token or password is never a flag value or a bare argument, and there
+is deliberately no `--show-token` — a newly minted token is shown exactly once.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | ok |
+| `1` | request failed |
+| `2` | usage error / local config problem |
+| `3` | not authenticated (401) |
+| `4` | forbidden / sudo required (403) |
+| `5` | host unreachable |
+| `6` | daemon reachable but not ready (`/readyz` 503) |
+| `7` | daemon reachable but not healthy (`/healthz` ≠ 200) |
+
+`/healthz` is always checked before `/readyz`, so an unhealthy daemon exits `7`, never `6`.
+Full per-command detail (flags, `api`'s `-f`/`--input`/`-H` rules, config file layout): see
+[`tui/README.md`](tui/README.md).
 
 ## 🔌 API
 
@@ -69,7 +128,7 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8000/version
 | `GET /auth/me/tokens` | token | Read | List your own tokens — metadata only, never a hash/salt. |
 | `DELETE /auth/me/tokens/{token_id}` | token | Read | Revoke one of your own tokens. Refused (403) for the bootstrap identity. |
 
-`PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default at both layers: **authentication** (a valid bearer token identifying *some* user — 401 `problem+json`, `ansina.unauthorized`) and, per user role, **authorization** (that user's role holding a grant for this route's resource and HTTP verb — 403 `problem+json`, `ansina.forbidden`). Four fixed roles, increasing in scope: `Read` (GET only) → `Write` (+POST/PUT/PATCH) → `Maintain`/`Admin` (+DELETE and the RBAC management surface, `/auth/*`). A route with no `require(...)` authorization declaration fails to boot at all — the same "fail loudly before uvicorn binds a port" gate `HeartUnavailableError` uses — so a new endpoint can never ship ungated by accident.
+`PUBLIC_PATHS` (`/healthz`, `/readyz`) is the only carve-out — every other route is deny-by-default at both layers: **authentication** (a valid bearer token identifying *some* user — 401 `problem+json`, `ansina.unauthorized`) and, per user role, **authorization** (that user's role holding a grant for this route's resource and HTTP verb — 403 `problem+json`, `ansina.forbidden`). Four fixed roles, increasing in scope: `Read` (GET only) → `Write` (+POST/PUT/PATCH) → `Maintain`/`Admin` (+DELETE and the RBAC management surface, `/auth/*`). A route with no `require(...)` authorization declaration fails to boot at all — the same "fail loudly before uvicorn binds a port" gate `HeartUnavailableError` uses — so a new endpoint can never ship ungated by accident. A third resource policy class, `me.*`, sits alongside these — every role holds every verb on it, since its subject is always the caller themselves; see the carve-out below.
 
 Auth is enforced by default: on first boot Ansina *always* generates and prints its own bootstrap API token, assigned the `Admin` role — a permanent break-glass credential, never overridable and never rotated. Separately, setting `ANSINA_SECURITY__ADMIN_USERNAME` + `ANSINA_SECURITY__API_TOKEN` together provisions a second, ordinary Admin user once at first boot (the "configured admin") — the credential a scripted install or CI actually wants, since it never requires scraping the one-time banner off stdout. A missing/wrong token gets a 401. `ANSINA_SECURITY__ENABLED=false` disables both authentication and authorization entirely (loopback-only) for local dev — `/version` then returns 200 without a token.
 
@@ -111,7 +170,10 @@ Once loaded, the Heart runs an autonomic tick loop (`[heart.tick]`, on by defaul
 | `make test-unit` | Unit tests only |
 | `make test-e2e` | Black-box E2E suite (real subprocess) |
 | `make precommit` | Pre-commit hooks against all files |
+| `make tui-check` | Everything the `tui` CI job runs (`tui/`: lint, format-check, mypy --strict, tests) |
+| `make check-all` | Both the daemon's `check` and `tui-check` |
 
 ## 📚 Docs
 
 [`docs/architecture/blueprint.md`](docs/architecture/blueprint.md) — architecture rationale, the OpenClaw comparison this design departs from, and the full roadmap.
+[`tui/README.md`](tui/README.md) — the `ansina-tui` control surface: every command, flag, and config file in full.
