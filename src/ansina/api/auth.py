@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 import anyio.to_thread
 
 from ansina.api.problems import CODE_UNAUTHORIZED, problem_response
-from ansina.auth.authenticator import build_authenticators, resolve_principal
+from ansina.auth.authenticator import resolve_principal
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
@@ -90,12 +90,16 @@ class BearerAuthMiddleware:
     (`Settings._refuse_unsafe_bind`), so a disabled-auth app is never reachable off the
     local machine.
 
-    Verification runs through an `Authenticator` chain (`authenticators`, default
-    `ansina.auth.authenticator.build_authenticators`) rather than a comparison against
-    a single static config secret — issue #24's bootstrap token is generated once and
-    never stored in config at all, so config-based comparison can't work for it. Issue
-    #24 shipped this as one inline DB lookup; #25 formalizes it as this chain so a
-    follow-up milestone's federated-login authenticator is an append, not a rewrite.
+    Verification runs through an `Authenticator` chain (`authenticators`, a required
+    constructor argument as of issue #28 — `create_app` builds it via
+    `ansina.auth.authenticator.build_authenticators(db, settings)` and passes it in,
+    the same "construct once, inject" shape already used for `sudo` below; it needs
+    `settings` for issue #28's `last_used_at` coalescing resolution, so it can no
+    longer default itself from `db` alone) rather than a comparison against a single
+    static config secret — the bootstrap token is generated once and never stored in
+    config at all, so config-based comparison can't work for it. Issue #24 shipped
+    this as one inline DB lookup; #25 formalized it as this chain so a follow-up
+    milestone's federated-login authenticator is an append, not a rewrite.
 
     Issue #26: once a `Principal` is resolved, a request carrying an `X-Sudo-Token`
     header is additionally checked against `sudo` (`ansina.auth.sudo.SudoService`) and
@@ -116,15 +120,13 @@ class BearerAuthMiddleware:
         *,
         enabled: bool,
         db: Database,
-        authenticators: tuple[Authenticator, ...] | None = None,
+        authenticators: tuple[Authenticator, ...],
         sudo: SudoService | None = None,
     ) -> None:
         self._app = app
         self._enabled = enabled
         self._db = db
-        self._authenticators = (
-            authenticators if authenticators is not None else build_authenticators(db)
-        )
+        self._authenticators = authenticators
         self._sudo = sudo
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

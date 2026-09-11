@@ -10,7 +10,9 @@ ansina.toml
 *.db-wal
 *.db-shm
 
-# Python
+# Python — none of these have a leading slash, so they already match at any depth,
+# tui/'s own .venv/.coverage/caches (issue #31) included. tui/uv.lock is committed
+# (matches nothing here) the same way the root uv.lock is.
 .venv/
 __pycache__/
 *.py[cod]

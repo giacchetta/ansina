@@ -35,6 +35,7 @@ from ansina.api.route_audit import audit_route_coverage
 from ansina.api.routes.groups import router as groups_router
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
+from ansina.api.routes.me import router as me_router
 from ansina.api.routes.openapi import router as openapi_router
 from ansina.api.routes.permissions import router as permissions_router
 from ansina.api.routes.role_assignments import router as role_assignments_router
@@ -42,8 +43,10 @@ from ansina.api.routes.roles import router as roles_router
 from ansina.api.routes.sudo import router as sudo_router
 from ansina.api.routes.users import router as users_router
 from ansina.auth import (
+    build_authenticators,
     build_sudo_service,
     ensure_bootstrap_admin,
+    ensure_configured_admin,
     reconcile_builtin_roles,
     sync_resources,
 )
@@ -94,6 +97,11 @@ def create_app(
     # built unconditionally, always available at `app.state.sudo` for both
     # `BearerAuthMiddleware` (grant resolution) and `routes/sudo.py` (issuance).
     sudo = build_sudo_service(db, resolved_settings)
+    # Issue #28: built here, not left to `BearerAuthMiddleware`'s own default, since
+    # the chain now needs `resolved_settings` (the coalesced `last_used_at` write's
+    # resolution) — the same "construct once, pass in" shape `sudo` above already
+    # uses.
+    authenticators = build_authenticators(db, resolved_settings)
 
     # Built here, not inside `lifespan`, so a `HeartUnavailableError` (issue #10) is
     # raised while the app is still being assembled — before uvicorn ever binds a
@@ -126,15 +134,21 @@ def create_app(
         run_migrations(db)
         # RBAC identity/permission foundation (issue #24, catalog source replaced by
         # #25): catalog the resources the route-coverage audit already extracted below,
-        # reconcile the builtin roles' grants against that catalog, then resolve the
-        # configured api_token to a bootstrap Admin identity — in that order, since a
-        # role can't be granted a resource that isn't catalogued yet, and the bootstrap
-        # identity can't be assigned the "admin" role before it exists. No dedicated
-        # `/readyz` check: `database` already covers the only failure mode this could
-        # have, the same reasoning already recorded for why the Brain has none.
+        # reconcile the builtin roles' grants against that catalog, then provision the
+        # bootstrap Admin identity and (issue #28) the configured admin — in that
+        # order, since a role can't be granted a resource that isn't catalogued yet,
+        # and neither identity can be assigned the "admin" role before it exists. No
+        # dedicated `/readyz` check: `database` already covers the only failure mode
+        # this could have, the same reasoning already recorded for why the Brain has
+        # none.
         sync_resources(db, _app.state.resource_specs)
         reconcile_builtin_roles(db)
         ensure_bootstrap_admin(db, resolved_settings)
+        # Issue #28: a second, independent identity — see `auth.bootstrap`'s module
+        # docstring for why order between the two no longer matters functionally;
+        # this runs second only to keep the narrative order (the identity that
+        # always exists, then the one that's opt-in).
+        ensure_configured_admin(db, resolved_settings)
         readiness.register("database", db.is_healthy)
         if heart is not None:
             heart.load()
@@ -193,6 +207,7 @@ def create_app(
         BearerAuthMiddleware,
         enabled=resolved_settings.security.enabled,
         db=db,
+        authenticators=authenticators,
         sudo=sudo,
     )
     app.add_middleware(RequestIdMiddleware)
@@ -211,6 +226,7 @@ def create_app(
     app.include_router(role_assignments_router)
     app.include_router(roles_router)
     app.include_router(permissions_router)
+    app.include_router(me_router)
 
     # Issue #25: refuses to boot (`RouteCoverageError`, before uvicorn ever binds a
     # port — same "fail loudly" shape as `HeartUnavailableError`) if any non-public

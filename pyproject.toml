@@ -76,7 +76,12 @@ packages = ["src/ansina"]
 [tool.ruff]
 target-version = "py314"
 src = ["src", "tests"]
-extend-exclude = ["openclaw-main"]
+
+# `tui/` is a standalone project with its own `pyproject.toml`/lint config (issue
+# #31) — excluded here so root `ruff check .` / `make check` / the root pre-commit
+# hooks stay daemon-only and keep mirroring the `check` CI job exactly. It has its own
+# `tui`-scoped hooks/CI job instead.
+extend-exclude = ["openclaw-main", "tui"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "ANN", "RUF"]

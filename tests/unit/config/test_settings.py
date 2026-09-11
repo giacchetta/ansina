@@ -145,11 +145,16 @@ def test_secret_in_toml_file_rejected(clean_env: None, tmp_cwd: Path) -> None:
 # `config/settings.py`'s `_TOKEN_MIN_LENGTH`/`_TOKEN_CHARSET`/
 # `_TOKEN_MIN_ENTROPY_BITS_PER_CHAR`.
 _STRONG_TOKEN = "s3cr3t-value-0123456789-abcdefgh"
+# Issue #28: `api_token` provisions the *configured admin* and requires
+# `admin_username` alongside it — every test below that wants `api_token` to load
+# successfully must set this too.
+_ADMIN_USERNAME = "configured-admin"
 
 
 def test_secret_via_env_loads_and_never_appears_in_text(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", _ADMIN_USERNAME)
     monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
 
     settings = load_settings()
@@ -163,6 +168,7 @@ def test_secret_via_env_loads_and_never_appears_in_text(
 def test_secret_not_leaked_in_error_report_for_sibling_failure(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", _ADMIN_USERNAME)
     monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
     toml_path = tmp_cwd / "ansina.toml"
     toml_path.write_text('[server]\nport = "eighty"\n', encoding="utf-8")
@@ -218,6 +224,67 @@ def test_low_entropy_api_token_rejected(
     assert "too predictable" in message
 
 
+# --- issue #28: admin_username/api_token pairing and the reserved name ------------
+
+
+def test_admin_username_reserved_name_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", "bootstrap-admin")
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "reserved" in str(exc_info.value)
+
+
+def test_api_token_without_admin_username_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "admin_username" in message
+    assert "api_token" in message
+
+
+def test_admin_username_without_api_token_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", _ADMIN_USERNAME)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "admin_username" in message
+    assert "api_token" in message
+
+
+def test_admin_username_and_api_token_together_load_fine(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", _ADMIN_USERNAME)
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
+
+    settings = load_settings()
+
+    assert settings.security.admin_username == _ADMIN_USERNAME
+
+
+def test_neither_admin_username_nor_api_token_loads_fine(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    settings = load_settings()
+
+    assert settings.security.admin_username is None
+    assert settings.security.api_token is None
+
+
 def test_token_entropy_of_empty_string_is_zero() -> None:
     """Guards `_validate_token_strength` against a division by zero — unreachable via
     `load_settings()` today (the `min_length` constraint rejects an empty token before
@@ -241,6 +308,7 @@ def test_security_settings_accepts_an_explicit_none_token() -> None:
 def test_strong_api_token_accepted(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", _ADMIN_USERNAME)
     monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
 
     settings = load_settings()
@@ -303,6 +371,7 @@ def test_non_loopback_bind_with_token_loads(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANSINA_SERVER__HOST", "0.0.0.0")
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", _ADMIN_USERNAME)
     monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", _STRONG_TOKEN)
 
     settings = load_settings()

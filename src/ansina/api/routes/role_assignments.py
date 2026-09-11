@@ -25,6 +25,7 @@ from fastapi.params import Depends
 from fastapi.responses import Response
 
 from ansina.api.authorization import require
+from ansina.api.identity import current_principal
 from ansina.auth.management import (
     NotFoundError,
     assert_admin_remains,
@@ -50,13 +51,6 @@ _DESCRIPTION = "Attach/detach a role to a user or a group."
 
 def _require_write() -> Depends:
     return Depends(require(_RESOURCE, description=_DESCRIPTION, sensitive=True))
-
-
-def _principal(request: Request) -> Principal | None:
-    """`request.state.principal` if one was resolved, else `None` — mirrors `routes/
-    sudo.py`'s own helper; `security.enabled = false` never sets it at all.
-    """
-    return getattr(request.state, "principal", None)
 
 
 def _get_role_or_404(db: Database, role_id: str) -> Role:
@@ -101,7 +95,7 @@ async def assign_user_role(request: Request, user_id: str, role_id: str) -> Resp
     await anyio.to_thread.run_sync(
         _assign,
         request.app.state.db,
-        _principal(request),
+        current_principal(request),
         SubjectType.USER,
         user_id,
         role_id,
@@ -128,7 +122,7 @@ async def assign_group_role(request: Request, group_id: str, role_id: str) -> Re
     await anyio.to_thread.run_sync(
         _assign,
         request.app.state.db,
-        _principal(request),
+        current_principal(request),
         SubjectType.GROUP,
         group_id,
         role_id,

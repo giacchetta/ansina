@@ -24,10 +24,10 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from ansina.api.authorization import require
+from ansina.api.identity import current_principal, no_identity_response
 from ansina.api.problems import CODE_UNAUTHORIZED, problem_response
 
 if TYPE_CHECKING:
-    from ansina.auth.principal import Principal
     from ansina.auth.sudo import SudoService
 
 router = APIRouter(prefix="/auth")
@@ -39,11 +39,6 @@ _SUDO_DESCRIPTION = (
 _GRANTS_RESOURCE = "auth.sudo.grants"
 _GRANTS_DESCRIPTION = (
     "DELETE /auth/sudo/grants — break-glass: revokes every active sudo grant."
-)
-
-_NO_IDENTITY_DETAIL = (
-    "no resolved identity to step up as — security.enabled = false disables the "
-    "identity model entirely"
 )
 
 
@@ -76,23 +71,6 @@ def _require_sudo_grants() -> Depends:
     )
 
 
-def _principal(request: Request) -> Principal | None:
-    """`request.state.principal` if one was resolved, else `None` — `security.
-    enabled = false` never sets it at all (`Starlette`'s `State` raises
-    `AttributeError` on a missing attribute, so this can't be a bare access).
-    """
-    return getattr(request.state, "principal", None)
-
-
-def _no_identity_response() -> JSONResponse:
-    return problem_response(
-        status=401,
-        code=CODE_UNAUTHORIZED,
-        title="Unauthorized",
-        detail=_NO_IDENTITY_DETAIL,
-    )
-
-
 @router.post(
     "/sudo",
     response_model=None,
@@ -104,9 +82,9 @@ def _no_identity_response() -> JSONResponse:
     dependencies=[_require_sudo()],
 )
 async def step_up(request: Request, payload: SudoRequest) -> JSONResponse:
-    principal = _principal(request)
+    principal = current_principal(request)
     if principal is None:
-        return _no_identity_response()
+        return no_identity_response()
 
     sudo: SudoService = request.app.state.sudo
     # Argon2id verification is deliberately CPU-heavy (see `auth.hashing`'s module
@@ -138,9 +116,9 @@ async def step_up(request: Request, payload: SudoRequest) -> JSONResponse:
     dependencies=[_require_sudo()],
 )
 async def revoke_own_grant(request: Request) -> Response:
-    principal = _principal(request)
+    principal = current_principal(request)
     if principal is None:
-        return _no_identity_response()
+        return no_identity_response()
 
     sudo: SudoService = request.app.state.sudo
     await anyio.to_thread.run_sync(sudo.revoke_for_user, principal.user.id)

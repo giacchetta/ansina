@@ -214,6 +214,14 @@ class SudoSettings(BaseModel):
     lockout_seconds: float = Field(default=900.0, gt=0)
 
 
+# The bootstrap identity's own username (`ansina.auth.bootstrap`'s synthetic Admin) —
+# defined here, not there, so `SecuritySettings.admin_username`'s reserved-name check
+# can reference it without `config` gaining a dependency on `auth` (the reverse
+# direction already exists pervasively; `config` itself imports nothing from `auth`
+# anywhere in this codebase, and this one shared string shouldn't be the first).
+# `auth.bootstrap` imports this constant rather than declaring its own copy.
+RESERVED_BOOTSTRAP_USERNAME = "bootstrap-admin"
+
 _TOKEN_MIN_LENGTH = 32
 # The alphabet `secrets.token_urlsafe()`/`token_hex()` draw from — restricting a
 # manually-supplied token to it rejects any human-typed phrase (spaces, punctuation,
@@ -239,35 +247,94 @@ def _token_entropy_bits_per_char(value: str) -> float:
 
 
 class SecuritySettings(BaseModel):
-    """Auth material for issue #5 and #24.
+    """Auth material for issue #5, #24, and #28.
 
     `enabled=False` is the only way to run with no authentication at all (loopback-only
-    — see `Settings._refuse_unsafe_bind`) — a deliberate, explicit opt-out rather than
-    an incidental side effect of leaving `api_token` unset. When `enabled=True` (the
-    default) and no `api_token` override is configured, Ansina generates its own
-    high-entropy bootstrap token on first boot and prints it once
-    (`ansina.auth.bootstrap`) — nobody, including Ansina's own logs, ever sees it again.
+    — see `Settings._refuse_unsafe_bind`) — a deliberate, explicit opt-out. When
+    `enabled=True` (the default), Ansina *always* generates its own high-entropy
+    bootstrap token on first boot and prints it once (`ansina.auth.bootstrap`) —
+    nobody, including Ansina's own logs, ever sees it again, and nothing in this file
+    can override or rotate it. `api_token` below is unrelated to that identity — see
+    its own docstring.
     """
 
     model_config = _MODEL_CONFIG
 
     enabled: bool = True
 
-    # Optional operator override of the auto-generated bootstrap token — e.g. for a
-    # scripted/orchestrated install, or CI, that needs a token known ahead of time.
+    # Issue #28: together with `api_token`, provisions a second, *ordinary* Admin user
+    # once, at first boot — the "configured admin" (`ansina.auth.bootstrap.
+    # ensure_configured_admin`), distinct from the synthetic bootstrap identity above.
+    # It exists so a scripted install or CI gets a known, reproducible Admin credential
+    # without ever touching the bootstrap identity's own credential or scraping the
+    # once-only banner off stdout. Required together with `api_token` — one set without
+    # the other is a config error (`_validate_admin_username_pairing` below). Never the
+    # reserved bootstrap username. Created once; on any later boot where a non-bootstrap
+    # user already exists, both fields are silently ignored (one info log line, not a
+    # boot failure) — a systemd unit or container keeping the same environment across
+    # every restart must not crash on a routine one. There is no rotation: once created,
+    # this identity is an ordinary user and mints/revokes its own tokens the same way
+    # any other user does, via `POST`/`DELETE /auth/me/tokens`.
+    admin_username: str | None = Field(default=None, min_length=1)
+
+    # Issue #28: the configured admin's own credential — see `admin_username` above.
     # No literal default — ever. Validated to look like a securely generated value
     # (length, charset, entropy) rather than a human-chosen phrase; see
-    # `_validate_token_strength` below.
+    # `_validate_token_strength` below. This field no longer has anything to do with
+    # the bootstrap identity, which #28 made permanently non-overridable.
     api_token: SecretStr | None = Field(default=None, min_length=_TOKEN_MIN_LENGTH)
 
     # Issue #24: on first boot with no users, this resolves to a single synthetic Admin
     # identity (`ansina.auth.bootstrap`) so the service stays reachable. Setting this
     # `False` revokes that identity's credential (but keeps the user and its
     # `external_identities` row, for audit-log attribution) once a real Admin account
-    # exists — it does not prevent the bootstrap identity from ever being created.
+    # exists — it does not prevent the bootstrap identity from ever being created, and
+    # setting it back to `True` regenerates a credential if it's currently
+    # credential-less (issue #28 — this is now the only break-glass path, so it must
+    # be recoverable), but never touches one that's still live.
     bootstrap_admin_enabled: bool = True
     password: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
     sudo: SudoSettings = Field(default_factory=SudoSettings)
+
+    # Issue #28: how long a token's `last_used_at` may go stale before the next
+    # successful authentication updates it — coalesced rather than written on every
+    # request, since `find_user_by_api_token`/`find_api_token_credential` already
+    # full-scan `credentials` on every authenticated request, and a write there would
+    # serialize SQLite writers against the tick loop and any concurrent reader. `0`
+    # means "write on every authentication" — a useful escape hatch, not the default.
+    token_last_used_resolution_seconds: float = Field(default=300.0, ge=0)
+
+    @field_validator("admin_username")
+    @classmethod
+    def _validate_admin_username_not_reserved(cls, value: str | None) -> str | None:
+        if value == RESERVED_BOOTSTRAP_USERNAME:
+            raise ValueError(
+                f"{RESERVED_BOOTSTRAP_USERNAME!r} is a reserved user, choose "
+                "another one"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_admin_username_pairing(self) -> SecuritySettings:
+        """`admin_username` and `api_token` provision the configured admin together —
+        neither means anything alone: a token with no username has nothing to name, a
+        username with no token has nothing to authenticate. Raised as `ConfigError`
+        directly, not `ValueError` — same reasoning as `Settings._refuse_unsafe_bind`:
+        a model-level check like this has no single field `loc` for pydantic's
+        aggregated-error formatting to key on.
+        """
+        if (self.admin_username is None) != (self.api_token is None):
+            raise ConfigError(
+                _render_report(
+                    [
+                        "security.admin_username / security.api_token: both must be "
+                        "set together to provision the configured admin identity, or "
+                        "neither — set ANSINA_SECURITY__ADMIN_USERNAME and "
+                        "ANSINA_SECURITY__API_TOKEN together, or leave both unset"
+                    ]
+                )
+            )
+        return self
 
     @field_validator("api_token")
     @classmethod

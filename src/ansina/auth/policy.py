@@ -18,21 +18,41 @@ from ansina.auth.models import MUTATING_VERBS, RoleSlug, Verb
 # the moment they're catalogued, with no separate listing to keep in sync.
 _SENSITIVE_RESOURCE_PREFIX = "auth."
 
+# Any resource whose dotted name starts with this prefix is a *self* surface — one
+# whose subject is always the authenticated caller acting on their own account (issue
+# #30, e.g. `me.profile`, and #28's later `me.tokens`). Granting every verb here to
+# every builtin role is not an escalation: a `me.*` route can never reach another
+# user's data, by construction of what "self" means, so there is nothing for a role's
+# ordinary GET-only/no-DELETE restrictions to protect against.
+_SELF_RESOURCE_PREFIX = "me."
+
 
 def is_sensitive_resource(resource: str) -> bool:
     """`True` for any `auth.*` resource — the identity/access-control surface itself."""
     return resource.startswith(_SENSITIVE_RESOURCE_PREFIX)
 
 
+def is_self_resource(resource: str) -> bool:
+    """`True` for any `me.*` resource — a caller acting on their own account only."""
+    return resource.startswith(_SELF_RESOURCE_PREFIX)
+
+
 def permitted_verbs(role: RoleSlug, resource: str) -> frozenset[Verb]:
     """The fixed builtin policy: which verbs `role` may issue against `resource`.
 
+    - Any `me.*` resource: every verb, for every role, unconditionally — checked
+      first, ahead of the `auth.*` restriction below. Not an escalation: the subject
+      of a `me.*` action is always the caller themselves (issue #30), so there is no
+      grant here that reaches beyond what the caller already owns.
     - Read: GET only.
     - Write: GET plus every mutating verb except DELETE.
     - Maintain/Admin: every verb, including DELETE.
     - Any `auth.*` resource: Maintain/Admin only — Read and Write get nothing there,
       regardless of verb.
     """
+    if is_self_resource(resource):
+        return frozenset({Verb.GET, *MUTATING_VERBS})
+
     if is_sensitive_resource(resource) and role not in (
         RoleSlug.MAINTAIN,
         RoleSlug.ADMIN,

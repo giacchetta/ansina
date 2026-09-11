@@ -1,0 +1,90 @@
+[project]
+name = "ansina-tui"
+dynamic = ["version"]
+description = "ansina-tui: TUI (bare invocation) and scriptable CLI for operating an Ansina daemon over its REST API."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+authors = [
+    { name = "Luciano Giacchetta", email = "ldgiacchetta@gmail.com" },
+]
+# This project talks HTTP only and never imports `ansina` — see README.md. That's the
+# whole reason it's a standalone project with its own lock file instead of a package
+# inside the daemon's dependency graph.
+dependencies = [
+    "typer>=0.15",
+    "httpx>=0.27",
+    "textual>=0.85",
+    # Declared explicitly (not just pulled in transitively by textual/typer) because
+    # `output.py` imports it directly for table rendering. No dedicated TOML-writer
+    # dependency: 3.14's stdlib `tomllib` is read-only, so `config.py` hand-rolls a
+    # small emitter for its own narrow, known schema instead of adding one.
+    "rich>=13.9",
+]
+
+[project.scripts]
+ansina-tui = "ansina_tui.main:app"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=2.3",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "pytest-cov>=7.1",
+    "pre-commit>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/ansina_tui/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ansina_tui"]
+
+[tool.ruff]
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "ANN", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.ruff.lint.flake8-bugbear]
+# `typer.Option([], ...)`/`typer.Argument(...)` is the standard Typer idiom for a
+# repeatable option (issue #33's `-f`/`-H`) — without this, B008 misfires on it the
+# same way it would on any mutable-looking default, even though Typer/Click never
+# mutates the literal itself (each invocation gets its own list from Click's parser).
+extend-immutable-calls = ["typer.Option", "typer.Argument"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+files = ["src", "tests"]
+warn_unreachable = true
+# Mirrors the root project's `[tool.mypy]`: `tests/` has no `__init__.py` files, so
+# these resolve modules by file path instead of requiring unique basenames.
+mypy_path = "src"
+explicit_package_bases = true
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = [
+    'if __name__ == "__main__":',
+    "# unreachable",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# `--import-mode=importlib`: same reasoning as the root project — `tests/` has no
+# `__init__.py` files, so pytest's default "prepend" mode fails as soon as two test
+# modules share a basename across subpackages (e.g. `commands/test_status.py` vs a
+# future sibling).
+addopts = "--cov=src/ansina_tui --import-mode=importlib"

@@ -1,0 +1,25 @@
+/* All styling for the TUI shell lives here — no inline styles scattered through
+   widget code (issue #34). */
+
+Screen {
+    background: $surface;
+}
+
+TabbedContent {
+    height: 1fr;
+}
+
+OverviewTab {
+    padding: 1 2;
+}
+
+#overview-connection {
+    padding-bottom: 1;
+    text-style: bold;
+}
+
+.panel-title {
+    color: $text-muted;
+    text-style: bold underline;
+    padding-top: 1;
+}

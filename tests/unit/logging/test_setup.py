@@ -42,6 +42,8 @@ def test_configure_logging_is_idempotent(clean_env: None, tmp_cwd: Path) -> None
 def test_configure_logging_registers_configured_token(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Issue #28: `api_token` requires `admin_username` alongside it.
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", "configured-admin")
     monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", "configured-secret-token-value-x1")
     stream = io.StringIO()
     monkeypatch.setattr("sys.stderr", stream)

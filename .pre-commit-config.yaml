@@ -36,3 +36,38 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      # `tui/` is a standalone project (issue #31) with its own pyproject.toml/lock —
+      # its own parallel hook set, same reasoning as above (versions from tui/uv.lock,
+      # never pinned separately). `--project tui` (not `--directory`) for the
+      # file-driven ruff hooks: cwd stays at the repo root so the paths pre-commit
+      # passes (repo-root-relative) resolve, while ruff's own hierarchical config
+      # discovery still finds tui/pyproject.toml from each file's own location.
+      # `--directory tui` for mypy/pytest instead: no filenames are passed
+      # (`pass_filenames: false`), and both tools resolve their own config's relative
+      # paths (`files = [...]`, `--cov=src/ansina_tui`) against cwd, so cwd must
+      # actually be tui/.
+      - id: tui-ruff
+        name: tui ruff check
+        entry: uv run --project tui ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        files: ^tui/
+      - id: tui-ruff-format
+        name: tui ruff format
+        entry: uv run --project tui ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        files: ^tui/
+      - id: tui-mypy
+        name: tui mypy (strict)
+        entry: uv run --directory tui mypy
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: tui-pytest
+        name: tui pytest
+        entry: uv run --directory tui pytest
+        language: system
+        pass_filenames: false
+        always_run: true

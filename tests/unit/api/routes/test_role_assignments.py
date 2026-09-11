@@ -174,16 +174,32 @@ def test_unassign_unknown_role_from_user_is_404(
 
 
 def test_unassigning_admin_from_the_sole_admin_is_409(
-    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+    authed_app: FastAPI,
+    authed_client: TestClient,
+    authed_admin_username: str,
+    sudoed_maintain: Callable[[], dict[str, str]],
 ) -> None:
-    headers = {"Authorization": f"Bearer {authed_token}"}
-    bootstrap = UserRepository(authed_app.state.db).get_by_username("bootstrap-admin")
+    """`authed_app` (issue #28) seeds two admins: the bootstrap identity and the
+    configured admin `authed_token` itself authenticates as — so acting as either can
+    never trigger this guard, the other always remains. The actor here is a third,
+    sudo'd `Maintain` identity instead (unassign never runs the self-escalation
+    check, only assign does, so a non-Admin actor is fine here); the configured
+    admin's own direct grant is stripped first, so bootstrap really is the sole
+    remaining admin.
+    """
+    db = authed_app.state.db
+    bootstrap = UserRepository(db).get_by_username("bootstrap-admin")
     assert bootstrap is not None
-    admin_role = RoleRepository(authed_app.state.db).get_by_slug("admin")
+    configured_admin = UserRepository(db).get_by_username(authed_admin_username)
+    assert configured_admin is not None
+    admin_role = RoleRepository(db).get_by_slug("admin")
     assert admin_role is not None
+    RoleAssignmentRepository(db).unassign(
+        SubjectType.USER, configured_admin.id, admin_role.id
+    )
 
     response = authed_client.delete(
-        f"/auth/users/{bootstrap.id}/roles/{admin_role.id}", headers=headers
+        f"/auth/users/{bootstrap.id}/roles/{admin_role.id}", headers=sudoed_maintain()
     )
 
     assert response.status_code == 409
@@ -301,12 +317,21 @@ def test_unassign_unknown_role_from_group_is_404(
 
 
 def test_unassigning_admin_from_a_group_that_would_leave_zero_admins_is_409(
-    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+    authed_app: FastAPI,
+    authed_client: TestClient,
+    authed_token: str,
+    authed_admin_username: str,
+    sudoed_maintain: Callable[[], dict[str, str]],
 ) -> None:
+    """See `test_unassigning_admin_from_the_sole_admin_is_409`'s docstring for why
+    the actor and setup differ from a single-admin-fixture world.
+    """
     headers = {"Authorization": f"Bearer {authed_token}"}
     db = authed_app.state.db
     bootstrap = UserRepository(db).get_by_username("bootstrap-admin")
     assert bootstrap is not None
+    configured_admin = UserRepository(db).get_by_username(authed_admin_username)
+    assert configured_admin is not None
     group = authed_client.post(
         "/auth/groups", headers=headers, json={"slug": "grp5", "name": "Grp5"}
     ).json()
@@ -319,9 +344,12 @@ def test_unassigning_admin_from_a_group_that_would_leave_zero_admins_is_409(
         f"/auth/groups/{group['id']}/members/{bootstrap.id}", headers=headers
     )
     RoleAssignmentRepository(db).unassign(SubjectType.USER, bootstrap.id, admin_role.id)
+    RoleAssignmentRepository(db).unassign(
+        SubjectType.USER, configured_admin.id, admin_role.id
+    )
 
     response = authed_client.delete(
-        f"/auth/groups/{group['id']}/roles/{admin_role.id}", headers=headers
+        f"/auth/groups/{group['id']}/roles/{admin_role.id}", headers=sudoed_maintain()
     )
 
     assert response.status_code == 409

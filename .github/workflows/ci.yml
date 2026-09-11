@@ -1,8 +1,9 @@
 name: CI
 
-# Two required legs on every push/PR: lint + strict types + unit tests
-# (`check`), then a black-box boot-and-serve gate (`e2e`) gated on `check`
-# succeeding first.
+# Three jobs on every push/PR: lint + strict types + unit tests (`check`), then a
+# black-box boot-and-serve gate (`e2e`) gated on `check` succeeding first, plus an
+# independent `tui` job for the standalone `tui/` project (issue #31) — its own
+# lock file, its own dependency graph, gated on nothing here.
 
 on:
   push:
@@ -59,3 +60,28 @@ jobs:
       # source — the 100% coverage threshold (pyproject.toml) is enforced on
       # `tests/unit` only, via `check`'s `pytest tests/unit` above.
       - run: uv run pytest tests/e2e --no-cov
+
+  tui:
+    # Independent of `check`/`e2e`: `tui/` is a standalone project (issue #31) with
+    # its own lock file and dependency graph — it never imports `ansina`, so nothing
+    # here needs the daemon to have passed first.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: tui/uv.lock
+          python-version: "3.14"
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest
