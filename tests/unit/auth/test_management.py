@@ -39,7 +39,7 @@ _CALLER = User(
 
 
 def _seed_role(db: Database, slug: str, resource: str, verbs: tuple[Verb, ...]) -> str:
-    ResourceRepository(db).upsert(resource, "")
+    ResourceRepository(db).upsert(resource, "", verbs=frozenset())
     role = RoleRepository(db).ensure_builtin(slug, slug.title(), "")
     for verb in verbs:
         RolePermissionRepository(db).grant(role.id, resource, verb)

@@ -31,12 +31,27 @@ def sync_resources(db: Database, specs: tuple[ResourceSpec, ...]) -> None:
     `app.routes` walk — this function's own contract didn't change either time.
     """
     resources = ResourceRepository(db)
-    wanted = {spec.name: spec.description for spec in specs}
-    for name, description in wanted.items():
-        resources.upsert(name, description)
+    roles = RoleRepository(db)
+    wanted = {spec.name: spec for spec in specs}
+    for name, spec in wanted.items():
+        resources.upsert(name, spec.description, verbs=spec.verbs)
 
     stale = [r.name for r in resources.list_all() if r.name not in wanted]
     for name in stale:
+        # Issue #38: a custom role's grant on this resource is about to be dropped by
+        # `resources.delete`'s `ON DELETE CASCADE` — warn and name it before that
+        # happens. Builtin roles are unaffected (`reconcile_builtin_roles` below
+        # rebuilds their grants unconditionally at every boot), so only a `builtin=0`
+        # holder is worth this warning.
+        holders = roles.list_custom_with_grant_on(name)
+        if holders:
+            logger.warning(
+                "retiring a resource still granted to custom roles",
+                extra={
+                    "resource": name,
+                    "roles": ", ".join(role.slug for role in holders),
+                },
+            )
         logger.info("retiring stale resource", extra={"resource": name})
         resources.delete(name)
 

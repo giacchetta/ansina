@@ -802,9 +802,10 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # (1,) = storage's own bookkeeping table (issue #6); (2,) = the RBAC identity
         # model (issue #24); (3,) = sudo grants/lockouts (issue #26); (4,) = the user
-        # deletion tombstone (issue #27) — bump this alongside `storage/migrations/`
-        # whenever a new migration lands.
-        assert rows == [(1,), (2,), (3,), (4,)]
+        # deletion tombstone (issue #27); (5,) = the resource-served-verbs column
+        # (issue #38) — bump this alongside `storage/migrations/` whenever a new
+        # migration lands.
+        assert rows == [(1,), (2,), (3,), (4,), (5,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -814,7 +815,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # still exactly these rows — nothing re-applied
-        assert rows == [(1,), (2,), (3,), (4,)]
+        assert rows == [(1,), (2,), (3,), (4,), (5,)]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:

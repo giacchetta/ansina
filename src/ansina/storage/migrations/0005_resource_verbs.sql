@@ -1,0 +1,16 @@
+-- Migration 0005: resource-served-verbs fidelity (issue #38).
+--
+-- `resources` previously carried only a name/description; `GET /auth/permissions`
+-- crossed every catalogued resource with `list(Verb)` regardless of what a route
+-- actually answers to, so a GET-only resource like `system.version` advertised
+-- POST/PUT/PATCH/DELETE as if they were grantable. `verbs` closes that gap: a
+-- canonical, comma-separated `Verb` list (e.g. "GET,POST,PATCH"), always written whole
+-- by `auth.reconciler.sync_resources` from `ansina.api.route_audit`'s own
+-- `route.methods` union — never queried by individual element, so a plain column is
+-- the right shape here, not a join table.
+--
+-- The `NOT NULL DEFAULT ''` is safe for existing rows: `create_app`'s lifespan calls
+-- `sync_resources` immediately after `run_migrations` (`api/app.py`), so every row is
+-- rewritten with its real verb set before any request is ever served — no boot leaves
+-- a stale empty value in place.
+ALTER TABLE resources ADD COLUMN verbs TEXT NOT NULL DEFAULT '';

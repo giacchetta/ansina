@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from ansina.auth.models import RoleSlug, Verb
 from ansina.auth.policy import ResourceSpec, permitted_verbs
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
@@ -11,8 +14,8 @@ from ansina.auth.repositories import (
 from ansina.storage.database import Database
 
 _SPECS = (
-    ResourceSpec("heart.tick", "tick loop"),
-    ResourceSpec("auth.users", "user management"),
+    ResourceSpec("heart.tick", "tick loop", frozenset({Verb.GET})),
+    ResourceSpec("auth.users", "user management", frozenset(Verb)),
 )
 
 
@@ -23,10 +26,20 @@ def test_sync_resources_creates_every_named_resource(db: Database) -> None:
     assert names == {"heart.tick", "auth.users"}
 
 
+def test_sync_resources_persists_served_verbs(db: Database) -> None:
+    sync_resources(db, _SPECS)
+
+    by_name = {r.name: r for r in ResourceRepository(db).list_all()}
+    assert by_name["heart.tick"].verbs == {Verb.GET}
+    assert by_name["auth.users"].verbs == set(Verb)
+
+
 def test_sync_resources_updates_a_changed_description(db: Database) -> None:
     sync_resources(db, _SPECS)
 
-    sync_resources(db, (ResourceSpec("heart.tick", "updated"), _SPECS[1]))
+    sync_resources(
+        db, (ResourceSpec("heart.tick", "updated", frozenset({Verb.GET})), _SPECS[1])
+    )
 
     resource = next(
         r for r in ResourceRepository(db).list_all() if r.name == "heart.tick"
@@ -127,3 +140,37 @@ def test_reconcile_builtin_roles_never_touches_a_non_builtin_roles_grants(
     refreshed = roles.get(custom.id)
     assert refreshed is not None
     assert refreshed.builtin is False
+
+
+def test_retiring_a_resource_held_by_a_custom_role_warns_naming_it(
+    db: Database,
+    captured_logs: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """Issue #38 AC: retiring a resource a custom role holds a grant on logs a
+    warning naming that role, before the `ON DELETE CASCADE` drops the grant.
+    """
+    sync_resources(db, _SPECS)
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    custom = roles.create("auditor", "Auditor", "a hand-defined role")
+    permissions.grant(custom.id, "auth.users", Verb.GET)
+
+    sync_resources(db, (_SPECS[0],))  # drops "auth.users" from the catalog
+
+    warnings = [entry for entry in captured_logs() if entry["level"] == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0]["extra"]["resource"] == "auth.users"
+    assert warnings[0]["extra"]["roles"] == "auditor"
+
+
+def test_retiring_a_resource_held_only_by_builtin_roles_warns_nothing(
+    db: Database,
+    captured_logs: Callable[[], list[dict[str, Any]]],
+) -> None:
+    sync_resources(db, _SPECS)
+    reconcile_builtin_roles(db)  # grants every builtin role's role_permissions rows
+
+    sync_resources(db, (_SPECS[0],))  # drops "auth.users" from the catalog
+
+    warnings = [entry for entry in captured_logs() if entry["level"] == "WARNING"]
+    assert warnings == []

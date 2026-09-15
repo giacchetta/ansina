@@ -27,7 +27,7 @@ def _seed_role_with_grant(
     """A resource catalogued, and one role granted `verbs` on it — returns the role
     id.
     """
-    ResourceRepository(db).upsert(resource, "")
+    ResourceRepository(db).upsert(resource, "", verbs=frozenset())
     role = RoleRepository(db).ensure_builtin(slug.value, slug.value.title(), "")
     for verb in verbs:
         RolePermissionRepository(db).grant(role.id, resource, verb)
@@ -53,7 +53,7 @@ def test_authorize_raises_forbidden_when_no_role_grants_the_verb(db: Database) -
 
 
 def test_authorize_raises_forbidden_for_an_empty_role_set(db: Database) -> None:
-    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset())
     principal = Principal(user=_USER, role_ids=frozenset())
 
     with pytest.raises(ForbiddenError):
@@ -109,7 +109,7 @@ def test_sensitive_with_custom_role_and_no_sudo_grant_requires_sudo(
     `maintain` role slug — a custom role (#40) holding neither builtin slug must
     still step up for a sensitive action it's been granted.
     """
-    ResourceRepository(db).upsert("auth.users", "")
+    ResourceRepository(db).upsert("auth.users", "", verbs=frozenset())
     role = RoleRepository(db).create("custom-deleter", "Custom Deleter", "")
     RolePermissionRepository(db).grant(role.id, "auth.users", Verb.DELETE)
     principal = Principal(
@@ -128,7 +128,7 @@ def test_sensitive_with_custom_role_and_no_sudo_grant_requires_sudo(
 def test_sensitive_with_custom_role_and_a_live_sudo_grant_succeeds(
     db: Database,
 ) -> None:
-    ResourceRepository(db).upsert("auth.users", "")
+    ResourceRepository(db).upsert("auth.users", "", verbs=frozenset())
     role = RoleRepository(db).create("custom-deleter", "Custom Deleter", "")
     RolePermissionRepository(db).grant(role.id, "auth.users", Verb.DELETE)
     principal = Principal(
@@ -145,7 +145,7 @@ def test_forbidden_is_checked_before_sudo_required(db: Database) -> None:
     """A `maintain`-only caller with no grant at all on the resource gets `Forbidden`,
     not a sudo prompt for an action it couldn't take regardless.
     """
-    ResourceRepository(db).upsert("auth.users", "")
+    ResourceRepository(db).upsert("auth.users", "", verbs=frozenset())
     principal = Principal(
         user=_USER,
         role_ids=frozenset(),

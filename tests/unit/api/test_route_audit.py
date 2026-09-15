@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, FastAPI
 
 from ansina.api.authorization import require
 from ansina.api.route_audit import RouteCoverageError, audit_route_coverage
+from ansina.auth.models import Verb
 
 
 def _bare_app() -> FastAPI:
@@ -33,6 +34,55 @@ def test_a_route_with_require_is_catalogued() -> None:
     specs = audit_route_coverage(app)
 
     assert [(s.name, s.description) for s in specs] == [("thing.read", "reads")]
+    # Issue #38: a GET-only route's resource is catalogued with only GET, not every
+    # `Verb` — the fidelity `GET /auth/permissions` builds its response from.
+    assert specs[0].verbs == {Verb.GET}
+
+
+def test_verbs_union_across_every_route_declaring_the_same_resource() -> None:
+    app = _bare_app()
+    router = APIRouter()
+
+    @router.get("/thing", dependencies=[Depends(require("thing.crud"))])
+    async def get_thing() -> dict[str, bool]:
+        return {"ok": True}
+
+    @router.post("/thing", dependencies=[Depends(require("thing.crud"))])
+    async def post_thing() -> dict[str, bool]:
+        return {"ok": True}
+
+    @router.delete("/thing/{id}", dependencies=[Depends(require("thing.crud"))])
+    async def delete_thing(id: str) -> dict[str, bool]:
+        return {"ok": True}
+
+    app.include_router(router)
+
+    specs = audit_route_coverage(app)
+
+    assert [s.verbs for s in specs] == [{Verb.GET, Verb.POST, Verb.DELETE}]
+
+
+def test_a_non_verb_method_is_filtered_out_of_the_served_verb_set() -> None:
+    """A route can declare a method outside `Verb` (e.g. `OPTIONS`, via `api_route`'s
+    own `methods=`) — it must never enter the served-verb set, since `require()`
+    itself 403s an unmapped verb and it's not something a role could ever be granted.
+    """
+    app = _bare_app()
+    router = APIRouter()
+
+    @router.api_route(
+        "/thing",
+        methods=["GET", "OPTIONS"],
+        dependencies=[Depends(require("thing.read"))],
+    )
+    async def get_thing() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.include_router(router)
+
+    specs = audit_route_coverage(app)
+
+    assert specs[0].verbs == {Verb.GET}
 
 
 def test_public_paths_never_need_a_declaration() -> None:

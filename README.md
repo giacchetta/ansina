@@ -122,7 +122,7 @@ Full per-command detail (flags, `api`'s `-f`/`--input`/`-H` rules, config file l
 | `POST`/`DELETE /auth/users/{id}/roles/{role_id}` | token + sudo for `Maintain` | Maintain | Attach/detach a role to a user — see the self-escalation and last-`Admin` rules below. |
 | `POST`/`DELETE /auth/groups/{id}/roles/{role_id}` | token + sudo for `Maintain` | Maintain | Attach/detach a role to a group — same rules, applied to every current member. |
 | `GET /auth/roles` | token | Maintain | The role catalog (builtin only in M2) with each role's current `role_permissions` grants. Read-only — no create/update/delete route exists. |
-| `GET /auth/permissions` | token | Maintain | The full `(resource, verb)` catalog — the discovery surface a future custom-role editor builds on. |
+| `GET /auth/permissions` | token | Maintain | Every catalogued resource with the verbs it's actually served on, its policy class (`ordinary`/`auth`/`self`), and whether it's grantable (`false` for every `me.*` resource) — the discovery surface a future custom-role editor builds on. |
 | `GET /auth/me` | token | Read | The caller's own identity (user, roles, sudo status, enrolled `step_up_factors`) — every role reaches this, never sudo-gated. See the `me.*` carve-out below. |
 | `POST /auth/me/tokens` | token | Read | Mint your own API token — the raw value is returned **once**. Refused (403) for the bootstrap identity. |
 | `GET /auth/me/tokens` | token | Read | List your own tokens — metadata only, never a hash/salt. |

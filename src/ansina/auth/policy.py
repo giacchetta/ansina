@@ -9,6 +9,7 @@ for every catalogued resource, and materializes whatever it returns as
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 from ansina.auth.models import MUTATING_VERBS, RoleSlug, Verb
 
@@ -35,6 +36,39 @@ def is_sensitive_resource(resource: str) -> bool:
 def is_self_resource(resource: str) -> bool:
     """`True` for any `me.*` resource — a caller acting on their own account only."""
     return resource.startswith(_SELF_RESOURCE_PREFIX)
+
+
+class PolicyClass(StrEnum):
+    """Which of the three fixed policy branches `permitted_verbs` applies to a
+    resource — surfaced by `GET /auth/permissions` (issue #38) so a future custom-role
+    editor can render *why* a resource grants what it does, not just what it grants.
+    """
+
+    ORDINARY = "ordinary"
+    AUTH = "auth"
+    SELF = "self"
+
+
+def policy_class(resource: str) -> PolicyClass:
+    """`resource`'s policy class — checked in the same order as `permitted_verbs`
+    itself (`self` first, then `auth`) so the two functions can never disagree about
+    which branch a resource falls under.
+    """
+    if is_self_resource(resource):
+        return PolicyClass.SELF
+    if is_sensitive_resource(resource):
+        return PolicyClass.AUTH
+    return PolicyClass.ORDINARY
+
+
+def is_grantable(resource: str) -> bool:
+    """`False` for any `me.*` resource. Every builtin role already holds every verb
+    there (`permitted_verbs`'s self-resource carve-out), so offering e.g.
+    `me.tokens:DELETE` as a grantable row in a custom-role picker would communicate an
+    escalation that doesn't exist — the subject of a `me.*` action is always the
+    caller themselves, by construction.
+    """
+    return not is_self_resource(resource)
 
 
 def permitted_verbs(role: RoleSlug, resource: str) -> frozenset[Verb]:
@@ -110,8 +144,11 @@ class ResourceSpec:
     `app.routes` walk — every route's own `require(resource, description=...)`
     declaration becomes one `ResourceSpec`, so the catalog can never drift from the
     actual surface. `sync_resources`'s contract (make `resources` match the given specs
-    exactly) is unchanged.
+    exactly) is unchanged. `verbs` (issue #38) is the union of every surviving route's
+    `route.methods` for this resource — no default, since every call site should state
+    what a route actually serves rather than silently claiming "everything".
     """
 
     name: str
     description: str
+    verbs: frozenset[Verb]

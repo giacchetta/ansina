@@ -113,7 +113,7 @@ def _grant(
     the role's real id — `RolePermissionRepository.effective_verbs` matches on that id,
     not on the slug, so a `Principal` built for these tests must carry it.
     """
-    ResourceRepository(db).upsert(resource, "")
+    ResourceRepository(db).upsert(resource, "", verbs=frozenset())
     role = RoleRepository(db).ensure_builtin(
         role_slug.value, role_slug.value.title(), ""
     )
@@ -248,7 +248,7 @@ def test_sensitive_resource_with_custom_role_and_no_sudo_grant_is_403(
     """Issue #37 AC: a principal holding only a custom role (no builtin `maintain`/
     `admin` slug) that grants a sensitive verb must still step up.
     """
-    ResourceRepository(db).upsert(_SENSITIVE_RESOURCE, "")
+    ResourceRepository(db).upsert(_SENSITIVE_RESOURCE, "", verbs=frozenset())
     role = RoleRepository(db).create("custom-role", "Custom Role", "")
     RolePermissionRepository(db).grant(role.id, _SENSITIVE_RESOURCE, Verb.GET)
     principal = _principal(
@@ -284,7 +284,7 @@ def test_admin_with_additional_custom_role_membership_is_still_exempt_from_sudo(
 def test_no_grant_at_all_is_forbidden_not_sudo_required(
     db: Database, client_factory: Any
 ) -> None:
-    ResourceRepository(db).upsert(_SENSITIVE_RESOURCE, "")
+    ResourceRepository(db).upsert(_SENSITIVE_RESOURCE, "", verbs=frozenset())
     principal = _principal(
         frozenset(), frozenset({RoleSlug.MAINTAIN.value}), sudo_active=False
     )

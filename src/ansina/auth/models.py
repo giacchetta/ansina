@@ -34,6 +34,32 @@ MUTATING_VERBS: frozenset[Verb] = frozenset(
     {Verb.POST, Verb.PUT, Verb.PATCH, Verb.DELETE}
 )
 
+# Canonical declaration order — used everywhere a set of verbs needs a stable, readable
+# ordering: encoding a `resources.verbs` column value and rendering `GET /auth/
+# permissions`'s own `verbs` list (issue #38).
+_VERB_ORDER: tuple[Verb, ...] = tuple(Verb)
+
+
+def ordered_verbs(verbs: frozenset[Verb]) -> tuple[Verb, ...]:
+    """`verbs`, in `Verb`'s declaration order (GET, POST, PUT, PATCH, DELETE) — the one
+    ordering every verb-list-shaped output uses, so two call sites never disagree.
+    """
+    return tuple(verb for verb in _VERB_ORDER if verb in verbs)
+
+
+def encode_verbs(verbs: frozenset[Verb]) -> str:
+    """A `resources.verbs` column value: a comma-separated, canonically ordered list
+    (e.g. `"GET,POST,PATCH"`), empty string for no served verbs.
+    """
+    return ",".join(verb.value for verb in ordered_verbs(verbs))
+
+
+def decode_verbs(raw: str) -> frozenset[Verb]:
+    """The inverse of `encode_verbs` — tolerates the empty string (no verbs)."""
+    if not raw:
+        return frozenset()
+    return frozenset(Verb(part) for part in raw.split(","))
+
 
 class RoleSlug(StrEnum):
     """The four builtin roles (issue #24). Not compared by ordinal anywhere — every
@@ -69,12 +95,15 @@ class CredentialType(StrEnum):
 class Resource:
     """A row in `resources` — a stable, dotted, URL-independent identifier a route
     declares for itself (e.g. `heart.tick`), decoupled from the URL so renaming a route
-    never orphans a stored permission grant.
+    never orphans a stored permission grant. `verbs` (issue #38) is the set of HTTP
+    methods a route actually answers to for this resource — not every grantable
+    `Verb`, which `GET /auth/permissions` used to assume.
     """
 
     name: str
     description: str
     registered_at: str
+    verbs: frozenset[Verb]
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Self:
@@ -82,6 +111,7 @@ class Resource:
             name=row["name"],
             description=row["description"],
             registered_at=row["registered_at"],
+            verbs=decode_verbs(row["verbs"]),
         )
 
 

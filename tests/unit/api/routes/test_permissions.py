@@ -30,7 +30,7 @@ def test_maintain_without_sudo_can_still_read(
     assert response.status_code == 200
 
 
-def test_lists_every_catalogued_resource_crossed_with_every_verb(
+def test_lists_each_resource_with_its_served_verbs_policy_class_and_grantability(
     authed_client: TestClient, authed_token: str
 ) -> None:
     response = authed_client.get(
@@ -40,7 +40,14 @@ def test_lists_every_catalogued_resource_crossed_with_every_verb(
     assert response.status_code == 200
     body = response.json()
     by_resource = {entry["resource"]: entry for entry in body}
-    assert "auth.users" in by_resource
+
+    # Issue #38 AC: a GET-only route lists only the verbs it actually serves, not
+    # every `Verb` — `system.version` only ever answers GET.
+    assert by_resource["system.version"]["verbs"] == ["GET"]
+    assert by_resource["system.version"]["policy_class"] == "ordinary"
+    assert by_resource["system.version"]["grantable"] is True
+
+    # `auth.users` is served by every verb across its several routes.
     assert set(by_resource["auth.users"]["verbs"]) == {
         "GET",
         "POST",
@@ -48,15 +55,14 @@ def test_lists_every_catalogued_resource_crossed_with_every_verb(
         "PATCH",
         "DELETE",
     }
-    assert "system.version" in by_resource
-    # Issue #30: `me.profile` is catalogued with no hand-written seed anywhere — the
-    # route's own `require(...)` declaration is the only source, same as every other
-    # resource here.
-    assert "me.profile" in by_resource
-    assert set(by_resource["me.profile"]["verbs"]) == {
-        "GET",
-        "POST",
-        "PUT",
-        "PATCH",
-        "DELETE",
-    }
+    assert by_resource["auth.users"]["policy_class"] == "auth"
+    assert by_resource["auth.users"]["grantable"] is True
+
+    assert by_resource["heart.tick"]["policy_class"] == "ordinary"
+
+    # Issue #38 AC: `me.profile` is marked non-grantable — every builtin role already
+    # holds every verb there, so offering it in a custom-role picker would
+    # communicate an escalation that doesn't exist.
+    assert by_resource["me.profile"]["verbs"] == ["GET"]
+    assert by_resource["me.profile"]["policy_class"] == "self"
+    assert by_resource["me.profile"]["grantable"] is False

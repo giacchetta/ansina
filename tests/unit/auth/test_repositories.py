@@ -27,20 +27,32 @@ from ansina.storage.database import Database
 def test_resource_upsert_creates_and_updates(db: Database) -> None:
     resources = ResourceRepository(db)
 
-    created = resources.upsert("heart.tick", "first description")
+    created = resources.upsert(
+        "heart.tick", "first description", verbs=frozenset({Verb.GET})
+    )
     assert created.name == "heart.tick"
     assert created.description == "first description"
+    assert created.verbs == {Verb.GET}
 
-    updated = resources.upsert("heart.tick", "second description")
+    updated = resources.upsert(
+        "heart.tick", "second description", verbs=frozenset({Verb.GET, Verb.POST})
+    )
     assert updated.description == "second description"
+    assert updated.verbs == {Verb.GET, Verb.POST}
     assert len(resources.list_all()) == 1
+
+
+def test_resource_upsert_round_trips_no_served_verbs(db: Database) -> None:
+    resource = ResourceRepository(db).upsert("me.profile", "", verbs=frozenset())
+
+    assert resource.verbs == frozenset()
 
 
 def test_resource_delete_cascades_role_permissions(db: Database) -> None:
     resources = ResourceRepository(db)
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    resources.upsert("heart.tick", "")
+    resources.upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     role = roles.create("read", "Read", "")
     permissions.grant(role.id, "heart.tick", Verb.GET)
 
@@ -114,13 +126,41 @@ def test_role_delete_refuses_a_builtin_role(db: Database) -> None:
     assert roles.get(role.id) is not None
 
 
+def test_list_custom_with_grant_on_returns_only_non_builtin_holders(
+    db: Database,
+) -> None:
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    admin = roles.ensure_builtin("admin", "Admin", "")
+    custom = roles.create("custom", "Custom", "")
+    permissions.grant(admin.id, "heart.tick", Verb.GET)
+    permissions.grant(custom.id, "heart.tick", Verb.GET)
+
+    holders = roles.list_custom_with_grant_on("heart.tick")
+
+    assert [role.id for role in holders] == [custom.id]
+
+
+def test_list_custom_with_grant_on_returns_empty_when_no_custom_role_holds_it(
+    db: Database,
+) -> None:
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    admin = roles.ensure_builtin("admin", "Admin", "")
+    permissions.grant(admin.id, "heart.tick", Verb.GET)
+
+    assert roles.list_custom_with_grant_on("heart.tick") == []
+
+
 # --- RolePermissionRepository --------------------------------------------------
 
 
 def test_role_permission_grant_and_list(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     role = roles.create("read", "Read", "")
 
     permissions.grant(role.id, "heart.tick", Verb.GET)
@@ -133,7 +173,7 @@ def test_role_permission_grant_and_list(db: Database) -> None:
 def test_role_permission_revoke(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     role = roles.create("read", "Read", "")
     permissions.grant(role.id, "heart.tick", Verb.GET)
 
@@ -153,7 +193,7 @@ def test_role_permission_revoke_of_ungranted_verb_is_a_no_op(db: Database) -> No
 def test_effective_verbs_unions_across_roles(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     read_role = roles.create("read", "Read", "")
     write_role = roles.create("write", "Write", "")
     permissions.grant(read_role.id, "heart.tick", Verb.GET)
@@ -177,8 +217,8 @@ def test_effective_verbs_with_no_role_ids_short_circuits_to_empty(
 def test_grants_for_roles_unions_across_roles(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
-    ResourceRepository(db).upsert("auth.users", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    ResourceRepository(db).upsert("auth.users", "", verbs=frozenset({Verb.POST}))
     read = roles.create("read", "Read", "")
     write = roles.create("write", "Write", "")
     permissions.grant(read.id, "heart.tick", Verb.GET)

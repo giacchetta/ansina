@@ -37,6 +37,7 @@ from ansina.auth.models import (
     SudoLockout,
     User,
     Verb,
+    encode_verbs,
 )
 from ansina.errors import AuthError
 from ansina.storage.database import Database
@@ -85,14 +86,21 @@ class ResourceRepository:
         )
         return [Resource.from_row(row) for row in rows]
 
-    def upsert(self, name: str, description: str) -> Resource:
+    def upsert(
+        self, name: str, description: str, *, verbs: frozenset[Verb]
+    ) -> Resource:
+        """`verbs` is keyword-only and required (issue #38) — no "all verbs" default,
+        since every call site should state what a route actually serves rather than
+        silently claiming grantability nothing enforces.
+        """
         with self._db.transaction() as cursor:
             cursor.execute(
                 """
-                INSERT INTO resources (name, description) VALUES (?, ?)
-                ON CONFLICT (name) DO UPDATE SET description = excluded.description
+                INSERT INTO resources (name, description, verbs) VALUES (?, ?, ?)
+                ON CONFLICT (name) DO UPDATE SET
+                    description = excluded.description, verbs = excluded.verbs
                 """,
-                (name, description),
+                (name, description, encode_verbs(verbs)),
             )
             row = cursor.execute(
                 "SELECT * FROM resources WHERE name = ?", (name,)
@@ -177,6 +185,28 @@ class RoleRepository:
             )
         with self._db.transaction() as cursor:
             cursor.execute("DELETE FROM roles WHERE id = ?", (role_id,))
+
+    def list_custom_with_grant_on(self, resource: str) -> list[Role]:
+        """Every non-builtin role holding at least one grant on `resource` — backs
+        `auth.reconciler.sync_resources`'s retire-warning (issue #38): builtin roles'
+        grants are rebuilt unconditionally at every boot regardless of what's
+        retiring, so only a custom role's grant is worth warning about before the
+        `role_permissions` rows on this resource cascade away.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                """
+                SELECT DISTINCT r.* FROM roles r
+                JOIN role_permissions rp ON rp.role_id = r.id
+                WHERE rp.resource = ? AND r.builtin = 0
+                ORDER BY r.slug
+                """,
+                (resource,),
+            )
+            .fetchall()
+        )
+        return [Role.from_row(row) for row in rows]
 
 
 class RolePermissionRepository:
