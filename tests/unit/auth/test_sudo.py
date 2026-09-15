@@ -9,9 +9,14 @@ from typing import Any
 import pytest
 
 from ansina.auth.principal import Principal
-from ansina.auth.repositories import UserRepository
+from ansina.auth.repositories import SudoLockoutRepository, UserRepository
 from ansina.auth.step_up import StepUpRegistry
-from ansina.auth.sudo import SudoLockedOutError, SudoService, build_sudo_service
+from ansina.auth.sudo import (
+    StepUpUnavailableError,
+    SudoLockedOutError,
+    SudoService,
+    build_sudo_service,
+)
 from ansina.config import load_settings
 from ansina.config.settings import SudoSettings
 from ansina.storage.database import Database
@@ -37,15 +42,22 @@ class _FakeVerifier:
     """A second `StepUpVerifier` implementation that never touches
     `PasswordStepUpVerifier` or a `credentials` row — this is the pluggability AC:
     `SudoService` never names a concrete verifier, so swapping this in exercises the
-    whole issue -> sensitive-call chain against a verifier M2 didn't ship.
+    whole issue -> sensitive-call chain against a verifier M2 didn't ship. `enrolled`
+    (issue #37) is this fake's own enrollment flag — real verifiers ask `credentials`,
+    this one just answers a constant.
     """
 
     name: str = "fake"
     accepts: bool = True
+    enrolled: bool = True
 
     def verify(self, principal: Principal, payload: Mapping[str, Any]) -> bool:
         del principal, payload
         return self.accepts
+
+    def is_enrolled(self, principal: Principal) -> bool:
+        del principal
+        return self.enrolled
 
 
 _SUDO_SETTINGS = SudoSettings(
@@ -65,11 +77,12 @@ def _service(
     *,
     db: Database,
     verifier: _FakeVerifier | None = None,
+    verifiers: tuple[_FakeVerifier, ...] | None = None,
     clock: _Clock | None = None,
     settings: SudoSettings = _SUDO_SETTINGS,
 ) -> tuple[SudoService, _Clock]:
     clock = clock or _Clock()
-    registry = StepUpRegistry((verifier or _FakeVerifier(),))
+    registry = StepUpRegistry(verifiers or (verifier or _FakeVerifier(),))
     return SudoService(db, settings, registry=registry, clock=clock), clock
 
 
@@ -240,6 +253,116 @@ def test_a_successful_step_up_clears_a_partial_failure_streak(db: Database) -> N
     # The grant issued above is still independently valid — a failed re-step-up
     # doesn't revoke an already-live grant.
     assert resolved_before_lockout is not None
+
+
+def test_step_up_with_no_enrolled_factor_raises_step_up_unavailable(
+    db: Database,
+) -> None:
+    """Issue #37 AC: a caller with no usable step-up factor gets
+    `StepUpUnavailableError`, and this does not advance the failed-attempt lockout
+    counter.
+    """
+    principal = _principal(db)
+    service, _clock = _service(db=db, verifier=_FakeVerifier(enrolled=False))
+
+    with pytest.raises(StepUpUnavailableError) as excinfo:
+        service.step_up(principal, {})
+
+    assert excinfo.value.code == "ansina.auth.step_up_unavailable"
+    assert excinfo.value.details["available_factors"] == []
+    assert SudoLockoutRepository(db).get(principal.user.id) is None
+
+
+def test_step_up_unavailable_never_consumes_any_lockout_attempts(db: Database) -> None:
+    """A caller with zero factors calling repeatedly never accumulates a failed-attempt
+    streak — proven by never locking out even past `max_failed_attempts` calls.
+    """
+    principal = _principal(db)
+    service, _clock = _service(db=db, verifier=_FakeVerifier(enrolled=False))
+
+    for _ in range(_SUDO_SETTINGS.max_failed_attempts + 2):
+        with pytest.raises(StepUpUnavailableError):
+            service.step_up(principal, {})
+
+    assert SudoLockoutRepository(db).get(principal.user.id) is None
+
+
+def test_step_up_with_an_unrecognized_factor_raises_step_up_unavailable(
+    db: Database,
+) -> None:
+    principal = _principal(db)
+    service, _clock = _service(db=db, verifier=_FakeVerifier(name="password"))
+
+    with pytest.raises(StepUpUnavailableError) as excinfo:
+        service.step_up(principal, {"factor": "totp"})
+
+    assert excinfo.value.details["available_factors"] == ["password"]
+    assert SudoLockoutRepository(db).get(principal.user.id) is None
+
+
+def test_step_up_with_two_enrolled_factors_and_no_factor_key_is_ambiguous(
+    db: Database,
+) -> None:
+    """Issue #37: 2+ enrolled with no `factor` given to disambiguate is refused rather
+    than silently picking one — a policy call #41's TOTP verifier needs made
+    explicitly, not defaulted here.
+    """
+    first = _FakeVerifier(name="password")
+    second = _FakeVerifier(name="totp")
+    principal = _principal(db)
+    service, _clock = _service(db=db, verifiers=(first, second))
+
+    with pytest.raises(StepUpUnavailableError) as excinfo:
+        service.step_up(principal, {})
+
+    assert set(excinfo.value.details["available_factors"]) == {"password", "totp"}
+    assert SudoLockoutRepository(db).get(principal.user.id) is None
+
+
+def test_step_up_with_two_enrolled_factors_resolves_the_requested_one(
+    db: Database,
+) -> None:
+    first = _FakeVerifier(name="password", accepts=False)
+    second = _FakeVerifier(name="totp", accepts=True)
+    principal = _principal(db)
+    service, _clock = _service(db=db, verifiers=(first, second))
+
+    issued = service.step_up(principal, {"factor": "totp"})
+
+    assert issued is not None
+    assert issued.verifier == "totp"
+
+
+def test_a_locked_out_caller_with_no_factor_still_gets_locked_out_first(
+    db: Database,
+) -> None:
+    """Lockout is checked before factor resolution — a caller who has already burned
+    every attempt against a factor they hold stays locked out even once that factor
+    disappears, not silently reclassified as `step_up_unavailable`.
+    """
+    principal = _principal(db)
+    service, _clock = _service(db=db, verifier=_FakeVerifier(accepts=False))
+    for _ in range(3):
+        service.step_up(principal, {})  # 3rd failure -> locked out
+
+    with pytest.raises(SudoLockedOutError):
+        service.step_up(principal, {})
+
+
+def test_enrolled_factors_reflects_the_registrys_resolution(db: Database) -> None:
+    principal = _principal(db)
+    service, _clock = _service(
+        db=db, verifiers=(_FakeVerifier(name="password"), _FakeVerifier(name="totp"))
+    )
+
+    assert service.enrolled_factors(principal) == ["password", "totp"]
+
+
+def test_enrolled_factors_is_empty_when_nothing_is_enrolled(db: Database) -> None:
+    principal = _principal(db)
+    service, _clock = _service(db=db, verifier=_FakeVerifier(enrolled=False))
+
+    assert service.enrolled_factors(principal) == []
 
 
 def test_build_sudo_service_wires_a_working_service(

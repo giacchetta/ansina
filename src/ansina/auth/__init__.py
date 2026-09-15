@@ -46,7 +46,12 @@ from ansina.auth.step_up import (
     StepUpVerifier,
     build_step_up_verifiers,
 )
-from ansina.auth.sudo import SudoLockedOutError, SudoService, build_sudo_service
+from ansina.auth.sudo import (
+    StepUpUnavailableError,
+    SudoLockedOutError,
+    SudoService,
+    build_sudo_service,
+)
 
 __all__ = [
     "ApiTokenAuthenticator",
@@ -61,6 +66,7 @@ __all__ = [
     "Principal",
     "SelfEscalationError",
     "StepUpRegistry",
+    "StepUpUnavailableError",
     "StepUpVerifier",
     "SudoLockedOutError",
     "SudoRequiredError",

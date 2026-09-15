@@ -242,6 +242,45 @@ def test_sensitive_resource_with_maintain_and_a_live_sudo_grant_is_200(
     assert response.status_code == 200
 
 
+def test_sensitive_resource_with_custom_role_and_no_sudo_grant_is_403(
+    db: Database, client_factory: Any
+) -> None:
+    """Issue #37 AC: a principal holding only a custom role (no builtin `maintain`/
+    `admin` slug) that grants a sensitive verb must still step up.
+    """
+    ResourceRepository(db).upsert(_SENSITIVE_RESOURCE, "")
+    role = RoleRepository(db).create("custom-role", "Custom Role", "")
+    RolePermissionRepository(db).grant(role.id, _SENSITIVE_RESOURCE, Verb.GET)
+    principal = _principal(
+        frozenset({role.id}), frozenset({"custom-role"}), sudo_active=False
+    )
+    client = client_factory({"tok": principal})
+
+    response = client.get("/sensitive-test", headers={"X-Test-Principal": "tok"})
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ansina.auth.sudo_required"
+
+
+def test_admin_with_additional_custom_role_membership_is_still_exempt_from_sudo(
+    db: Database, client_factory: Any
+) -> None:
+    """Issue #37 AC: `Admin` remains exempt from sudo regardless of any custom-role
+    membership held alongside it.
+    """
+    admin_role_id = _grant(db, RoleSlug.ADMIN, _SENSITIVE_RESOURCE, (Verb.GET,))
+    custom_role = RoleRepository(db).create("custom-role", "Custom Role", "")
+    principal = _principal(
+        frozenset({admin_role_id, custom_role.id}),
+        frozenset({RoleSlug.ADMIN.value, "custom-role"}),
+    )
+    client = client_factory({"tok": principal})
+
+    response = client.get("/sensitive-test", headers={"X-Test-Principal": "tok"})
+
+    assert response.status_code == 200
+
+
 def test_no_grant_at_all_is_forbidden_not_sudo_required(
     db: Database, client_factory: Any
 ) -> None:

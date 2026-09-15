@@ -24,7 +24,7 @@ from ansina.auth.management import (
     TokenAlreadyIssuedError,
 )
 from ansina.auth.repositories import DuplicateError, UnknownSubjectError
-from ansina.auth.sudo import SudoLockedOutError
+from ansina.auth.sudo import StepUpUnavailableError, SudoLockedOutError
 from ansina.errors import AnsinaError, ConfigurationError
 from ansina.logging import get_request_id
 
@@ -41,6 +41,7 @@ CODE_HEART_DISABLED = "ansina.heart.disabled"
 CODE_FORBIDDEN = ForbiddenError.code
 CODE_SUDO_REQUIRED = SudoRequiredError.code
 CODE_SUDO_LOCKED_OUT = SudoLockedOutError.code
+CODE_STEP_UP_UNAVAILABLE = StepUpUnavailableError.code
 CODE_SELF_ESCALATION = SelfEscalationError.code
 CODE_LAST_ADMIN = LastAdminError.code
 CODE_NOT_FOUND_AUTH = NotFoundError.code
@@ -59,6 +60,9 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # `code` alone — neither leaks which credential component was wrong.
     ForbiddenError: 403,
     SudoRequiredError: 403,
+    # 403, same family as the two above — the caller is authenticated but holds no
+    # step-up factor that could ever satisfy this request (issue #37).
+    StepUpUnavailableError: 403,
     # 429, not 401/403: the caller of POST /auth/sudo is already authenticated, so
     # disclosing "you're locked out" leaks nothing a wrong-password 401 wouldn't
     # already suggest, and it's a rate-limiting concern, not an identity/permission

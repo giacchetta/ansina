@@ -7,6 +7,7 @@ import pytest
 from ansina.api.problems import problem_response, status_for_error
 from ansina.auth.management import LastAdminError, NotFoundError, SelfEscalationError
 from ansina.auth.repositories import DuplicateError, UnknownSubjectError
+from ansina.auth.sudo import StepUpUnavailableError
 from ansina.errors import AnsinaError, ConfigurationError
 
 
@@ -32,6 +33,7 @@ def test_status_for_error_falls_back_through_mro() -> None:
     ("error_type", "expected_status"),
     [
         (SelfEscalationError, 403),
+        (StepUpUnavailableError, 403),
         (LastAdminError, 409),
         (DuplicateError, 409),
         (NotFoundError, 404),

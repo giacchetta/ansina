@@ -102,6 +102,45 @@ def test_sensitive_with_maintain_role_and_a_live_sudo_grant_succeeds(
     authorize(db, principal, "auth.users", Verb.DELETE, sensitive=True)  # no raise
 
 
+def test_sensitive_with_custom_role_and_no_sudo_grant_requires_sudo(
+    db: Database,
+) -> None:
+    """Issue #37 AC: the sudo gate is keyed on sensitivity alone, not on the
+    `maintain` role slug — a custom role (#40) holding neither builtin slug must
+    still step up for a sensitive action it's been granted.
+    """
+    ResourceRepository(db).upsert("auth.users", "")
+    role = RoleRepository(db).create("custom-deleter", "Custom Deleter", "")
+    RolePermissionRepository(db).grant(role.id, "auth.users", Verb.DELETE)
+    principal = Principal(
+        user=_USER,
+        role_ids=frozenset({role.id}),
+        role_slugs=frozenset({"custom-deleter"}),
+        sudo_active=False,
+    )
+
+    with pytest.raises(SudoRequiredError) as excinfo:
+        authorize(db, principal, "auth.users", Verb.DELETE, sensitive=True)
+
+    assert excinfo.value.code == "ansina.auth.sudo_required"
+
+
+def test_sensitive_with_custom_role_and_a_live_sudo_grant_succeeds(
+    db: Database,
+) -> None:
+    ResourceRepository(db).upsert("auth.users", "")
+    role = RoleRepository(db).create("custom-deleter", "Custom Deleter", "")
+    RolePermissionRepository(db).grant(role.id, "auth.users", Verb.DELETE)
+    principal = Principal(
+        user=_USER,
+        role_ids=frozenset({role.id}),
+        role_slugs=frozenset({"custom-deleter"}),
+        sudo_active=True,
+    )
+
+    authorize(db, principal, "auth.users", Verb.DELETE, sensitive=True)  # no raise
+
+
 def test_forbidden_is_checked_before_sudo_required(db: Database) -> None:
     """A `maintain`-only caller with no grant at all on the resource gets `Forbidden`,
     not a sudo prompt for an action it couldn't take regardless.

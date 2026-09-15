@@ -106,6 +106,48 @@ def test_locked_out_after_max_failed_attempts_is_429_with_retry_after(
     assert "retry-after" in response.headers
 
 
+# --- POST /auth/sudo: no usable factor (issue #37) -----------------------------------
+
+
+def test_password_less_maintain_gets_step_up_unavailable_not_401(
+    authed_app: FastAPI,
+    authed_client: TestClient,
+    token_for_role: Callable[[str], str],
+) -> None:
+    """A `Maintain` user minted with no password (`token_for_role` never sets one) has
+    zero enrolled step-up factors — 403 `ansina.auth.step_up_unavailable`, not a
+    misleading 401, and the lockout counter is never touched.
+    """
+    token = token_for_role("maintain")
+
+    response = authed_client.post(
+        "/auth/sudo",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"password": "anything"},
+    )
+
+    assert response.status_code == 403
+    body = response.json()
+    assert body["code"] == "ansina.auth.step_up_unavailable"
+    assert body["available_factors"] == []
+
+
+def test_step_up_unavailable_never_locks_the_caller_out(
+    authed_app: FastAPI,
+    authed_client: TestClient,
+    token_for_role: Callable[[str], str],
+) -> None:
+    token = token_for_role("maintain")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    for _ in range(10):
+        response = authed_client.post(
+            "/auth/sudo", headers=headers, json={"password": "anything"}
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "ansina.auth.step_up_unavailable"
+
+
 def test_step_up_with_no_identity_is_401(client: TestClient) -> None:
     """`security.enabled = false` (the `client` fixture's dev mode) never resolves a
     `Principal` at all — there's no "who" to step up as.

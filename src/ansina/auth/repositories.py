@@ -641,6 +641,23 @@ class CredentialRepository:
             return False
         return verify_password(raw_password, row["hash"], params)
 
+    def has_credential(self, user_id: str, credential_type: CredentialType) -> bool:
+        """Whether `user_id` holds any `credential_type` row — the enrollment question
+        `auth.step_up.StepUpVerifier.is_enrolled` implementations answer against (issue
+        #37). A single indexed existence check (`idx_credentials_user_type`), never a
+        hash read; ignores `expires_at` — enforcing credential expiry is issue #39's
+        scope, not this one's.
+        """
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT 1 FROM credentials WHERE user_id = ? AND type = ? LIMIT 1",
+                (user_id, credential_type.value),
+            )
+            .fetchone()
+        )
+        return row is not None
+
     def create_api_token(
         self, user_id: str, raw_token: str, *, label: str = ""
     ) -> Credential:

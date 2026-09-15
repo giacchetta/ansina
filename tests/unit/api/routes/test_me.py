@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ansina.auth.hashing import Argon2Params
 from ansina.auth.models import RoleSlug
 from ansina.auth.repositories import CredentialRepository, UserRepository
 
@@ -61,6 +62,41 @@ def test_body_reflects_the_caller_own_identity(
     assert body["auth_method"] == "api_token"
     assert body["sudo_active"] is False
     assert body.get("user_id")
+
+
+def test_step_up_factors_is_empty_for_a_password_less_caller(
+    authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    """Issue #37 AC: `GET /auth/me` reflects exactly the caller's enrolled
+    credentials — `token_for_role` mints a user with an api_token only, no password.
+    """
+    token = token_for_role("read")
+
+    response = authed_client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["step_up_factors"] == []
+
+
+def test_step_up_factors_lists_password_once_enrolled(
+    authed_app: FastAPI, token_for_role: Callable[[str], str], authed_client: TestClient
+) -> None:
+    token = token_for_role("read")
+    db = authed_app.state.db
+    user = CredentialRepository(db).find_user_by_api_token(token)
+    assert user is not None
+    CredentialRepository(db).set_password(
+        user.id, "hunter2", Argon2Params(time_cost=1, memory_cost_kib=8, parallelism=1)
+    )
+
+    response = authed_client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["step_up_factors"] == ["password"]
 
 
 def test_sudo_active_reflects_a_live_grant(

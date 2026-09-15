@@ -10,8 +10,10 @@ role — `Read` included — holds every verb on either, and neither is ever
 `sensitive=True`, so no sudo grant is ever required. This is not an escalation: the
 subject of a `me.*` action is always the authenticated caller themselves, resolved
 once by `BearerAuthMiddleware` onto `request.state.principal`, so no route here can
-reach another user's data. `GET /auth/me` reads nothing else at all —
-`resolve_principal` has already done that work — but the token routes do touch the
+reach another user's data. `GET /auth/me` reads everything but `step_up_factors` from
+the already-resolved `Principal` — that one field costs a single indexed
+`credentials` read via `SudoService.enrolled_factors` (issue #37), since enrollment
+isn't part of what `resolve_principal` resolves. The token routes also touch the
 database (`ansina.api.tokens`, shared with `api.routes.users`'s admin-on-behalf-of
 surface), through `anyio.to_thread.run_sync` like every other DB-touching route.
 
@@ -63,6 +65,7 @@ class MeOut(BaseModel):
     roles: list[str]
     auth_method: str
     sudo_active: bool
+    step_up_factors: list[str]
 
 
 @router.get(
@@ -82,6 +85,9 @@ async def get_me(request: Request) -> JSONResponse:
     if principal is None:
         return no_identity_response()
 
+    step_up_factors = await anyio.to_thread.run_sync(
+        request.app.state.sudo.enrolled_factors, principal
+    )
     body = MeOut(
         user_id=principal.user.id,
         username=principal.user.username,
@@ -89,6 +95,7 @@ async def get_me(request: Request) -> JSONResponse:
         roles=sorted(principal.role_slugs),
         auth_method=principal.auth_method.value,
         sudo_active=principal.sudo_active,
+        step_up_factors=step_up_factors,
     )
     return JSONResponse(status_code=200, content=body.model_dump())
 

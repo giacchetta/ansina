@@ -1,12 +1,13 @@
 """`StepUpVerifier` — the pluggable "prove it's still you" port behind `POST /auth/
-sudo`. See issue #26.
+sudo`. See issue #26, generalized to a per-principal verifier *set* by issue #37.
 
 `auth.sudo.SudoService` never names `PasswordStepUpVerifier` directly — it only ever
-talks to a `StepUpRegistry`. M2 ships exactly one verifier (password, against #24's
-`credentials` table); a follow-up milestone's TOTP or federated-session re-auth is a
-second `StepUpVerifier` implementation plus a per-user choice of which one applies, not
-a rewrite of the grant/TTL/revocation machinery in `auth.sudo` or #25's
-`sensitive`-gated enforcement.
+talks to a `StepUpRegistry`. M2 shipped exactly one verifier (password, against #24's
+`credentials` table); issue #37 makes `StepUpRegistry.for_principal` return every
+verifier a caller is actually *enrolled* in rather than a single fixed one, the
+foundation a follow-up TOTP verifier (#41) and the TUI's multi-factor `auth sudo`
+(#44) both build on — without a rewrite of the grant/TTL/revocation machinery in
+`auth.sudo` or #25's `sensitive`-gated enforcement.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from ansina.auth.hashing import Argon2Params
+from ansina.auth.models import CredentialType
 from ansina.auth.repositories import CredentialRepository
 from ansina.storage.database import Database
 
@@ -30,13 +32,18 @@ class StepUpVerifier(Protocol):
     issued grant (`sudo_grants.verifier`) — an audit trail that stays meaningful once
     more than one verifier exists. `verify` returns `False` for "credential didn't
     match," never raises for that case — only for a genuine failure of the check
-    itself.
+    itself. `is_enrolled` (issue #37) is the enrollment question `StepUpRegistry.
+    for_principal` asks of every verifier: does this principal hold a credential this
+    verifier could ever succeed against? Each verifier owns its own answer — the
+    registry never inspects `credentials` itself.
     """
 
     @property
     def name(self) -> str: ...
 
     def verify(self, principal: Principal, payload: Mapping[str, Any]) -> bool: ...
+
+    def is_enrolled(self, principal: Principal) -> bool: ...
 
 
 class PasswordStepUpVerifier:
@@ -60,11 +67,22 @@ class PasswordStepUpVerifier:
             principal.user.id, password, self._params
         )
 
+    def is_enrolled(self, principal: Principal) -> bool:
+        return self._credentials.has_credential(
+            principal.user.id, CredentialType.PASSWORD
+        )
+
 
 class StepUpRegistry:
-    """The ordered set of verifiers step-up can resolve against. M2's rule is fixed —
-    `for_principal` always returns the first (only) entry; a follow-up milestone's
-    per-user verifier choice replaces this method's body alone, not its callers.
+    """The ordered set of verifiers step-up can resolve against, in preference order.
+    Issue #37: `for_principal` filters to the subset a given principal is actually
+    enrolled in (`StepUpVerifier.is_enrolled`) — a password-less user (the default
+    shape of any user created without `CreateUserRequest.password`) gets `()`, not a
+    verifier it can never satisfy, which is what let a password-less caller burn
+    failed-attempt lockouts against a credential it could never hold (see
+    `auth.sudo.StepUpUnavailableError`). The constructor's non-empty check is
+    unrelated and unchanged — "the server has at least one verifier configured" is a
+    different question from "this caller is enrolled in one."
     """
 
     def __init__(self, verifiers: tuple[StepUpVerifier, ...]) -> None:
@@ -72,9 +90,8 @@ class StepUpRegistry:
             raise ValueError("StepUpRegistry needs at least one StepUpVerifier")
         self._verifiers = verifiers
 
-    def for_principal(self, principal: Principal) -> StepUpVerifier:
-        del principal  # unused until a follow-up milestone's per-user selection
-        return self._verifiers[0]
+    def for_principal(self, principal: Principal) -> tuple[StepUpVerifier, ...]:
+        return tuple(v for v in self._verifiers if v.is_enrolled(principal))
 
 
 def build_step_up_verifiers(

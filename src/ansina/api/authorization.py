@@ -55,8 +55,9 @@ def require(
     """Build a fresh dependency gating `resource` — the verb is read from `request.
     method`, never declared per-route, so one `require()` call covers every HTTP
     method a route answers to. `sensitive=True` additionally requires a live sudo
-    grant whenever the resolved role is `Maintain` (not `Admin`); the flag is inert
-    until issue #26 ships a way to set `Principal.sudo_active`.
+    grant for any role but `Admin` (issue #37 made this fail-closed on sensitivity
+    alone, not on the `Maintain` role slug, so a future custom role can't bypass it);
+    the flag was inert until issue #26 shipped a way to set `Principal.sudo_active`.
     """
     declaration = ResourceDeclaration(resource, description, sensitive=sensitive)
 

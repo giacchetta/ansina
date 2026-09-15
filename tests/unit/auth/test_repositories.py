@@ -641,6 +641,44 @@ def test_credential_set_password_replaces_the_previous_one(
     assert credentials.verify_password(user.id, "second", cheap_argon2) is True
 
 
+def test_has_credential_is_false_before_any_credential_exists(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.PASSWORD)
+        is False
+    )
+
+
+def test_has_credential_is_true_once_a_password_is_set(
+    db: Database, cheap_argon2: Argon2Params
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).set_password(user.id, "hunter2", cheap_argon2)
+
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.PASSWORD)
+        is True
+    )
+
+
+def test_has_credential_distinguishes_credential_type(db: Database) -> None:
+    """Issue #37: `has_credential` checks the exact `CredentialType` requested — an
+    api_token credential must not answer `True` for a `password` enrollment check.
+    """
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(user.id, "a-real-token")
+
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.PASSWORD)
+        is False
+    )
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.API_TOKEN)
+        is True
+    )
+
+
 def test_credential_create_and_find_api_token(db: Database) -> None:
     users = UserRepository(db)
     credentials = CredentialRepository(db)
