@@ -11,6 +11,8 @@ silently accepted value — see ``.agents/guardrails/secret-prevention.md``.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
 import math
 import os
@@ -214,6 +216,51 @@ class SudoSettings(BaseModel):
     lockout_seconds: float = Field(default=900.0, gt=0)
 
 
+# AES-256 needs exactly 32 raw bytes; `secrets.token_urlsafe(32)` is the generator this
+# validator's own error message recommends, so the shape it produces (unpadded
+# url-safe base64) is exactly what's accepted here.
+_ENCRYPTION_KEY_BYTES = 32
+
+
+class EncryptionSettings(BaseModel):
+    """AES-GCM key for TOTP secrets at rest (`ansina.auth.encryption`, issue #41).
+
+    Env-only, the same "SecretStr in TOML is a startup error" rule every other secret
+    already follows — no new exemption. Unset by default: nothing before issue #41
+    ever writes an encrypted-at-rest secret, so requiring this key unconditionally at
+    every boot would break every deployment that never enrolls a TOTP user.
+    `ansina.auth.encryption.ensure_key_configured_if_needed` is what actually enforces
+    "unset + a totp credential already exists" as a boot refusal — this model has no
+    way to see whether any `credentials` row exists, so that check can't live here.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    key: SecretStr | None = Field(default=None)
+
+    @field_validator("key")
+    @classmethod
+    def _validate_key_shape(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return value
+        raw = value.get_secret_value()
+        try:
+            decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                "security.encryption.key must be url-safe base64 (the same shape "
+                "secrets.token_urlsafe(32) produces)"
+            ) from exc
+        if len(decoded) != _ENCRYPTION_KEY_BYTES:
+            raise ValueError(
+                "security.encryption.key must decode to exactly "
+                f"{_ENCRYPTION_KEY_BYTES} bytes (AES-256), got {len(decoded)} — "
+                "generate one with e.g. "
+                '`python -c "import secrets; print(secrets.token_urlsafe(32))"`'
+            )
+        return value
+
+
 # The bootstrap identity's own username (`ansina.auth.bootstrap`'s synthetic Admin) —
 # defined here, not there, so `SecuritySettings.admin_username`'s reserved-name check
 # can reference it without `config` gaining a dependency on `auth` (the reverse
@@ -295,6 +342,7 @@ class SecuritySettings(BaseModel):
     bootstrap_admin_enabled: bool = True
     password: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
     sudo: SudoSettings = Field(default_factory=SudoSettings)
+    encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
 
     # Issue #28: how long a token's `last_used_at` may go stale before the next
     # successful authentication updates it — coalesced rather than written on every

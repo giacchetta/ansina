@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from ansina.api.app import create_app
 from ansina.auth.clock import iso, utc_now
+from ansina.auth.encryption import EncryptionKeyMissingError
 from ansina.auth.models import RoleSlug
 from ansina.auth.repositories import (
     CredentialRepository,
@@ -274,11 +275,40 @@ def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
             .execute("SELECT version FROM schema_version")
             .fetchall()
         )
-        assert [row[0] for row in rows] == [1, 2, 3, 4, 5]
+        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6]
 
     # Outside the `with` block, lifespan shutdown has run — the database is closed.
     with pytest.raises(StorageError, match="after close"):
         app.state.db.connection()
+
+
+def test_lifespan_refuses_to_boot_with_an_orphaned_totp_credential(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #41 AC: boot fails loudly (the `HeartUnavailableError` pattern) if a
+    `totp` credential row exists and `[security.encryption] key` isn't configured —
+    e.g. an operator removed the key after some users had already enrolled.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__ENABLED", "false")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__ENCRYPTION__KEY",
+        "inl1_UnlPfMEYIPwFZnl46Nx2GXZmHoHdT-OC4I9nYA",
+    )
+    first_boot = create_app(load_settings())
+    with TestClient(first_boot):
+        user = UserRepository(first_boot.state.db).create("alice")
+        CredentialRepository(first_boot.state.db).create_totp_secret(
+            user.id, "v1:nonce:ciphertext"
+        )
+
+    monkeypatch.delenv("ANSINA_SECURITY__ENCRYPTION__KEY")
+    second_boot = create_app(load_settings())
+
+    with (
+        pytest.raises(EncryptionKeyMissingError, match="ANSINA_SECURITY__ENCRYPTION"),
+        TestClient(second_boot),
+    ):
+        pass
 
 
 def test_lifespan_seeds_builtin_roles_and_resources(app: FastAPI) -> None:

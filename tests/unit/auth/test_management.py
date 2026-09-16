@@ -11,14 +11,16 @@ from ansina.auth.management import (
     LastAdminError,
     SelfEscalationError,
     TokenAlreadyIssuedError,
+    TotpAlreadyEnrolledError,
     assert_admin_remains,
     assert_grants_grantable,
     assert_may_assign_role,
     assert_may_grant_permissions,
     assert_no_existing_api_token,
     assert_not_bootstrap_identity,
+    assert_totp_not_enrolled,
 )
-from ansina.auth.models import RoleSlug, SubjectType, User, Verb
+from ansina.auth.models import CredentialType, RoleSlug, SubjectType, User, Verb
 from ansina.auth.principal import Principal
 from ansina.auth.reconciler import reconcile_builtin_roles
 from ansina.auth.repositories import (
@@ -344,3 +346,30 @@ def test_allows_again_after_the_only_token_is_revoked(db: Database) -> None:
     CredentialRepository(db).delete_api_token(credential.id, user.id)
 
     assert_no_existing_api_token(db, user.id)  # must not raise
+
+
+# --- assert_totp_not_enrolled (issue #41) ---------------------------------------------
+
+
+def test_refuses_a_user_already_enrolled_in_totp(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_totp_secret(user.id, "v1:a:b")
+
+    with pytest.raises(TotpAlreadyEnrolledError) as excinfo:
+        assert_totp_not_enrolled(db, user.id)
+
+    assert excinfo.value.code == "ansina.auth.totp_already_enrolled"
+
+
+def test_allows_a_user_with_no_totp_enrollment_yet(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert_totp_not_enrolled(db, user.id)  # must not raise
+
+
+def test_allows_again_after_the_totp_credential_is_disabled(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_totp_secret(user.id, "v1:a:b")
+    CredentialRepository(db).delete_credentials(user.id, CredentialType.TOTP)
+
+    assert_totp_not_enrolled(db, user.id)  # must not raise

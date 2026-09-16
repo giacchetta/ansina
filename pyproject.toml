@@ -29,6 +29,15 @@ dependencies = [
     # Ships prebuilt wheels for macos-arm64 and linux-x86_64, so neither leg compiles
     # from source.
     "argon2-cffi>=25.1",
+    # AES-GCM envelope encryption for TOTP secrets at rest (issue #41,
+    # `ansina.auth.encryption`) — TOTP verification needs the plaintext seed back, which
+    # a one-way hash structurally cannot give it, so this is the one credential type
+    # that's reversibly encrypted rather than hashed. Approved during M3 planning
+    # alongside `pyjwt[crypto]` (issue #43's OIDC signature validation, which pulls the
+    # same package) — landing here first since #41 ships ahead of #43 on this branch.
+    # Ships prebuilt wheels for macos-arm64 and linux-x86_64, so neither CI leg compiles
+    # from source.
+    "cryptography>=44",
 ]
 
 # `mlx` — the only HeartRuntime adapter shipped by issue #10 — is an *optional* extra,

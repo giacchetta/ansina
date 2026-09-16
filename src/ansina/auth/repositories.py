@@ -750,6 +750,23 @@ class CredentialRepository:
             return False
         return verify_password(raw_password, row["hash"], params)
 
+    def any_credential_of_type(self, credential_type: CredentialType) -> bool:
+        """Whether *any* user holds a `credential_type` row — unlike `has_credential`,
+        not scoped to one user. Backs `auth.encryption.ensure_key_configured_if_needed`
+        (issue #41): boot must refuse to start if any `totp` row exists with no
+        encryption key configured, checked once across the whole table rather than
+        per user.
+        """
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT 1 FROM credentials WHERE type = ? LIMIT 1",
+                (credential_type.value,),
+            )
+            .fetchone()
+        )
+        return row is not None
+
     def has_credential(self, user_id: str, credential_type: CredentialType) -> bool:
         """Whether `user_id` holds any `credential_type` row — the enrollment question
         `auth.step_up.StepUpVerifier.is_enrolled` implementations answer against (issue
@@ -768,6 +785,41 @@ class CredentialRepository:
             .fetchone()
         )
         return row is not None
+
+    def create_totp_secret(self, user_id: str, envelope: str) -> Credential:
+        """Inserts a `totp` row — `envelope` is `auth.encryption.encrypt`'s versioned
+        AES-GCM output, stored in `hash` (an opaque string column regardless of
+        credential type, not a one-way hash for this one — see `auth.encryption`'s
+        module docstring). `salt` stays `NULL`, same as a `password` row: the nonce
+        already lives inside the envelope itself. The partial unique index
+        `idx_credentials_one_totp_per_user` is the backstop if a caller ever races
+        past `auth.management.assert_totp_not_enrolled`'s own check.
+        """
+        credential_id = _new_id()
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO credentials (id, user_id, type, hash, salt)
+                VALUES (?, ?, 'totp', ?, NULL)
+                """,
+                (credential_id, user_id, envelope),
+            )
+            row = cursor.execute(
+                "SELECT * FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+        return Credential.from_row(row)
+
+    def get_totp_secret(self, user_id: str) -> Credential | None:
+        """`user_id`'s `totp` credential row, or `None` if never enrolled."""
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT * FROM credentials WHERE user_id = ? AND type = 'totp'",
+                (user_id,),
+            )
+            .fetchone()
+        )
+        return Credential.from_row(row) if row is not None else None
 
     def create_api_token(
         self,

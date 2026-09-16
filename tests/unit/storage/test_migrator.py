@@ -38,6 +38,7 @@ def test_fresh_database_reaches_the_latest_version(db: Database) -> None:
         (3, "sudo"),
         (4, "user_tombstone"),
         (5, "resource_verbs"),
+        (6, "totp_credential"),
     ]
 
 
@@ -46,7 +47,7 @@ def test_second_run_is_idempotent(db: Database) -> None:
     run_migrations(db)
 
     rows = db.connection().execute("SELECT version FROM schema_version").fetchall()
-    assert [row[0] for row in rows] == [1, 2, 3, 4, 5]
+    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6]
 
 
 def test_applies_only_pending_migrations(db: Database, tmp_path: Path) -> None:
@@ -172,6 +173,64 @@ def test_rejects_applied_versions_with_a_gap(db: Database, tmp_path: Path) -> No
 
     with pytest.raises(MigrationError, match="not a contiguous sequence"):
         run_migrations(db, root=migrations_dir)
+
+
+def test_totp_credential_type_is_accepted_after_migration_0006(db: Database) -> None:
+    """Issue #41: the 12-step table rebuild in `0006_totp_credential.sql` must widen
+    `credentials.type`'s `CHECK` to accept `'totp'` without losing any pre-existing
+    row — inserted here directly at the SQL layer, ahead of any `CredentialRepository`
+    convenience method, to prove the rebuilt table itself is correct.
+    """
+    run_migrations(db)
+    conn = db.connection()
+    conn.execute(
+        "INSERT INTO users (id, username) VALUES ('u1', 'alice')",
+    )
+    conn.execute(
+        "INSERT INTO credentials (id, user_id, type, hash) "
+        "VALUES ('c1', 'u1', 'api_token', 'existing-hash')"
+    )
+
+    conn.execute(
+        "INSERT INTO credentials (id, user_id, type, hash) "
+        "VALUES ('c2', 'u1', 'totp', 'v1:nonce:ciphertext')"
+    )
+
+    rows = conn.execute("SELECT id, type, hash FROM credentials ORDER BY id").fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("c1", "api_token", "existing-hash"),
+        ("c2", "totp", "v1:nonce:ciphertext"),
+    ]
+
+
+def test_totp_credential_type_check_still_rejects_unknown_types(
+    db: Database,
+) -> None:
+    run_migrations(db)
+    conn = db.connection()
+    conn.execute("INSERT INTO users (id, username) VALUES ('u1', 'alice')")
+
+    with pytest.raises(Exception, match="CHECK constraint failed"):
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash) "
+            "VALUES ('c1', 'u1', 'not-a-real-type', 'hash')"
+        )
+
+
+def test_only_one_totp_credential_per_user_is_allowed(db: Database) -> None:
+    run_migrations(db)
+    conn = db.connection()
+    conn.execute("INSERT INTO users (id, username) VALUES ('u1', 'alice')")
+    conn.execute(
+        "INSERT INTO credentials (id, user_id, type, hash) "
+        "VALUES ('c1', 'u1', 'totp', 'v1:a:b')"
+    )
+
+    with pytest.raises(Exception, match="UNIQUE constraint failed"):
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash) "
+            "VALUES ('c2', 'u1', 'totp', 'v1:c:d')"
+        )
 
 
 def test_rejects_a_database_ahead_of_the_bundled_migrations(

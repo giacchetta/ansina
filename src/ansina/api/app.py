@@ -47,6 +47,7 @@ from ansina.auth import (
     build_sudo_service,
     ensure_bootstrap_admin,
     ensure_configured_admin,
+    ensure_key_configured_if_needed,
     reconcile_builtin_roles,
     sync_resources,
 )
@@ -132,6 +133,15 @@ def create_app(
         logger.info("ansina starting up")
         db.connect()
         run_migrations(db)
+        # Issue #41: refuses to boot (`EncryptionKeyMissingError`, the same "fail
+        # loudly before uvicorn binds a port" pattern `HeartUnavailableError` uses,
+        # just run here instead since it needs the database open first) if any `totp`
+        # credential row already exists with no `[security.encryption] key`
+        # configured to decrypt it — e.g. an operator removed the key while TOTP
+        # enrollments were still live. Must run after `run_migrations` (it queries
+        # `credentials`) and can run before every other RBAC step below, since it
+        # depends on none of them.
+        ensure_key_configured_if_needed(db, resolved_settings)
         # RBAC identity/permission foundation (issue #24, catalog source replaced by
         # #25): catalog the resources the route-coverage audit already extracted below,
         # reconcile the builtin roles' grants against that catalog, then provision the

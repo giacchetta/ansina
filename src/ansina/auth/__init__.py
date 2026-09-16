@@ -27,16 +27,23 @@ from ansina.auth.bootstrap import (
     is_bootstrap_identity,
 )
 from ansina.auth.clock import Clock, iso, parse_iso, utc_now
+from ansina.auth.encryption import (
+    DecryptionError,
+    EncryptionKeyMissingError,
+    ensure_key_configured_if_needed,
+)
 from ansina.auth.management import (
     BootstrapIdentityError,
     LastAdminError,
     NotFoundError,
     SelfEscalationError,
     TokenAlreadyIssuedError,
+    TotpAlreadyEnrolledError,
     assert_admin_remains,
     assert_may_assign_role,
     assert_no_existing_api_token,
     assert_not_bootstrap_identity,
+    assert_totp_not_enrolled,
 )
 from ansina.auth.principal import AuthMethod, Principal
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
@@ -44,6 +51,7 @@ from ansina.auth.step_up import (
     PasswordStepUpVerifier,
     StepUpRegistry,
     StepUpVerifier,
+    TotpStepUpVerifier,
     build_step_up_verifiers,
 )
 from ansina.auth.sudo import (
@@ -59,6 +67,8 @@ __all__ = [
     "Authenticator",
     "BootstrapIdentityError",
     "Clock",
+    "DecryptionError",
+    "EncryptionKeyMissingError",
     "ForbiddenError",
     "LastAdminError",
     "NotFoundError",
@@ -72,16 +82,20 @@ __all__ = [
     "SudoRequiredError",
     "SudoService",
     "TokenAlreadyIssuedError",
+    "TotpAlreadyEnrolledError",
+    "TotpStepUpVerifier",
     "assert_admin_remains",
     "assert_may_assign_role",
     "assert_no_existing_api_token",
     "assert_not_bootstrap_identity",
+    "assert_totp_not_enrolled",
     "authorize",
     "build_authenticators",
     "build_step_up_verifiers",
     "build_sudo_service",
     "ensure_bootstrap_admin",
     "ensure_configured_admin",
+    "ensure_key_configured_if_needed",
     "is_bootstrap_identity",
     "iso",
     "parse_iso",

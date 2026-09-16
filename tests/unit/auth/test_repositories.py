@@ -819,6 +819,77 @@ def test_has_credential_distinguishes_credential_type(db: Database) -> None:
     )
 
 
+# --- issue #41: TOTP credential rows -------------------------------------------------
+
+
+def test_create_totp_secret_and_get_totp_secret(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+
+    created = credentials.create_totp_secret(user.id, "v1:nonce:ciphertext")
+
+    assert created.type is CredentialType.TOTP
+    assert created.hash == "v1:nonce:ciphertext"
+    assert created.salt is None
+    fetched = credentials.get_totp_secret(user.id)
+    assert fetched is not None
+    assert fetched.id == created.id
+
+
+def test_get_totp_secret_returns_none_when_never_enrolled(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert CredentialRepository(db).get_totp_secret(user.id) is None
+
+
+def test_get_totp_secret_only_returns_that_users_own(db: Database) -> None:
+    users = UserRepository(db)
+    alice = users.create("alice")
+    bob = users.create("bob")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(alice.id, "v1:alice-nonce:alice-ciphertext")
+
+    assert credentials.get_totp_secret(bob.id) is None
+
+
+def test_only_one_totp_credential_per_user(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(user.id, "v1:a:b")
+
+    with pytest.raises(Exception, match="UNIQUE constraint"):
+        credentials.create_totp_secret(user.id, "v1:c:d")
+
+
+def test_delete_credentials_removes_a_totp_secret(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(user.id, "v1:a:b")
+
+    credentials.delete_credentials(user.id, CredentialType.TOTP)
+
+    assert credentials.get_totp_secret(user.id) is None
+
+
+def test_any_credential_of_type_is_false_before_any_totp_credential_exists(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(user.id, "a-token")
+
+    assert CredentialRepository(db).any_credential_of_type(CredentialType.TOTP) is False
+
+
+def test_any_credential_of_type_is_true_once_any_user_holds_one(db: Database) -> None:
+    users = UserRepository(db)
+    alice = users.create("alice")
+    users.create("bob")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(alice.id, "v1:a:b")
+
+    assert credentials.any_credential_of_type(CredentialType.TOTP) is True
+
+
 def test_credential_create_and_find_api_token(db: Database) -> None:
     users = UserRepository(db)
     credentials = CredentialRepository(db)

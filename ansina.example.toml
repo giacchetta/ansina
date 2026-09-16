@@ -163,3 +163,21 @@ ttl_seconds = 600.0
 max_failed_attempts = 5
 attempt_window_seconds = 300.0
 lockout_seconds = 900.0
+
+[security.encryption]
+# AES-GCM key for TOTP secrets at rest (issue #41, "ansina.auth.encryption"). Unset by
+# default -- nothing needs it until a user enrolls TOTP via POST /auth/me/totp, but
+# Ansina refuses to boot if any TOTP enrollment already exists with no key configured.
+#
+# Like every secret, this is env-only -- setting it in this file is a hard startup
+# error. Must decode to exactly 32 raw bytes (url-safe base64, the same shape
+# secrets.token_urlsafe(32) produces):
+#   ANSINA_SECURITY__ENCRYPTION__KEY=...
+#
+# Generate one with e.g.:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+#
+# There is no re-encryption/rotation path: losing or rotating this key means any
+# existing TOTP enrollments must be cleared (DELETE /auth/users/{id}/totp) and
+# re-enrolled from scratch.
+# key = "..."

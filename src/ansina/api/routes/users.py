@@ -18,6 +18,11 @@ it mints a user's *first* `api_token` credential, never a second
 their own via `POST /auth/me/tokens`. Revoking a user's last token drops the count
 back to zero, which is what makes this surface double as the lost-credential recovery
 path.
+
+`DELETE /{user_id}/totp` (issue #41) is the equivalent recovery path for a lost TOTP
+device — an Admin (or sudo'd Maintain) clears the enrollment on the user's behalf, on
+the same `auth.users` resource, so the user can re-enroll via `POST /auth/me/totp`
+afterward even if the credential they lost was their only step-up factor.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from ansina.auth.management import (
     assert_no_existing_api_token,
     assert_not_bootstrap_identity,
 )
+from ansina.auth.models import CredentialType
 from ansina.auth.repositories import CredentialRepository, UserRepository
 
 if TYPE_CHECKING:
@@ -188,6 +194,16 @@ def _revoke_token(db: Database, user_id: str, token_id: str) -> None:
     tokens_api.revoke_token(db, user.id, token_id)
 
 
+def _reset_totp(db: Database, user_id: str) -> None:
+    """Issue #41's §4 recovery path for a lost device — an Admin (or sudo'd Maintain)
+    clears the enrollment; the user re-enrolls afterward via `POST /auth/me/totp`.
+    Idempotent, same as `api.routes.me._disable_totp`: resetting a user who was never
+    enrolled is still a 204, not a 404.
+    """
+    user = _get_live_user(db, user_id)
+    CredentialRepository(db).delete_credentials(user.id, CredentialType.TOTP)
+
+
 @router.get("", response_model=list[UserOut], dependencies=[_require_read()])
 async def list_users(request: Request) -> list[UserOut]:
     return await anyio.to_thread.run_sync(_list_users, request.app.state.db)
@@ -264,4 +280,23 @@ async def revoke_user_token(request: Request, user_id: str, token_id: str) -> Re
     await anyio.to_thread.run_sync(
         _revoke_token, request.app.state.db, user_id, token_id
     )
+    return Response(status_code=204)
+
+
+@router.delete(
+    "/{user_id}/totp",
+    status_code=204,
+    responses={
+        204: {"description": "Cleared (or was never enrolled — idempotent)."},
+        404: {"description": "No such user, or already tombstoned."},
+    },
+    dependencies=[_require_write()],
+)
+async def reset_user_totp(request: Request, user_id: str) -> Response:
+    """Issue #41's Admin recovery path for a lost TOTP device — reachable even for a
+    user currently locked out of their own account, since it never itself depends on
+    a live sudo grant *from that user*; the caller here is the Admin (or sudo'd
+    Maintain) reaching `auth.users`, which is never itself TOTP-gated.
+    """
+    await anyio.to_thread.run_sync(_reset_totp, request.app.state.db, user_id)
     return Response(status_code=204)

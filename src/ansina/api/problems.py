@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from ansina.auth.authorization import ForbiddenError, SudoRequiredError
+from ansina.auth.encryption import EncryptionKeyMissingError
 from ansina.auth.management import (
     BootstrapIdentityError,
     InvalidGrantError,
@@ -23,6 +24,7 @@ from ansina.auth.management import (
     NotFoundError,
     SelfEscalationError,
     TokenAlreadyIssuedError,
+    TotpAlreadyEnrolledError,
 )
 from ansina.auth.repositories import (
     BuiltinRoleError,
@@ -58,6 +60,8 @@ CODE_TOKEN_ALREADY_ISSUED = TokenAlreadyIssuedError.code
 CODE_BUILTIN_ROLE_IMMUTABLE = BuiltinRoleError.code
 CODE_ROLE_IN_USE = RoleInUseError.code
 CODE_INVALID_GRANT = InvalidGrantError.code
+CODE_TOTP_ALREADY_ENROLLED = TotpAlreadyEnrolledError.code
+CODE_ENCRYPTION_KEY_MISSING = EncryptionKeyMissingError.code
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
@@ -77,6 +81,11 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # already suggest, and it's a rate-limiting concern, not an identity/permission
     # one (issue #26).
     SudoLockedOutError: 429,
+    # 503: `POST /auth/me/totp` (issue #41) tried to encrypt a fresh secret with no
+    # `[security.encryption] key` configured — a server misconfiguration, never a
+    # client mistake, and the "feature isn't available right now" family
+    # `CODE_HEART_DISABLED` already uses for the same shape of problem.
+    EncryptionKeyMissingError: 503,
     # 403, same family as ForbiddenError — the caller is otherwise entitled to mutate
     # this resource, but not to hand out a grant it doesn't itself hold (issue #27).
     SelfEscalationError: 403,
@@ -91,6 +100,9 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # 409, same family — the target already holds an api_token; issue #28's
     # invariant B makes this route first-credential-only.
     TokenAlreadyIssuedError: 409,
+    # 409, same family again — the caller already holds a live TOTP enrollment
+    # (issue #41); `DELETE /auth/me/totp` (or an Admin's `.../totp` reset) first.
+    TotpAlreadyEnrolledError: 409,
     # 409, same family again — the request is well-formed and the caller is
     # otherwise authorized, but the target role is builtin (`PATCH`/`DELETE
     # /auth/roles/{id}`, issue #40) or still referenced by a `role_assignments` row

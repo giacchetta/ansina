@@ -5,7 +5,7 @@ Pure domain logic, no FastAPI — `ansina.api.routes.users`/`groups`/`role_assig
 `problem+json` the same way `ansina.auth.authorization` and
 `ansina.api.authorization.require()` already do for the authorization decision itself.
 
-Six invariants live here because they are the difference between a permission system
+Seven invariants live here because they are the difference between a permission system
 and a suggestion, and all must hold regardless of which route reaches them:
 
 - **No caller can grant a permission it does not itself effectively hold**
@@ -27,6 +27,9 @@ and a suggestion, and all must hold regardless of which route reaches them:
 - **An Admin issues a user's *first* `api_token` credential, never a second**
   (`assert_no_existing_api_token`, issue #28) — beyond the first, a user mints their
   own via `POST /auth/me/tokens`.
+- **Enrolling a second TOTP secret requires disabling the first**
+  (`assert_totp_not_enrolled`, issue #41) — `POST /auth/me/totp` never implicitly
+  overwrites a live enrollment.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from ansina.auth.bootstrap import is_bootstrap_identity
-from ansina.auth.models import Role, RoleSlug, Verb
+from ansina.auth.models import CredentialType, Role, RoleSlug, Verb
 from ansina.auth.policy import is_grantable, is_sensitive_resource
 from ansina.auth.principal import Principal
 from ansina.auth.repositories import (
@@ -92,6 +95,16 @@ class InvalidGrantError(AuthError):
     """
 
     code: ClassVar[str] = "ansina.auth.invalid_grant"
+
+
+class TotpAlreadyEnrolledError(AuthError):
+    """A caller tried to enroll a second TOTP secret via `POST /auth/me/totp` without
+    disabling the first — issue #41 AC: replacing an enrollment requires disabling it
+    first (`DELETE /auth/me/totp` or an Admin's `DELETE /auth/users/{id}/totp` reset),
+    never an implicit overwrite.
+    """
+
+    code: ClassVar[str] = "ansina.auth.totp_already_enrolled"
 
 
 class TokenAlreadyIssuedError(AuthError):
@@ -276,5 +289,20 @@ def assert_no_existing_api_token(db: Database, user_id: str) -> None:
         raise TokenAlreadyIssuedError(
             f"user {user_id!r} already holds an api_token — revoke it first, or "
             "have the user mint their own via POST /auth/me/tokens",
+            details={"user_id": user_id},
+        )
+
+
+def assert_totp_not_enrolled(db: Database, user_id: str) -> None:
+    """Refuse (`TotpAlreadyEnrolledError`) if `user_id` already holds a `totp`
+    credential — issue #41's "replacing requires disabling first" AC. Called by
+    `POST /auth/me/totp` ahead of `CredentialRepository.create_totp_secret`; the
+    partial unique index `idx_credentials_one_totp_per_user` is the backstop if a
+    caller ever races past this check, not the primary enforcement.
+    """
+    if CredentialRepository(db).has_credential(user_id, CredentialType.TOTP):
+        raise TotpAlreadyEnrolledError(
+            f"user {user_id!r} already has a TOTP credential enrolled — disable it "
+            "first",
             details={"user_id": user_id},
         )

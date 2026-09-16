@@ -84,11 +84,15 @@ class SubjectType(StrEnum):
 
 class CredentialType(StrEnum):
     """What a `credentials` row authenticates. Typed from day one (issue #24) so a
-    future second-factor type is a new member, not a schema change.
+    future second-factor type is a new member, not a schema change. `TOTP` (issue #41)
+    is the first to actually exercise that — its `credentials.type` CHECK widening
+    (`storage/migrations/0006_totp_credential.sql`) is the schema change; the enum
+    itself only grows a member.
     """
 
     PASSWORD = "password"
     API_TOKEN = "api_token"
+    TOTP = "totp"
 
 
 @dataclass(frozen=True, slots=True)

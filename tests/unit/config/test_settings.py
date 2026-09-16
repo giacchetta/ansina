@@ -5,11 +5,18 @@ from pydantic import ValidationError
 
 from ansina.config import ConfigError, load_settings
 from ansina.config.settings import (
+    EncryptionSettings,
     SecuritySettings,
     ServerSettings,
     _token_entropy_bits_per_char,
     _unwrap_model,
 )
+
+# A value that clears `EncryptionSettings`'s shape bar: url-safe base64 decoding to
+# exactly 32 raw bytes — the same shape `secrets.token_urlsafe(32)` produces (this
+# literal value is itself the output of that call, fixed here for a deterministic
+# test rather than regenerated per run).
+_STRONG_ENCRYPTION_KEY = "inl1_UnlPfMEYIPwFZnl46Nx2GXZmHoHdT-OC4I9nYA"
 
 
 def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
@@ -30,6 +37,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.security.sudo.max_failed_attempts == 5
     assert settings.security.sudo.attempt_window_seconds == 300.0
     assert settings.security.sudo.lockout_seconds == 900.0
+    assert settings.security.encryption.key is None
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"
     assert settings.heart.model_path is None
@@ -628,3 +636,80 @@ def test_env_var_with_unparseable_value_for_nested_model_raises_config_error(
         load_settings()
 
     assert "server" in str(exc_info.value)
+
+
+# --- issue #41: [security.encryption] key -------------------------------------------
+
+
+def test_encryption_key_accepts_a_valid_32_byte_value(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ENCRYPTION__KEY", _STRONG_ENCRYPTION_KEY)
+
+    settings = load_settings()
+
+    assert settings.security.encryption.key is not None
+    assert settings.security.encryption.key.get_secret_value() == (
+        _STRONG_ENCRYPTION_KEY
+    )
+
+
+def test_encryption_key_not_configured_by_default(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    settings = load_settings()
+
+    assert settings.security.encryption.key is None
+
+
+def test_encryption_key_wrong_length_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """16 raw bytes (AES-128-sized), not the 32 AES-256 requires."""
+    monkeypatch.setenv("ANSINA_SECURITY__ENCRYPTION__KEY", "a" * 22)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "security.encryption.key" in message
+    assert "32" in message
+
+
+def test_encryption_key_not_base64_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__ENCRYPTION__KEY", "not valid base64! has spaces"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "security.encryption.key" in message
+    assert "url-safe base64" in message
+
+
+def test_encryption_key_in_toml_file_rejected(clean_env: None, tmp_cwd: Path) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        f'[security.encryption]\nkey = "{_STRONG_ENCRYPTION_KEY}"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_SECURITY__ENCRYPTION__KEY" in message
+    assert _STRONG_ENCRYPTION_KEY not in message
+
+
+def test_encryption_settings_accepts_an_explicit_none_key() -> None:
+    """`_validate_key_shape`'s `value is None` branch — not reachable via
+    `load_settings()` (an *absent* env var means "use the default"), but
+    `EncryptionSettings` can still be constructed directly with `key=None`.
+    """
+    settings = EncryptionSettings(key=None)
+
+    assert settings.key is None
