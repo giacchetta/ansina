@@ -12,6 +12,7 @@ from ansina.auth.repositories import (
     GroupRepository,
     ResourceRepository,
     RoleAssignmentRepository,
+    RoleInUseError,
     RolePermissionRepository,
     RoleRepository,
     SudoGrantRepository,
@@ -160,6 +161,69 @@ def test_list_custom_with_grant_on_returns_empty_when_no_custom_role_holds_it(
     assert roles.list_custom_with_grant_on("heart.tick") == []
 
 
+def test_role_create_with_grants_inserts_role_permissions_in_the_same_txn(
+    db: Database,
+) -> None:
+    """Issue #40: `create(grants=...)` structurally guarantees a custom role can
+    never exist without the grants it was created with.
+    """
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+
+    role = RoleRepository(db).create(
+        "custom", "Custom", "", grants=frozenset({("heart.tick", Verb.GET)})
+    )
+
+    grants = RolePermissionRepository(db).list_for_role(role.id)
+    assert [(g.resource, g.verb) for g in grants] == [("heart.tick", Verb.GET)]
+
+
+def test_role_create_with_no_grants_creates_a_bare_role(db: Database) -> None:
+    role = RoleRepository(db).create("custom", "Custom", "")
+
+    assert RolePermissionRepository(db).list_for_role(role.id) == []
+
+
+def test_role_delete_refuses_a_role_still_assigned_to_a_user(db: Database) -> None:
+    role = RoleRepository(db).create("custom", "Custom", "")
+    user = UserRepository(db).create("holder")
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+
+    with pytest.raises(RoleInUseError) as excinfo:
+        RoleRepository(db).delete(role.id)
+
+    assert excinfo.value.code == "ansina.auth.role_in_use"
+    assert RoleRepository(db).get(role.id) is not None  # not deleted
+
+
+def test_role_delete_refuses_a_role_still_assigned_to_a_group(db: Database) -> None:
+    role = RoleRepository(db).create("custom-group", "Custom", "")
+    group = GroupRepository(db).create("g1", "Group One")
+    RoleAssignmentRepository(db).assign(SubjectType.GROUP, group.id, role.id)
+
+    with pytest.raises(RoleInUseError):
+        RoleRepository(db).delete(role.id)
+
+
+def test_role_delete_checks_builtin_before_in_use(db: Database) -> None:
+    """The builtin check runs first — a builtin role gets `BuiltinRoleError`, never
+    `RoleInUseError`, regardless of whether it's assigned.
+    """
+    role = RoleRepository(db).ensure_builtin("admin", "Admin", "")
+    user = UserRepository(db).create("admin-holder")
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+
+    with pytest.raises(BuiltinRoleError):
+        RoleRepository(db).delete(role.id)
+
+
+def test_role_delete_succeeds_for_an_unassigned_custom_role(db: Database) -> None:
+    role = RoleRepository(db).create("throwaway", "Throwaway", "")
+
+    RoleRepository(db).delete(role.id)  # must not raise
+
+    assert RoleRepository(db).get(role.id) is None
+
+
 # --- RolePermissionRepository --------------------------------------------------
 
 
@@ -194,6 +258,36 @@ def test_role_permission_revoke_of_ungranted_verb_is_a_no_op(db: Database) -> No
     role = roles.create("read", "Read", "")
 
     permissions.revoke(role.id, "heart.tick", Verb.GET)
+
+
+def test_replace_for_role_replaces_rather_than_merges(db: Database) -> None:
+    """Issue #40: `PATCH /auth/roles/{id}` submits the role's entire new grant set,
+    not a delta — `replace_for_role` must drop what isn't resubmitted.
+    """
+    ResourceRepository(db).upsert(
+        "heart.tick", "", verbs=frozenset({Verb.GET, Verb.POST})
+    )
+    role = RoleRepository(db).create(
+        "custom", "Custom", "", grants=frozenset({("heart.tick", Verb.GET)})
+    )
+    permissions = RolePermissionRepository(db)
+
+    permissions.replace_for_role(role.id, frozenset({("heart.tick", Verb.POST)}))
+
+    grants = permissions.list_for_role(role.id)
+    assert [(g.resource, g.verb) for g in grants] == [("heart.tick", Verb.POST)]
+
+
+def test_replace_for_role_with_empty_grants_clears_them(db: Database) -> None:
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    role = RoleRepository(db).create(
+        "custom", "Custom", "", grants=frozenset({("heart.tick", Verb.GET)})
+    )
+    permissions = RolePermissionRepository(db)
+
+    permissions.replace_for_role(role.id, frozenset())
+
+    assert permissions.list_for_role(role.id) == []
 
 
 def test_effective_verbs_unions_across_roles(db: Database) -> None:

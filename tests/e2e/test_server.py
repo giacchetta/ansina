@@ -216,6 +216,7 @@ def test_openapi_schema(server: str) -> None:
         "/auth/groups/{group_id}/members/{user_id}",
         "/auth/groups/{group_id}/roles/{role_id}",
         "/auth/roles",
+        "/auth/roles/{role_id}",
         "/auth/permissions",
         "/auth/me",
         "/auth/me/tokens",
@@ -563,6 +564,133 @@ def test_rbac_management_round_trip(authed_server: str) -> None:
     )
     assert delete_last_admin.status_code == 409
     assert delete_last_admin.json()["code"] == "ansina.auth.last_admin"
+
+
+def test_custom_role_round_trip(authed_server: str) -> None:
+    """Issue #40's headline flow, black-box end to end: the configured admin creates
+    a custom role granting `heart.tick`, a sudo'd `Maintain` edits its grant set
+    (refused first with no sudo grant, per issue #37's fail-closed gate), the role is
+    assigned to a fresh user who then actually reaches `GET /heart/tick` under it
+    (503 `heart.disabled`, not 403 — proof the grant is live, not just stored), and
+    deleting the role while still assigned is refused (409 `ansina.auth.role_in_use`)
+    until it's detached.
+    """
+    admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+
+    created_role = httpx.post(
+        f"{authed_server}/auth/roles",
+        headers=admin_headers,
+        json={
+            "slug": "e2e-heart-watcher",
+            "name": "Heart Watcher",
+            "permissions": [{"resource": "heart.tick", "verb": "GET"}],
+        },
+    )
+    assert created_role.status_code == 201
+    role_id = created_role.json()["id"]
+
+    # A fresh Maintain user, created entirely over HTTP (same technique
+    # `test_rbac_management_round_trip` uses) to edit the role's grants.
+    maintainer = httpx.post(
+        f"{authed_server}/auth/users",
+        headers=admin_headers,
+        json={"username": "e2e-role-editor"},
+    )
+    assert maintainer.status_code == 201
+    maintainer_id = maintainer.json()["id"]
+    httpx.put(
+        f"{authed_server}/auth/users/{maintainer_id}/password",
+        headers=admin_headers,
+        json={"password": "a perfectly good passphrase"},
+    )
+    maintainer_token = httpx.post(
+        f"{authed_server}/auth/users/{maintainer_id}/tokens",
+        headers=admin_headers,
+        json={"label": "e2e"},
+    ).json()["token"]
+
+    all_roles = httpx.get(f"{authed_server}/auth/roles", headers=admin_headers).json()
+    maintain_role_id = next(r["id"] for r in all_roles if r["slug"] == "maintain")
+    httpx.post(
+        f"{authed_server}/auth/users/{maintainer_id}/roles/{maintain_role_id}",
+        headers=admin_headers,
+    )
+
+    maintainer_headers = {"Authorization": f"Bearer {maintainer_token}"}
+    no_grant_edit = httpx.patch(
+        f"{authed_server}/auth/roles/{role_id}",
+        headers=maintainer_headers,
+        json={"permissions": [{"resource": "heart.tick", "verb": "GET"}]},
+    )
+    assert no_grant_edit.status_code == 403
+    assert no_grant_edit.json()["code"] == "ansina.auth.sudo_required"
+
+    step_up = httpx.post(
+        f"{authed_server}/auth/sudo",
+        headers=maintainer_headers,
+        json={"password": "a perfectly good passphrase"},
+    )
+    assert step_up.status_code == 200
+    granted_headers = {**maintainer_headers, "X-Sudo-Token": step_up.json()["token"]}
+
+    edited = httpx.patch(
+        f"{authed_server}/auth/roles/{role_id}",
+        headers=granted_headers,
+        json={
+            "permissions": [
+                {"resource": "heart.tick", "verb": "GET"},
+                {"resource": "heart.tick", "verb": "POST"},
+            ]
+        },
+    )
+    assert edited.status_code == 200
+    assert {(g["resource"], g["verb"]) for g in edited.json()["permissions"]} == {
+        ("heart.tick", "GET"),
+        ("heart.tick", "POST"),
+    }
+
+    # Assign the custom role to a fresh, otherwise-unprivileged user and prove the
+    # grant is actually live: 503 heart.disabled (authorization passed), not 403.
+    holder = httpx.post(
+        f"{authed_server}/auth/users",
+        headers=admin_headers,
+        json={"username": "e2e-role-holder"},
+    )
+    assert holder.status_code == 201
+    holder_id = holder.json()["id"]
+    holder_token = httpx.post(
+        f"{authed_server}/auth/users/{holder_id}/tokens",
+        headers=admin_headers,
+        json={"label": "e2e"},
+    ).json()["token"]
+    assign_custom_role = httpx.post(
+        f"{authed_server}/auth/users/{holder_id}/roles/{role_id}",
+        headers=admin_headers,
+    )
+    assert assign_custom_role.status_code == 204
+
+    holder_headers = {"Authorization": f"Bearer {holder_token}"}
+    tick_response = httpx.get(f"{authed_server}/heart/tick", headers=holder_headers)
+    assert tick_response.status_code == 503
+    assert tick_response.json()["code"] == "ansina.heart.disabled"
+
+    # Still assigned: delete is refused.
+    delete_while_assigned = httpx.delete(
+        f"{authed_server}/auth/roles/{role_id}", headers=admin_headers
+    )
+    assert delete_while_assigned.status_code == 409
+    assert delete_while_assigned.json()["code"] == "ansina.auth.role_in_use"
+
+    # Detach, then delete succeeds.
+    detach = httpx.delete(
+        f"{authed_server}/auth/users/{holder_id}/roles/{role_id}",
+        headers=admin_headers,
+    )
+    assert detach.status_code == 204
+    delete_response = httpx.delete(
+        f"{authed_server}/auth/roles/{role_id}", headers=admin_headers
+    )
+    assert delete_response.status_code == 204
 
 
 def test_self_service_token_round_trip(authed_server: str) -> None:

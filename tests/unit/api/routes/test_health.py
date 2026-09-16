@@ -46,6 +46,7 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/auth/groups/{group_id}/members/{user_id}",
         "/auth/groups/{group_id}/roles/{role_id}",
         "/auth/roles",
+        "/auth/roles/{role_id}",
         "/auth/permissions",
         "/auth/me",
         "/auth/me/tokens",

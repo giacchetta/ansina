@@ -18,12 +18,18 @@ from pydantic import BaseModel, ConfigDict
 from ansina.auth.authorization import ForbiddenError, SudoRequiredError
 from ansina.auth.management import (
     BootstrapIdentityError,
+    InvalidGrantError,
     LastAdminError,
     NotFoundError,
     SelfEscalationError,
     TokenAlreadyIssuedError,
 )
-from ansina.auth.repositories import DuplicateError, UnknownSubjectError
+from ansina.auth.repositories import (
+    BuiltinRoleError,
+    DuplicateError,
+    RoleInUseError,
+    UnknownSubjectError,
+)
 from ansina.auth.sudo import StepUpUnavailableError, SudoLockedOutError
 from ansina.errors import AnsinaError, ConfigurationError
 from ansina.logging import get_request_id
@@ -49,6 +55,9 @@ CODE_DUPLICATE = DuplicateError.code
 CODE_UNKNOWN_SUBJECT = UnknownSubjectError.code
 CODE_BOOTSTRAP_IDENTITY = BootstrapIdentityError.code
 CODE_TOKEN_ALREADY_ISSUED = TokenAlreadyIssuedError.code
+CODE_BUILTIN_ROLE_IMMUTABLE = BuiltinRoleError.code
+CODE_ROLE_IN_USE = RoleInUseError.code
+CODE_INVALID_GRANT = InvalidGrantError.code
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
@@ -82,10 +91,20 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # 409, same family — the target already holds an api_token; issue #28's
     # invariant B makes this route first-credential-only.
     TokenAlreadyIssuedError: 409,
+    # 409, same family again — the request is well-formed and the caller is
+    # otherwise authorized, but the target role is builtin (`PATCH`/`DELETE
+    # /auth/roles/{id}`, issue #40) or still referenced by a `role_assignments` row
+    # (`DELETE`, issue #40's repository-layer in-use guard).
+    BuiltinRoleError: 409,
+    RoleInUseError: 409,
     # 404: a path referenced a user/group/role id, or a role_assignments subject, that
     # doesn't exist.
     NotFoundError: 404,
     UnknownSubjectError: 404,
+    # 422: the request is syntactically valid JSON but semantically invalid — a
+    # submitted grant names an uncatalogued, non-grantable, or unserved (resource,
+    # verb) pair (issue #40), alongside FastAPI's own validation-error 422s.
+    InvalidGrantError: 422,
 }
 
 

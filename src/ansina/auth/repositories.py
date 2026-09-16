@@ -66,6 +66,17 @@ class UnknownSubjectError(AuthError):
     code: ClassVar[str] = "ansina.auth.unknown_subject"
 
 
+class RoleInUseError(AuthError):
+    """A caller tried to delete a role still referenced by at least one
+    `role_assignments` row (a user or a group). Enforced here, in the repository
+    layer, rather than left to `role_assignments.role_id`'s `ON DELETE CASCADE` —
+    issue #40's own framing is that the cascade must never be the mechanism that
+    decides this.
+    """
+
+    code: ClassVar[str] = "ansina.auth.role_in_use"
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 
@@ -146,8 +157,20 @@ class RoleRepository:
         return Role.from_row(row) if row is not None else None
 
     def create(
-        self, slug: str, name: str, description: str, *, builtin: bool = False
+        self,
+        slug: str,
+        name: str,
+        description: str,
+        *,
+        builtin: bool = False,
+        grants: frozenset[tuple[str, Verb]] = frozenset(),
     ) -> Role:
+        """`grants` (issue #40) is inserted as `role_permissions` rows in the same
+        transaction as the `roles` row itself — the same structural-invariant
+        pattern `UserRepository.create`'s `external_identities` insert already
+        sets, so a custom role can never exist without the grants it was created
+        with (or, on a rollback, without existing at all).
+        """
         role_id = _new_id()
         try:
             with self._db.transaction() as cursor:
@@ -158,6 +181,15 @@ class RoleRepository:
                     """,
                     (role_id, slug, name, description, int(builtin)),
                 )
+                for resource, verb in grants:
+                    cursor.execute(
+                        """
+                        INSERT INTO role_permissions (role_id, resource, verb)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT (role_id, resource, verb) DO NOTHING
+                        """,
+                        (role_id, resource, verb.value),
+                    )
         except sqlite3.IntegrityError as exc:
             raise DuplicateError(f"a role with slug {slug!r} already exists") from exc
         role = self.get(role_id)
@@ -176,12 +208,37 @@ class RoleRepository:
         return self.create(slug, name, description, builtin=True)
 
     def delete(self, role_id: str) -> None:
+        """Refuses (`BuiltinRoleError`) a builtin role, checked first, and (issue
+        #40, `RoleInUseError`) a role still referenced by any `role_assignments`
+        row — both checked before any `DELETE` statement runs, never left to
+        `ON DELETE CASCADE` to decide.
+        """
         role = self.get(role_id)
         if role is None:
             return
         if role.builtin:
             raise BuiltinRoleError(
                 f"role {role.slug!r} is builtin and cannot be deleted"
+            )
+        assignments = (
+            self._db.connection()
+            .execute(
+                "SELECT subject_type, subject_id FROM role_assignments "
+                "WHERE role_id = ?",
+                (role_id,),
+            )
+            .fetchall()
+        )
+        if assignments:
+            raise RoleInUseError(
+                f"role {role.slug!r} is still assigned and cannot be deleted",
+                details={
+                    "role_id": role_id,
+                    "assignments": sorted(
+                        f"{row['subject_type']}:{row['subject_id']}"
+                        for row in assignments
+                    ),
+                },
             )
         with self._db.transaction() as cursor:
             cursor.execute("DELETE FROM roles WHERE id = ?", (role_id,))
@@ -245,6 +302,28 @@ class RolePermissionRepository:
                 "WHERE role_id = ? AND resource = ? AND verb = ?",
                 (role_id, resource, verb.value),
             )
+
+    def replace_for_role(
+        self, role_id: str, grants: frozenset[tuple[str, Verb]]
+    ) -> None:
+        """Atomically replace every `role_permissions` row for `role_id` with
+        `grants` — one transaction, unlike `auth.reconciler.reconcile_builtin_roles`'s
+        per-row diff-then-`grant`/`revoke` loop (which is only shaped that way because
+        it reconciles four roles against the whole catalog at every boot). Backs
+        `PATCH /auth/roles/{id}` (issue #40): the caller submits the role's *entire*
+        new grant set, not a delta.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute("DELETE FROM role_permissions WHERE role_id = ?", (role_id,))
+            for resource, verb in grants:
+                cursor.execute(
+                    """
+                    INSERT INTO role_permissions (role_id, resource, verb)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (role_id, resource, verb) DO NOTHING
+                    """,
+                    (role_id, resource, verb.value),
+                )
 
     def grants_for_roles(self, role_ids: frozenset[str]) -> frozenset[tuple[str, Verb]]:
         """Every `(resource, verb)` pair granted to any of `role_ids` — the whole grant
