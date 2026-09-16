@@ -394,6 +394,7 @@ def test_issued_token_authenticates(
     )
     assert issued.status_code == 201
     assert issued.json()["label"] == "kevin's laptop"
+    assert issued.json()["expires_at"] is None
     kevin_token = issued.json()["token"]
 
     # The token authenticates (401 -> would-be-401 path not hit); Kevin has no role

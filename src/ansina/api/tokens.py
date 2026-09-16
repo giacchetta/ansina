@@ -20,10 +20,12 @@ module's `issue_token`.
 from __future__ import annotations
 
 import secrets
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from ansina.auth.clock import Clock, iso, utc_now
 from ansina.auth.management import NotFoundError, assert_not_bootstrap_identity
 from ansina.auth.repositories import CredentialRepository
 from ansina.logging import register_secret
@@ -38,16 +40,17 @@ _GENERATED_TOKEN_BYTES = 32
 
 
 class TokenOut(BaseModel):
-    """One token's metadata — never `hash`/`salt`. `expires_at` is deliberately
-    omitted: the column exists on `credentials` but nothing in issue #28 sets it, and
-    an always-null field in every response would imply expiry is supported when it
-    isn't.
+    """One token's metadata — never `hash`/`salt`. `expires_at` (issue #39) is `null`
+    for a token that never expires — every M2/M4-era token, and still the default for
+    every self- and admin-issued token today — or the ISO 8601 instant past which
+    `ansina.auth.authenticator.ApiTokenAuthenticator` stops matching it.
     """
 
     id: str
     label: str
     created_at: str
     last_used_at: str | None
+    expires_at: str | None
 
     @classmethod
     def from_model(cls, credential: Credential) -> TokenOut:
@@ -56,6 +59,7 @@ class TokenOut(BaseModel):
             label=credential.label,
             created_at=credential.created_at,
             last_used_at=credential.last_used_at,
+            expires_at=credential.expires_at,
         )
 
 
@@ -72,20 +76,41 @@ class IssuedTokenResponse(TokenOut):
     token: str
 
 
-def issue_token(db: Database, user_id: str, label: str) -> IssuedTokenResponse:
+def issue_token(
+    db: Database,
+    user_id: str,
+    label: str,
+    *,
+    ttl_seconds: float | None = None,
+    clock: Clock = utc_now,
+) -> IssuedTokenResponse:
     """Mint a fresh token for `user_id`. Refuses (`BootstrapIdentityError`, 403) if
     `user_id` is the synthetic bootstrap identity — issue #28's invariant A.
+
+    `ttl_seconds` (issue #39) is `None` by default — the token never expires, the
+    existing behavior for every M2/M4-era call path (`POST /auth/me/tokens`,
+    `POST /auth/users/{id}/tokens`, and `auth.bootstrap`'s own direct
+    `create_api_token` calls, none of which pass it). A positive value stores
+    `expires_at = clock() + ttl_seconds`, via the same injectable clock
+    `auth.sudo.SudoService` and `ApiTokenAuthenticator` already use so the exact
+    instant is assertable in a test rather than merely approximated. `ttl_seconds <=
+    0` raises `ValueError` — mirrors `SudoSettings.ttl_seconds`'s own `gt=0` bound —
+    since a zero or negative TTL would mint a token already expired at issuance,
+    never honestly "short-lived."
     """
     assert_not_bootstrap_identity(db, user_id)
+    if ttl_seconds is not None and ttl_seconds <= 0:
+        raise ValueError(f"ttl_seconds must be positive, got {ttl_seconds!r}")
+    expires_at = (
+        None if ttl_seconds is None else iso(clock() + timedelta(seconds=ttl_seconds))
+    )
     token = secrets.token_urlsafe(_GENERATED_TOKEN_BYTES)
     register_secret(token)
-    credential = CredentialRepository(db).create_api_token(user_id, token, label=label)
+    credential = CredentialRepository(db).create_api_token(
+        user_id, token, label=label, expires_at=expires_at
+    )
     return IssuedTokenResponse(
-        id=credential.id,
-        label=credential.label,
-        created_at=credential.created_at,
-        last_used_at=credential.last_used_at,
-        token=token,
+        **TokenOut.from_model(credential).model_dump(), token=token
     )
 
 

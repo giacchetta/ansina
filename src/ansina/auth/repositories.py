@@ -675,8 +675,10 @@ class CredentialRepository:
         """Whether `user_id` holds any `credential_type` row — the enrollment question
         `auth.step_up.StepUpVerifier.is_enrolled` implementations answer against (issue
         #37). A single indexed existence check (`idx_credentials_user_type`), never a
-        hash read; ignores `expires_at` — enforcing credential expiry is issue #39's
-        scope, not this one's.
+        hash read; deliberately ignores `expires_at` (issue #39 enforces expiry only on
+        authentication, via `find_api_token_credential`) — nothing sets an expiry on a
+        `password` row, and `verify_password` itself doesn't filter on it either, so
+        filtering enrollment alone here would make the two disagree.
         """
         row = (
             self._db.connection()
@@ -689,18 +691,28 @@ class CredentialRepository:
         return row is not None
 
     def create_api_token(
-        self, user_id: str, raw_token: str, *, label: str = ""
+        self,
+        user_id: str,
+        raw_token: str,
+        *,
+        label: str = "",
+        expires_at: str | None = None,
     ) -> Credential:
+        """`expires_at` is `None` by default — every M2/M4-era caller keeps minting a
+        token that never expires. Issue #39's first caller with a real TTL is
+        `ansina.api.tokens.issue_token`.
+        """
         salt = new_token_salt()
         token_hash = hash_token(raw_token, salt)
         credential_id = _new_id()
         with self._db.transaction() as cursor:
             cursor.execute(
                 """
-                INSERT INTO credentials (id, user_id, type, hash, salt, label)
-                VALUES (?, ?, 'api_token', ?, ?, ?)
+                INSERT INTO credentials
+                    (id, user_id, type, hash, salt, label, expires_at)
+                VALUES (?, ?, 'api_token', ?, ?, ?, ?)
                 """,
-                (credential_id, user_id, token_hash, salt, label),
+                (credential_id, user_id, token_hash, salt, label, expires_at),
             )
             row = cursor.execute(
                 "SELECT * FROM credentials WHERE id = ?", (credential_id,)
@@ -780,16 +792,27 @@ class CredentialRepository:
                 (now, credential_id),
             )
 
-    def find_api_token_credential(self, token: str) -> Credential | None:
-        """Scans every `api_token` credential, comparing in constant time, and
-        returns the matched row itself — issue #28's authenticator needs the
+    def find_api_token_credential(self, token: str, *, now: str) -> Credential | None:
+        """Scans every *unexpired* `api_token` credential, comparing in constant time,
+        and returns the matched row itself — issue #28's authenticator needs the
         credential's id and `last_used_at` to run its coalesced staleness check, not
         just the owning user. Fine at M2 scale — a token-id-prefix index is the
         change to make if this table ever grows large enough for the scan to matter.
+
+        `now` (issue #39) is always caller-supplied, never a SQL-side `now` — the same
+        discipline `SudoGrantRepository.find_active`'s `expires_at > ?` already
+        follows — and filters the query itself: `expires_at IS NULL` (never expires)
+        or `expires_at > now`, the identical lexicographic-ISO-8601 string comparison
+        `find_active` relies on (no parse, no parse-failure path). An expired token is
+        therefore indistinguishable from an unknown one to every caller here.
         """
         rows = (
             self._db.connection()
-            .execute("SELECT * FROM credentials WHERE type = 'api_token'")
+            .execute(
+                "SELECT * FROM credentials WHERE type = 'api_token' "
+                "AND (expires_at IS NULL OR expires_at > ?)",
+                (now,),
+            )
             .fetchall()
         )
         for row in rows:
@@ -799,13 +822,14 @@ class CredentialRepository:
                 return Credential.from_row(row)
         return None
 
-    def find_user_by_api_token(self, token: str) -> User | None:
+    def find_user_by_api_token(self, token: str, *, now: str) -> User | None:
         """The matched credential's owning user, or `None`. Delegates to
-        `find_api_token_credential` (issue #28) so the constant-time scan exists in
+        `find_api_token_credential` (issue #28, threading `now` through as of #39) so
+        the constant-time scan — and the expiry filter sitting on it — exists in
         exactly one place; kept as its own method since most callers only ever want
         the user, not the credential row itself.
         """
-        credential = self.find_api_token_credential(token)
+        credential = self.find_api_token_credential(token, now=now)
         if credential is None:
             return None
         user_row = (

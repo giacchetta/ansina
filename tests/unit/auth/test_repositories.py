@@ -21,6 +21,12 @@ from ansina.auth.repositories import (
 )
 from ansina.storage.database import Database
 
+# A fixed `now` for `find_api_token_credential`/`find_user_by_api_token` calls that
+# don't care about the value — issue #39's expiry filter only excludes a row when
+# `expires_at` is set, and none of these tests set one, so any `now` works here. The
+# expiry-specific tests below (`_EARLY`/`_LATE`) use their own pair instead.
+_ANY_NOW = "2026-01-01T00:00:00.000Z"
+
 # --- ResourceRepository -----------------------------------------------------
 
 
@@ -347,7 +353,7 @@ def test_user_soft_delete_purges_access_but_keeps_the_row_and_identity(
     # The row and its local identity survive, for audit attribution.
     assert identities.get_by_provider_subject("local", "alice") is not None
     # Everything that could grant access again is gone.
-    assert credentials.find_user_by_api_token("a-token") is None
+    assert credentials.find_user_by_api_token("a-token", now=_ANY_NOW) is None
     assert assignments.roles_for_user(user.id) == []
     assert groups.list_members(group.id) == []
     assert (
@@ -729,7 +735,7 @@ def test_credential_create_and_find_api_token(db: Database) -> None:
     assert credential.type is CredentialType.API_TOKEN
     assert credential.salt is not None
     assert "a-real-token" not in credential.hash
-    found = credentials.find_user_by_api_token("a-real-token")
+    found = credentials.find_user_by_api_token("a-real-token", now=_ANY_NOW)
     assert found is not None
     assert found.id == user.id
 
@@ -742,13 +748,16 @@ def test_credential_find_user_by_api_token_rejects_a_wrong_token(
     user = users.create("alice")
     credentials.create_api_token(user.id, "a-real-token")
 
-    assert credentials.find_user_by_api_token("a-wrong-token") is None
+    assert credentials.find_user_by_api_token("a-wrong-token", now=_ANY_NOW) is None
 
 
 def test_credential_find_user_by_api_token_with_no_tokens_returns_none(
     db: Database,
 ) -> None:
-    assert CredentialRepository(db).find_user_by_api_token("anything") is None
+    assert (
+        CredentialRepository(db).find_user_by_api_token("anything", now=_ANY_NOW)
+        is None
+    )
 
 
 def test_credential_replace_api_token_revokes_the_old_one(db: Database) -> None:
@@ -759,8 +768,8 @@ def test_credential_replace_api_token_revokes_the_old_one(db: Database) -> None:
 
     credentials.replace_api_token(user.id, "new-token")
 
-    assert credentials.find_user_by_api_token("old-token") is None
-    found = credentials.find_user_by_api_token("new-token")
+    assert credentials.find_user_by_api_token("old-token", now=_ANY_NOW) is None
+    found = credentials.find_user_by_api_token("new-token", now=_ANY_NOW)
     assert found is not None
     assert found.id == user.id
 
@@ -773,7 +782,7 @@ def test_credential_delete_credentials(db: Database) -> None:
 
     credentials.delete_credentials(user.id, CredentialType.API_TOKEN)
 
-    assert credentials.find_user_by_api_token("a-token") is None
+    assert credentials.find_user_by_api_token("a-token", now=_ANY_NOW) is None
 
 
 # --- CredentialRepository: issue #28's self-service token surface ------------------
@@ -855,7 +864,7 @@ def test_credential_find_api_token_credential_returns_the_full_row(
     user = UserRepository(db).create("alice")
     created = CredentialRepository(db).create_api_token(user.id, "a-token", label="cli")
 
-    found = CredentialRepository(db).find_api_token_credential("a-token")
+    found = CredentialRepository(db).find_api_token_credential("a-token", now=_ANY_NOW)
 
     assert found is not None
     assert found.id == created.id
@@ -866,7 +875,107 @@ def test_credential_find_api_token_credential_returns_the_full_row(
 def test_credential_find_api_token_credential_returns_none_for_an_unknown_token(
     db: Database,
 ) -> None:
-    assert CredentialRepository(db).find_api_token_credential("nope") is None
+    assert (
+        CredentialRepository(db).find_api_token_credential("nope", now=_ANY_NOW) is None
+    )
+
+
+# --- CredentialRepository: issue #39's `expires_at` enforcement --------------------
+
+_TOKEN_EARLY = "2026-01-01T00:00:00.000Z"
+_TOKEN_LATE = "2026-06-01T00:00:00.000Z"
+
+
+def test_create_api_token_defaults_to_no_expiry(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    credential = CredentialRepository(db).create_api_token(user.id, "a-token")
+
+    assert credential.expires_at is None
+
+
+def test_create_api_token_round_trips_an_expiry(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    credential = CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_LATE
+    )
+
+    assert credential.expires_at == _TOKEN_LATE
+
+
+def test_find_api_token_credential_matches_a_token_before_its_expiry(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_LATE
+    )
+
+    found = CredentialRepository(db).find_api_token_credential(
+        "a-token", now=_TOKEN_EARLY
+    )
+
+    assert found is not None
+    assert found.user_id == user.id
+
+
+def test_find_api_token_credential_stops_matching_after_its_expiry(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_EARLY
+    )
+
+    assert (
+        CredentialRepository(db).find_api_token_credential("a-token", now=_TOKEN_LATE)
+        is None
+    )
+
+
+def test_find_api_token_credential_treats_now_equal_to_expiry_as_already_expired(
+    db: Database,
+) -> None:
+    """The predicate is `expires_at > now`, not `>=` — a token expires exactly at its
+    own `expires_at` instant, not one tick after.
+    """
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_EARLY
+    )
+
+    assert (
+        CredentialRepository(db).find_api_token_credential("a-token", now=_TOKEN_EARLY)
+        is None
+    )
+
+
+def test_find_api_token_credential_ignores_expiry_for_a_never_expiring_token(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(user.id, "a-token")  # expires_at=None
+
+    # Any `now`, however far in the future, still matches a `NULL` expiry.
+    found = CredentialRepository(db).find_api_token_credential(
+        "a-token", now="2099-01-01T00:00:00.000Z"
+    )
+
+    assert found is not None
+    assert found.user_id == user.id
+
+
+def test_find_user_by_api_token_stops_matching_after_expiry(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_EARLY
+    )
+
+    assert (
+        CredentialRepository(db).find_user_by_api_token("a-token", now=_TOKEN_LATE)
+        is None
+    )
 
 
 def test_credential_delete_api_token_removes_it_and_returns_true(db: Database) -> None:
@@ -876,7 +985,9 @@ def test_credential_delete_api_token_removes_it_and_returns_true(db: Database) -
     deleted = CredentialRepository(db).delete_api_token(credential.id, user.id)
 
     assert deleted is True
-    assert CredentialRepository(db).find_user_by_api_token("a-token") is None
+    assert (
+        CredentialRepository(db).find_user_by_api_token("a-token", now=_ANY_NOW) is None
+    )
 
 
 def test_credential_delete_api_token_returns_false_for_an_unknown_id(
@@ -899,7 +1010,10 @@ def test_credential_delete_api_token_is_scoped_to_the_owning_user(
     deleted = CredentialRepository(db).delete_api_token(credential.id, other.id)
 
     assert deleted is False
-    assert CredentialRepository(db).find_user_by_api_token("owned-token") is not None
+    assert (
+        CredentialRepository(db).find_user_by_api_token("owned-token", now=_ANY_NOW)
+        is not None
+    )
 
 
 # --- ExternalIdentityRepository --------------------------------------------------

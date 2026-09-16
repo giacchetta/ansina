@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ansina.api.app import create_app
+from ansina.auth.clock import iso, utc_now
 from ansina.auth.models import RoleSlug
 from ansina.auth.repositories import (
     CredentialRepository,
@@ -348,6 +349,8 @@ def test_lifespan_with_admin_username_and_api_token_creates_both_admins(
             roles = RoleAssignmentRepository(db).roles_for_user(user_id)
             assert [r.slug for r in roles] == [RoleSlug.ADMIN.value]
 
-        found = CredentialRepository(db).find_user_by_api_token(authed_token)
+        found = CredentialRepository(db).find_user_by_api_token(
+            authed_token, now=iso(utc_now())
+        )
         assert found is not None
         assert found.id == configured_admin.id

@@ -250,6 +250,95 @@ def test_zero_resolution_writes_on_every_authentication(db: Database) -> None:
     assert _last_used_at(db, user_id) == iso(second)
 
 
+# --- issue #39: `credentials.expires_at` enforcement -------------------------------
+
+
+def test_a_token_authenticates_before_its_expiry(db: Database) -> None:
+    _, user_id = _seed_reader(db)
+    CredentialRepository(db).create_api_token(
+        user_id, "expiring-token", expires_at="2026-06-01T00:00:00.000Z"
+    )
+    authenticator = ApiTokenAuthenticator(
+        db,
+        last_used_resolution_seconds=_DEFAULT_RESOLUTION_SECONDS,
+        clock=_frozen_clock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    matched = authenticator.authenticate("expiring-token")
+
+    assert matched is not None
+    assert matched.id == user_id
+
+
+def test_a_token_stops_authenticating_after_its_expiry(db: Database) -> None:
+    """Same credential, same authenticator — only the clock moves past
+    `expires_at`. Proves the clock is what changed the outcome, not the row.
+    """
+    _, user_id = _seed_reader(db)
+    CredentialRepository(db).create_api_token(
+        user_id, "expiring-token", expires_at="2026-06-01T00:00:00.000Z"
+    )
+    authenticator = ApiTokenAuthenticator(
+        db,
+        last_used_resolution_seconds=_DEFAULT_RESOLUTION_SECONDS,
+        clock=_frozen_clock(datetime(2026, 6, 1, 0, 0, 1, tzinfo=UTC)),
+    )
+
+    assert authenticator.authenticate("expiring-token") is None
+
+
+def test_resolve_principal_returns_none_for_an_expired_token(db: Database) -> None:
+    _, user_id = _seed_reader(db)
+    CredentialRepository(db).create_api_token(
+        user_id, "expired-token", expires_at="2020-01-01T00:00:00.000Z"
+    )
+    chain = (
+        ApiTokenAuthenticator(
+            db,
+            last_used_resolution_seconds=_DEFAULT_RESOLUTION_SECONDS,
+            clock=_frozen_clock(datetime(2026, 1, 1, tzinfo=UTC)),
+        ),
+    )
+
+    assert resolve_principal(db, chain, "expired-token") is None
+
+
+def test_an_expired_token_never_writes_last_used_at(db: Database) -> None:
+    """An expired token is "no match" — the coalesced bookkeeping in `_touch_if_stale`
+    never runs for a row `authenticate` never returned.
+    """
+    _, user_id = _seed_reader(db)
+    expired = CredentialRepository(db).create_api_token(
+        user_id, "expired-token", expires_at="2020-01-01T00:00:00.000Z"
+    )
+    authenticator = ApiTokenAuthenticator(
+        db,
+        last_used_resolution_seconds=_DEFAULT_RESOLUTION_SECONDS,
+        clock=_frozen_clock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    authenticator.authenticate("expired-token")
+
+    by_id = {c.id: c for c in CredentialRepository(db).list_api_tokens(user_id)}
+    assert by_id[expired.id].last_used_at is None
+
+
+def test_a_never_expiring_token_still_authenticates_far_in_the_future(
+    db: Database,
+) -> None:
+    _, user_id = _seed_reader(db)
+    authenticator = ApiTokenAuthenticator(
+        db,
+        last_used_resolution_seconds=_DEFAULT_RESOLUTION_SECONDS,
+        clock=_frozen_clock(datetime(2099, 1, 1, tzinfo=UTC)),
+    )
+
+    matched = authenticator.authenticate("reader-token")
+
+    assert matched is not None
+    assert matched.id == user_id
+
+
 def test_touch_uses_the_credential_id_not_a_lookup_by_token(db: Database) -> None:
     """Two users each hold a token — authenticating one must never touch the other's
     `last_used_at`.

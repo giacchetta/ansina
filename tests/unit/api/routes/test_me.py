@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from ansina.auth.clock import iso, utc_now
 from ansina.auth.hashing import Argon2Params
 from ansina.auth.models import RoleSlug
 from ansina.auth.repositories import CredentialRepository, UserRepository
@@ -85,7 +86,7 @@ def test_step_up_factors_lists_password_once_enrolled(
 ) -> None:
     token = token_for_role("read")
     db = authed_app.state.db
-    user = CredentialRepository(db).find_user_by_api_token(token)
+    user = CredentialRepository(db).find_user_by_api_token(token, now=iso(utc_now()))
     assert user is not None
     CredentialRepository(db).set_password(
         user.id, "hunter2", Argon2Params(time_cost=1, memory_cost_kib=8, parallelism=1)
@@ -182,6 +183,21 @@ def test_mint_returns_the_raw_token_exactly_once(
     assert "salt" not in body
 
 
+def test_mint_expires_at_is_null_for_the_http_route(
+    authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    """Issue #39 AC: `POST /auth/me/tokens` has no way to pass `ttl_seconds` (it isn't
+    a field on `IssueTokenRequest`), so `expires_at` stays `null` end to end.
+    """
+    token = token_for_role("read")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = authed_client.post("/auth/me/tokens", headers=headers, json={})
+
+    assert response.status_code == 201
+    assert response.json()["expires_at"] is None
+
+
 def test_list_never_carries_a_hash_or_salt(
     authed_client: TestClient, token_for_role: Callable[[str], str]
 ) -> None:
@@ -194,6 +210,7 @@ def test_list_never_carries_a_hash_or_salt(
     assert response.status_code == 200
     body = response.json()
     assert any(entry["label"] == "laptop" for entry in body)
+    assert any(entry["expires_at"] is None for entry in body)
     assert "hash" not in str(body)
     assert "salt" not in str(body)
 
