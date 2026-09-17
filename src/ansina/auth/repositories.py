@@ -31,6 +31,7 @@ from ansina.auth.models import (
     Resource,
     Role,
     RoleAssignment,
+    RoleMapping,
     RolePermission,
     SubjectType,
     SudoGrant,
@@ -594,8 +595,22 @@ class RoleAssignmentRepository:
         return row is not None
 
     def assign(
-        self, subject_type: SubjectType, subject_id: str, role_id: str
+        self,
+        subject_type: SubjectType,
+        subject_id: str,
+        role_id: str,
+        *,
+        source: str = "local",
     ) -> RoleAssignment:
+        """`source` (issue #42) defaults to `'local'` — every existing call site
+        (`routes/role_assignments.py`, `auth.bootstrap`) is unaffected.
+        `ansina.auth.role_sync.sync_mapped_roles` is the one caller that passes a
+        provider identifier instead. If a row for this `(subject_type, subject_id,
+        role_id)` already exists under a *different* `source` (e.g. a manual `'local'`
+        grant), `ON CONFLICT ... DO NOTHING` leaves it exactly as it was — its
+        `source` is never overwritten, so a provider can neither take over nor later
+        revoke a manually-made grant.
+        """
         if not self._subject_exists(subject_type, subject_id):
             raise UnknownSubjectError(
                 f"no {subject_type.value} with id {subject_id!r} exists"
@@ -604,11 +619,12 @@ class RoleAssignmentRepository:
         with self._db.transaction() as cursor:
             cursor.execute(
                 """
-                INSERT INTO role_assignments (id, subject_type, subject_id, role_id)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO role_assignments
+                    (id, subject_type, subject_id, role_id, source)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (subject_type, subject_id, role_id) DO NOTHING
                 """,
-                (assignment_id, subject_type.value, subject_id, role_id),
+                (assignment_id, subject_type.value, subject_id, role_id, source),
             )
             row = cursor.execute(
                 "SELECT * FROM role_assignments "
@@ -618,14 +634,33 @@ class RoleAssignmentRepository:
         return RoleAssignment.from_row(row)
 
     def unassign(
-        self, subject_type: SubjectType, subject_id: str, role_id: str
+        self,
+        subject_type: SubjectType,
+        subject_id: str,
+        role_id: str,
+        *,
+        source: str | None = None,
     ) -> None:
+        """`source` (issue #42) is keyword-only and optional — `None` (the default)
+        deletes the assignment regardless of who created it, preserving every existing
+        caller's behavior (an Admin detaching a role by hand works no matter its
+        origin). `ansina.auth.role_sync.sync_mapped_roles` passes its own provider
+        name, so it can only ever remove the rows it itself owns.
+        """
         with self._db.transaction() as cursor:
-            cursor.execute(
-                "DELETE FROM role_assignments "
-                "WHERE subject_type = ? AND subject_id = ? AND role_id = ?",
-                (subject_type.value, subject_id, role_id),
-            )
+            if source is None:
+                cursor.execute(
+                    "DELETE FROM role_assignments "
+                    "WHERE subject_type = ? AND subject_id = ? AND role_id = ?",
+                    (subject_type.value, subject_id, role_id),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM role_assignments "
+                    "WHERE subject_type = ? AND subject_id = ? AND role_id = ? "
+                    "AND source = ?",
+                    (subject_type.value, subject_id, role_id, source),
+                )
 
     def list_for_subject(
         self, subject_type: SubjectType, subject_id: str
@@ -680,6 +715,27 @@ class RoleAssignmentRepository:
         )
         return frozenset(row["id"] for row in rows)
 
+    def role_ids_for_subject(
+        self, subject_type: SubjectType, subject_id: str, *, source: str
+    ) -> frozenset[str]:
+        """Every role id directly assigned to `subject_id` whose `source` equals
+        `source` exactly (issue #42) — the provider-scoped read half of
+        `ansina.auth.role_sync.sync_mapped_roles`'s diff. Deliberately narrower than
+        `list_for_subject` (which is source-blind and returns full `Role`s): a sync
+        must never see a `'local'` or other-provider row, so there is no unscoped
+        variant of this query to misuse by omitting a filter.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                "SELECT role_id FROM role_assignments "
+                "WHERE subject_type = ? AND subject_id = ? AND source = ?",
+                (subject_type.value, subject_id, source),
+            )
+            .fetchall()
+        )
+        return frozenset(row["role_id"] for row in rows)
+
     def roles_for_user(self, user_id: str) -> list[Role]:
         """Every role reachable by `user_id`, direct or via group membership."""
         rows = (
@@ -699,6 +755,77 @@ class RoleAssignmentRepository:
             .fetchall()
         )
         return [Role.from_row(row) for row in rows]
+
+
+class RoleMappingRepository:
+    """CRUD on `role_mappings` (issue #42) — the IdP claim -> role table, unique on
+    `(provider, claim, value, role_id)` (`idx_role_mappings_tuple`). Ships empty and
+    unused until #43's OIDC login exchange calls `ansina.auth.role_sync
+    .sync_mapped_roles`, which reads it via `list_for_provider`.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def list_all(self) -> list[RoleMapping]:
+        rows = (
+            self._db.connection()
+            .execute("SELECT * FROM role_mappings ORDER BY provider, claim, value")
+            .fetchall()
+        )
+        return [RoleMapping.from_row(row) for row in rows]
+
+    def list_for_provider(self, provider: str) -> list[RoleMapping]:
+        """Every mapping for `provider` — the sync read `sync_mapped_roles` matches
+        a login's claims against.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                "SELECT * FROM role_mappings WHERE provider = ? ORDER BY claim, value",
+                (provider,),
+            )
+            .fetchall()
+        )
+        return [RoleMapping.from_row(row) for row in rows]
+
+    def get(self, mapping_id: str) -> RoleMapping | None:
+        row = (
+            self._db.connection()
+            .execute("SELECT * FROM role_mappings WHERE id = ?", (mapping_id,))
+            .fetchone()
+        )
+        return RoleMapping.from_row(row) if row is not None else None
+
+    def create(
+        self, provider: str, claim: str, value: str, role_id: str
+    ) -> RoleMapping:
+        """Raises `DuplicateError` (409) if `(provider, claim, value, role_id)`
+        already exists — `idx_role_mappings_tuple` is the backstop, same
+        try/except-around-`IntegrityError` shape as `RoleRepository.create`.
+        """
+        mapping_id = _new_id()
+        try:
+            with self._db.transaction() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO role_mappings (id, provider, claim, value, role_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (mapping_id, provider, claim, value, role_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise DuplicateError(
+                f"a mapping for {provider!r}/{claim!r}={value!r} -> {role_id!r} "
+                "already exists"
+            ) from exc
+        mapping = self.get(mapping_id)
+        assert mapping is not None  # unreachable — just inserted, in a committed txn
+        return mapping
+
+    def delete(self, mapping_id: str) -> None:
+        with self._db.transaction() as cursor:
+            cursor.execute("DELETE FROM role_mappings WHERE id = ?", (mapping_id,))
 
 
 class CredentialRepository:

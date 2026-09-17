@@ -39,6 +39,7 @@ def test_fresh_database_reaches_the_latest_version(db: Database) -> None:
         (4, "user_tombstone"),
         (5, "resource_verbs"),
         (6, "totp_credential"),
+        (7, "role_mapping_provenance"),
     ]
 
 
@@ -47,7 +48,7 @@ def test_second_run_is_idempotent(db: Database) -> None:
     run_migrations(db)
 
     rows = db.connection().execute("SELECT version FROM schema_version").fetchall()
-    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6]
+    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7]
 
 
 def test_applies_only_pending_migrations(db: Database, tmp_path: Path) -> None:
@@ -230,6 +231,43 @@ def test_only_one_totp_credential_per_user_is_allowed(db: Database) -> None:
         conn.execute(
             "INSERT INTO credentials (id, user_id, type, hash) "
             "VALUES ('c2', 'u1', 'totp', 'v1:c:d')"
+        )
+
+
+def test_role_assignment_source_defaults_to_local(db: Database) -> None:
+    """Issue #42 AC: `source` backfills to `'local'` for every historical row —
+    inserted here without naming the column, exactly as a pre-0007 row would have
+    been written.
+    """
+    run_migrations(db)
+    conn = db.connection()
+    conn.execute("INSERT INTO users (id, username) VALUES ('u1', 'alice')")
+    conn.execute("INSERT INTO roles (id, slug, name) VALUES ('r1', 'read', 'Read')")
+
+    conn.execute(
+        "INSERT INTO role_assignments (id, subject_type, subject_id, role_id) "
+        "VALUES ('a1', 'user', 'u1', 'r1')"
+    )
+
+    (source,) = conn.execute(
+        "SELECT source FROM role_assignments WHERE id = 'a1'"
+    ).fetchone()
+    assert source == "local"
+
+
+def test_role_mappings_unique_index_rejects_a_duplicate_tuple(db: Database) -> None:
+    run_migrations(db)
+    conn = db.connection()
+    conn.execute("INSERT INTO roles (id, slug, name) VALUES ('r1', 'read', 'Read')")
+    conn.execute(
+        "INSERT INTO role_mappings (id, provider, claim, value, role_id) "
+        "VALUES ('m1', 'acme', 'groups', 'ops', 'r1')"
+    )
+
+    with pytest.raises(Exception, match="UNIQUE constraint failed"):
+        conn.execute(
+            "INSERT INTO role_mappings (id, provider, claim, value, role_id) "
+            "VALUES ('m2', 'acme', 'groups', 'ops', 'r1')"
         )
 
 

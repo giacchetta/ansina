@@ -39,6 +39,7 @@ from ansina.api.routes.me import router as me_router
 from ansina.api.routes.openapi import router as openapi_router
 from ansina.api.routes.permissions import router as permissions_router
 from ansina.api.routes.role_assignments import router as role_assignments_router
+from ansina.api.routes.role_mappings import router as role_mappings_router
 from ansina.api.routes.roles import router as roles_router
 from ansina.api.routes.sudo import router as sudo_router
 from ansina.api.routes.users import router as users_router
@@ -235,6 +236,7 @@ def create_app(
     app.include_router(groups_router)
     app.include_router(role_assignments_router)
     app.include_router(roles_router)
+    app.include_router(role_mappings_router)
     app.include_router(permissions_router)
     app.include_router(me_router)
 

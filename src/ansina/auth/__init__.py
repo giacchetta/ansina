@@ -47,6 +47,7 @@ from ansina.auth.management import (
 )
 from ansina.auth.principal import AuthMethod, Principal
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
+from ansina.auth.role_sync import sync_mapped_roles
 from ansina.auth.step_up import (
     PasswordStepUpVerifier,
     StepUpRegistry,
@@ -101,6 +102,7 @@ __all__ = [
     "parse_iso",
     "reconcile_builtin_roles",
     "resolve_principal",
+    "sync_mapped_roles",
     "sync_resources",
     "utc_now",
 ]

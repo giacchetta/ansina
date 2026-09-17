@@ -216,6 +216,9 @@ class RoleAssignment:
     """A row in `role_assignments`. `subject_id` refers to a `users.id` or
     `"groups".id` depending on `subject_type` — deliberately not a foreign key (SQLite
     has no polymorphic FK); the repository layer verifies the subject exists.
+    `source` (issue #42) is `'local'` for a row created through the ordinary
+    role-assignment routes, or a provider identifier for one
+    `ansina.auth.role_sync.sync_mapped_roles` created and owns.
     """
 
     id: str
@@ -223,6 +226,7 @@ class RoleAssignment:
     subject_id: str
     role_id: str
     created_at: str
+    source: str = "local"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Self:
@@ -232,6 +236,34 @@ class RoleAssignment:
             subject_id=row["subject_id"],
             role_id=row["role_id"],
             created_at=row["created_at"],
+            source=row["source"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMapping:
+    """A row in `role_mappings` (issue #42) — an IdP claim value mapped onto a role.
+    `ansina.auth.role_sync.sync_mapped_roles` resolves which of a login's claims match
+    a `(provider, claim, value)` triple and reconciles the user's `role_assignments`
+    rows for that `provider` to match exactly. `(provider, claim, value, role_id)` is
+    unique (`idx_role_mappings_tuple`), so a duplicate submission is a 409, not a
+    second, redundant row.
+    """
+
+    id: str
+    provider: str
+    claim: str
+    value: str
+    role_id: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Self:
+        return cls(
+            id=row["id"],
+            provider=row["provider"],
+            claim=row["claim"],
+            value=row["value"],
+            role_id=row["role_id"],
         )
 
 

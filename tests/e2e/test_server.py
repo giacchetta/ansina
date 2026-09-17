@@ -218,6 +218,8 @@ def test_openapi_schema(server: str) -> None:
         "/auth/groups/{group_id}/roles/{role_id}",
         "/auth/roles",
         "/auth/roles/{role_id}",
+        "/auth/role-mappings",
+        "/auth/role-mappings/{mapping_id}",
         "/auth/permissions",
         "/auth/me",
         "/auth/me/tokens",
@@ -695,6 +697,58 @@ def test_custom_role_round_trip(authed_server: str) -> None:
     assert delete_response.status_code == 204
 
 
+def test_role_mapping_round_trip(authed_server: str) -> None:
+    """Issue #42's headline flow, black-box end to end: the configured admin creates
+    a custom role, maps an IdP claim onto it, sees it listed, a duplicate submission
+    is refused (409), and deleting it removes it from the catalog.
+    """
+    admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+
+    created_role = httpx.post(
+        f"{authed_server}/auth/roles",
+        headers=admin_headers,
+        json={"slug": "e2e-ops", "name": "Ops"},
+    )
+    assert created_role.status_code == 201
+    role_id = created_role.json()["id"]
+
+    mapping_payload = {
+        "provider": "acme",
+        "claim": "groups",
+        "value": "ops-team",
+        "role_id": role_id,
+    }
+    created_mapping = httpx.post(
+        f"{authed_server}/auth/role-mappings",
+        headers=admin_headers,
+        json=mapping_payload,
+    )
+    assert created_mapping.status_code == 201
+    mapping_id = created_mapping.json()["id"]
+
+    listed = httpx.get(f"{authed_server}/auth/role-mappings", headers=admin_headers)
+    assert listed.status_code == 200
+    assert any(m["id"] == mapping_id for m in listed.json())
+
+    duplicate = httpx.post(
+        f"{authed_server}/auth/role-mappings",
+        headers=admin_headers,
+        json=mapping_payload,
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "ansina.auth.duplicate"
+
+    deleted = httpx.delete(
+        f"{authed_server}/auth/role-mappings/{mapping_id}", headers=admin_headers
+    )
+    assert deleted.status_code == 204
+
+    after_delete = httpx.get(
+        f"{authed_server}/auth/role-mappings", headers=admin_headers
+    )
+    assert all(m["id"] != mapping_id for m in after_delete.json())
+
+
 def test_self_service_token_round_trip(authed_server: str) -> None:
     """Issue #28's headline flow, black-box end to end: mint a token via
     `POST /auth/me/tokens`, authenticate a real request with it, watch
@@ -933,9 +987,10 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         # (1,) = storage's own bookkeeping table (issue #6); (2,) = the RBAC identity
         # model (issue #24); (3,) = sudo grants/lockouts (issue #26); (4,) = the user
         # deletion tombstone (issue #27); (5,) = the resource-served-verbs column
-        # (issue #38); (6,) = the totp credential type (issue #41) — bump this
+        # (issue #38); (6,) = the totp credential type (issue #41); (7,) = role-mapping
+        # provenance + the role_mappings unique index (issue #42) — bump this
         # alongside `storage/migrations/` whenever a new migration lands.
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,)]
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -945,7 +1000,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # still exactly these rows — nothing re-applied
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,)]
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:

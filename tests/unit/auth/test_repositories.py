@@ -13,6 +13,7 @@ from ansina.auth.repositories import (
     ResourceRepository,
     RoleAssignmentRepository,
     RoleInUseError,
+    RoleMappingRepository,
     RolePermissionRepository,
     RoleRepository,
     SudoGrantRepository,
@@ -738,6 +739,126 @@ def test_user_ids_with_role_excludes_inactive_and_deleted_users(
     assert assignments.user_ids_with_role(admin.id) == frozenset()
 
 
+# --- RoleAssignmentRepository: `source` provenance (issue #42) ------------------
+
+
+def test_assign_defaults_source_to_local(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("read", "Read", "")
+
+    assignment = assignments.assign(SubjectType.USER, user.id, role.id)
+
+    assert assignment.source == "local"
+
+
+def test_assign_accepts_an_explicit_source(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+
+    assignment = assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert assignment.source == "acme"
+
+
+def test_assign_conflict_never_overwrites_an_existing_rows_source(
+    db: Database,
+) -> None:
+    """A `'local'` grant for the same (subject, role) is never silently taken over
+    by a provider's own `assign` call — `ON CONFLICT ... DO NOTHING` leaves the
+    original row, `source` included, exactly as it was.
+    """
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="local")
+
+    assignment = assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert assignment.source == "local"
+
+
+def test_unassign_with_no_source_removes_regardless_of_origin(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assignments.unassign(SubjectType.USER, user.id, role.id)
+
+    assert assignments.roles_for_user(user.id) == []
+
+
+def test_unassign_scoped_to_source_leaves_a_different_source_untouched(
+    db: Database,
+) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="local")
+
+    assignments.unassign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert [r.id for r in assignments.roles_for_user(user.id)] == [role.id]
+
+
+def test_unassign_scoped_to_source_removes_a_matching_row(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assignments.unassign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert assignments.roles_for_user(user.id) == []
+
+
+def test_role_ids_for_subject_is_scoped_to_the_given_source(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    local_role = roles.create("read", "Read", "")
+    acme_role = roles.create("write", "Write", "")
+    other_provider_role = roles.create("maintain", "Maintain", "")
+    assignments.assign(SubjectType.USER, user.id, local_role.id, source="local")
+    assignments.assign(SubjectType.USER, user.id, acme_role.id, source="acme")
+    assignments.assign(
+        SubjectType.USER, user.id, other_provider_role.id, source="other"
+    )
+
+    assert assignments.role_ids_for_subject(
+        SubjectType.USER, user.id, source="acme"
+    ) == frozenset({acme_role.id})
+
+
+def test_role_ids_for_subject_is_empty_for_an_unused_source(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("read", "Read", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="local")
+
+    assert (
+        assignments.role_ids_for_subject(SubjectType.USER, user.id, source="acme")
+        == frozenset()
+    )
+
+
 # --- CredentialRepository -------------------------------------------------------
 
 
@@ -1346,3 +1467,111 @@ def test_sudo_lockout_clear(db: Database) -> None:
 
 def test_sudo_lockout_clear_of_unknown_user_is_a_no_op(db: Database) -> None:
     SudoLockoutRepository(db).clear("nobody")
+
+
+# --- RoleMappingRepository (issue #42) -------------------------------------------
+
+
+def test_role_mapping_create_and_get(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+
+    created = mappings.create("acme", "groups", "ops-team", role.id)
+
+    assert created.provider == "acme"
+    assert created.claim == "groups"
+    assert created.value == "ops-team"
+    assert created.role_id == role.id
+    fetched = mappings.get(created.id)
+    assert fetched == created
+
+
+def test_role_mapping_get_of_unknown_id_returns_none(db: Database) -> None:
+    assert RoleMappingRepository(db).get("no-such-mapping") is None
+
+
+def test_role_mapping_create_refuses_a_duplicate_tuple(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    mappings.create("acme", "groups", "ops-team", role.id)
+
+    with pytest.raises(DuplicateError):
+        mappings.create("acme", "groups", "ops-team", role.id)
+
+
+def test_role_mapping_same_triple_different_role_is_not_a_duplicate(
+    db: Database,
+) -> None:
+    """The unique index is on the full `(provider, claim, value, role_id)` tuple —
+    the same claim mapping onto two different roles is two distinct rows.
+    """
+    roles = RoleRepository(db)
+    ops_role = roles.create("ops", "Ops", "")
+    other_role = roles.create("other", "Other", "")
+    mappings = RoleMappingRepository(db)
+
+    mappings.create("acme", "groups", "ops-team", ops_role.id)
+    mappings.create("acme", "groups", "ops-team", other_role.id)
+
+    assert len(mappings.list_all()) == 2
+
+
+def test_role_mapping_list_all_orders_by_provider_claim_value(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    mappings.create("zeta", "groups", "b", role.id)
+    mappings.create("acme", "groups", "b", role.id)
+    mappings.create("acme", "groups", "a", role.id)
+
+    listed = mappings.list_all()
+
+    assert [(m.provider, m.value) for m in listed] == [
+        ("acme", "a"),
+        ("acme", "b"),
+        ("zeta", "b"),
+    ]
+
+
+def test_role_mapping_list_for_provider_is_scoped(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    mappings.create("acme", "groups", "ops-team", role.id)
+    mappings.create("other", "groups", "ops-team", role.id)
+
+    listed = mappings.list_for_provider("acme")
+
+    assert [m.provider for m in listed] == ["acme"]
+
+
+def test_role_mapping_list_for_provider_empty_when_none_match(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    RoleMappingRepository(db).create("acme", "groups", "ops-team", role.id)
+
+    assert RoleMappingRepository(db).list_for_provider("other") == []
+
+
+def test_role_mapping_delete_removes_the_row(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    created = mappings.create("acme", "groups", "ops-team", role.id)
+
+    mappings.delete(created.id)
+
+    assert mappings.get(created.id) is None
+
+
+def test_role_mapping_delete_of_unknown_id_is_a_no_op(db: Database) -> None:
+    RoleMappingRepository(db).delete("no-such-mapping")
+
+
+def test_role_mapping_cascades_away_when_its_role_is_deleted(db: Database) -> None:
+    """`role_mappings.role_id REFERENCES roles (id) ON DELETE CASCADE` — deleting an
+    unassigned, unmapped-anywhere-else custom role takes its mappings with it.
+    """
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    created = mappings.create("acme", "groups", "ops-team", role.id)
+
+    RoleRepository(db).delete(role.id)
+
+    assert mappings.get(created.id) is None
