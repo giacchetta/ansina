@@ -193,13 +193,15 @@ flowchart TD
     M1["M1 — Heart & Brain\nHeartRuntime port + MLX/llama-cpp adapters\nautonomic tick loop\nBrainProvider port + OpenAI-compatible adapter"]
     M2["M2 — RBAC & Access Control\nUser/Group/Role data model + permission model\nauthorization enforcement + route-coverage gate\nsudo step-up\nUsers/Groups/Roles management API"]
     M4["M4 — Ansina CLI/TUI\nansina-tui: TUI (bare) + CLI (subcommands)\nme.* self-resources: /auth/me · /auth/me/tokens\ndependency-isolated client, HTTP only"]
-    M3["M3 — Custom Roles & Federated Identity\ncustom roles · OIDC · TOTP step-up\n(#37-#43 done — #44/#45 remain: TUI auth + docs)"]
+    M3["M3 — Custom Roles & Federated Identity\ncustom roles · OIDC · TOTP step-up\n(#37-#45, #47 — shipped)"]
+    M5["M5 — Password Login & Third-Party API Clients\npassword login for third-party web/API clients\n(plan-only, no issues filed yet)"]
     BL["Backlog — Experiments\nHeart as triage / curator / extractor\n(gated behind a quality benchmark)"]
     M0 --> M1
     M0 --> M2
     M2 --> M4
     M4 -->|"runs before M3, despite the number"| M3
     M2 --> M3
+    M3 -.scope split off.-> M5
     M1 -.unlocks, not required for.-> BL
 ```
 
@@ -207,7 +209,9 @@ M0 exit criterion: `uv run ansina` serves an authenticated REST API with health 
 
 M4 depends only on M2's auth model (it adds `GET /auth/me` and self-service tokens on top of the `Principal`/role machinery M2 ships — nothing from M1) and its exit criterion is operational, not a data model: `ansina-tui` can log in against a live daemon, show identity and sudo state, mint/revoke its own credentials, and reach every route via `api`, all without the daemon's own entry point (`ansina`) changing at all.
 
-Tracking issues live in GitHub milestones `M0 — Skeleton`, `M1 — Heart & Brain`, `M2 — RBAC & Access Control`, `M3 — Custom Roles & Federated Identity`, `M4 — Ansina CLI/TUI`, `Backlog — Experiments`.
+M5 is plan-only: no issues are filed yet, mirroring how M3 itself started. It exists to hold two things M3's own planning explicitly declined to build alongside custom roles, OIDC, and TOTP: an unauthenticated password-login route for third-party web/API clients, and whatever throttling/password-policy/CORS work a route that's Ansina's first unauthenticated surface beyond the two health probes deserves. **This is not a reversal of §2's WebUI refusal above.** §2 refuses *Ansina itself* shipping a WebUI, or any privileged side channel reaching internals the public REST API doesn't expose — the concern is a second, less-audited way in. A third-party dashboard built against M5's password-login route talks to the same public REST API `ansina-tui` already does, nothing more; it is the identical externally-facing-API-only shape, just written by someone other than this project.
+
+Tracking issues live in GitHub milestones `M0 — Skeleton`, `M1 — Heart & Brain`, `M2 — RBAC & Access Control`, `M3 — Custom Roles & Federated Identity`, `M4 — Ansina CLI/TUI`, `M5 — Password Login & Third-Party API Clients`, `Backlog — Experiments`.
 
 ---
 

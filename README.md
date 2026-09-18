@@ -4,7 +4,7 @@
 
 > A self-owned AI agent: an always-on in-process **Heart** plus a remote **Brain**, exposed over a single internal REST API. No chat channels.
 
-> **Status:** M3 — Custom Roles & Federated Identity in progress (issues #37–#44 done): admin-defined custom roles, TOTP step-up, role-mapping provenance, OAuth 2.0/OIDC federated login (`POST /auth/oidc/login` + `GET /auth/oidc/callback`), and `ansina-tui`'s multi-factor `auth sudo`/`auth totp` commands — see the [roadmap](docs/architecture/blueprint.md#4-roadmap). M4 (`ansina-tui`, issues #30, #28, #31–#35) and M2 (RBAC & Access Control) landed before it.
+> **Status:** M3 — Custom Roles & Federated Identity complete (issues #37–#45, #47): admin-defined custom roles, the fail-closed sudo gate, TOTP step-up, role-mapping provenance, OAuth 2.0/OIDC federated login (`POST /auth/oidc/login` + `GET /auth/oidc/callback`), and `ansina-tui`'s multi-factor `auth sudo`/`auth totp` commands — see the [roadmap](docs/architecture/blueprint.md#4-roadmap). M4 (`ansina-tui`, issues #30, #28, #31–#35) ran before it despite the number; M2 (RBAC & Access Control) landed before both. Up next: M5 — Password Login & Third-Party API Clients (plan-only, no issues filed yet).
 
 ```mermaid
 flowchart LR
