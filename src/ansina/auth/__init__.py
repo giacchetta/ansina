@@ -45,6 +45,14 @@ from ansina.auth.management import (
     assert_not_bootstrap_identity,
     assert_totp_not_enrolled,
 )
+from ansina.auth.oidc import OidcProviderError, OidcTokenError
+from ansina.auth.oidc_login import (
+    OidcCallbackError,
+    OidcLoginService,
+    OidcProvisioningError,
+    OidcStateError,
+    build_oidc_login_service,
+)
 from ansina.auth.principal import AuthMethod, Principal
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
 from ansina.auth.role_sync import sync_mapped_roles
@@ -73,6 +81,12 @@ __all__ = [
     "ForbiddenError",
     "LastAdminError",
     "NotFoundError",
+    "OidcCallbackError",
+    "OidcLoginService",
+    "OidcProviderError",
+    "OidcProvisioningError",
+    "OidcStateError",
+    "OidcTokenError",
     "PasswordStepUpVerifier",
     "Principal",
     "SelfEscalationError",
@@ -92,6 +106,7 @@ __all__ = [
     "assert_totp_not_enrolled",
     "authorize",
     "build_authenticators",
+    "build_oidc_login_service",
     "build_step_up_verifiers",
     "build_sudo_service",
     "ensure_bootstrap_admin",

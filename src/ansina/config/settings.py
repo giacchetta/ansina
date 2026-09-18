@@ -293,6 +293,101 @@ def _token_entropy_bits_per_char(value: str) -> float:
     return -sum((n / length) * math.log2(n / length) for n in counts.values())
 
 
+class OidcSettings(BaseModel):
+    """OAuth 2.0 / OIDC federated login exchange settings, consumed by issue #43's
+    `ansina.auth.oidc`/`ansina.auth.oidc_login` and served over `POST /auth/oidc/login`
+    + `GET /auth/oidc/callback`.
+
+    `enabled=False` (the default) means `build_oidc_login_service` returns `None` and
+    `app.state.oidc` stays `None` — same shape as `HeartSettings.enabled`/
+    `BrainSettings.enabled` — and the two OIDC routes answer 503 rather than attempting
+    a code flow against nothing. Unlike Heart/Brain, enabling this performs no boot-time
+    network call: an unreachable or misconfigured IdP must never stop Ansina from
+    booting, only fail the individual login attempt.
+
+    `client_secret` is env-only, the same "`SecretStr` in TOML is a startup error" rule
+    every other secret already follows — no new exemption; `_AnsinaTomlSource` already
+    enforces this generically via `_walk_secret_paths`, so no new code is needed for it.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = False
+    issuer: str = ""
+    client_id: str = ""
+    client_secret: SecretStr | None = None
+    redirect_uri: str = ""
+    scopes: tuple[str, ...] = ("openid", "profile", "email")
+
+    @field_validator("issuer")
+    @classmethod
+    def _strip_trailing_slash(cls, value: str) -> str:
+        """A real IdP's discovery document publishes its own `issuer` without a
+        trailing slash (and an ID token's `iss` claim must match that exactly, per
+        the OIDC spec's strict string-identity comparison) — so an operator who
+        copy-pastes an issuer URL *with* one would otherwise fail discovery and token
+        validation alike, unconditionally, against an otherwise perfectly healthy
+        IdP. Normalized once, here, the same "clean at load time" treatment
+        `DatabaseSettings._resolve_path`/`HeartSettings._resolve_paths` already give
+        a config value with an analogous footgun.
+        """
+        return value.rstrip("/")
+
+    # How long the Ansina `api_token` minted at the end of a successful login stays
+    # valid (issue #39's `ttl_seconds` seam, issue #43's first HTTP-reachable caller of
+    # it) — mirrors `SudoSettings.ttl_seconds`'s own per-feature TTL knob rather than
+    # reusing an unrelated one.
+    token_ttl_seconds: float = Field(default=3600.0, gt=0)
+    # How long an issued `state`/`nonce`/PKCE `code_verifier` (`oidc_login_states`) may
+    # sit unconsumed before `OidcLoginStateRepository.take` treats it as expired —
+    # bounds how long a browser may sit on the IdP's login page before the flow must be
+    # restarted.
+    state_ttl_seconds: float = Field(default=600.0, gt=0)
+    # Timeout for every outbound call to the IdP (discovery, JWKS, token exchange) —
+    # `ansina.auth.oidc.HttpxOidcClient`'s own `httpx.Client(timeout=...)`.
+    http_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_enabled_requires_credentials(self) -> OidcSettings:
+        """`enabled=True` with any of `issuer`/`client_id`/`client_secret`/
+        `redirect_uri` left unset can never actually authenticate anyone — refused as
+        a boot-time `ConfigError`, the same "fail loudly, don't discover this at the
+        first login attempt" reasoning
+        `SecuritySettings._validate_admin_username_pairing` already applies. Raised
+        directly (not `ValueError`) since this is a model-level check with no single
+        field `loc` for `_format_validation_error` to key on — the same pattern that
+        pairing check and `Settings._refuse_unsafe_bind` both use.
+        """
+        if not self.enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("issuer", self.issuer),
+                ("client_id", self.client_id),
+                ("redirect_uri", self.redirect_uri),
+            )
+            if not value
+        ]
+        if self.client_secret is None:
+            missing.append("client_secret")
+        if missing:
+            fields = ", ".join(f"security.oidc.{name}" for name in missing)
+            raise ConfigError(
+                _render_report(
+                    [
+                        f"{fields}: required when security.oidc.enabled = true "
+                        "(set ANSINA_SECURITY__OIDC__ISSUER, "
+                        "ANSINA_SECURITY__OIDC__CLIENT_ID, "
+                        "ANSINA_SECURITY__OIDC__CLIENT_SECRET, and "
+                        "ANSINA_SECURITY__OIDC__REDIRECT_URI, or leave "
+                        "security.oidc.enabled = false)"
+                    ]
+                )
+            )
+        return self
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -343,6 +438,7 @@ class SecuritySettings(BaseModel):
     password: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
     sudo: SudoSettings = Field(default_factory=SudoSettings)
     encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
+    oidc: OidcSettings = Field(default_factory=OidcSettings)
 
     # Issue #28: how long a token's `last_used_at` may go stale before the next
     # successful authentication updates it — coalesced rather than written on every

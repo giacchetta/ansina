@@ -26,6 +26,12 @@ from ansina.auth.management import (
     TokenAlreadyIssuedError,
     TotpAlreadyEnrolledError,
 )
+from ansina.auth.oidc import OidcProviderError, OidcTokenError
+from ansina.auth.oidc_login import (
+    OidcCallbackError,
+    OidcProvisioningError,
+    OidcStateError,
+)
 from ansina.auth.repositories import (
     BuiltinRoleError,
     DuplicateError,
@@ -46,6 +52,7 @@ CODE_INTERNAL_ERROR = "ansina.internal_error"
 CODE_NOT_READY = "ansina.not_ready"
 CODE_UNAUTHORIZED = "ansina.unauthorized"
 CODE_HEART_DISABLED = "ansina.heart.disabled"
+CODE_OIDC_DISABLED = "ansina.auth.oidc_disabled"
 CODE_FORBIDDEN = ForbiddenError.code
 CODE_SUDO_REQUIRED = SudoRequiredError.code
 CODE_SUDO_LOCKED_OUT = SudoLockedOutError.code
@@ -62,6 +69,11 @@ CODE_ROLE_IN_USE = RoleInUseError.code
 CODE_INVALID_GRANT = InvalidGrantError.code
 CODE_TOTP_ALREADY_ENROLLED = TotpAlreadyEnrolledError.code
 CODE_ENCRYPTION_KEY_MISSING = EncryptionKeyMissingError.code
+CODE_OIDC_STATE_INVALID = OidcStateError.code
+CODE_OIDC_CALLBACK_FAILED = OidcCallbackError.code
+CODE_OIDC_TOKEN_INVALID = OidcTokenError.code
+CODE_OIDC_PROVIDER_UNAVAILABLE = OidcProviderError.code
+CODE_OIDC_PROVISIONING_REFUSED = OidcProvisioningError.code
 
 # `AnsinaError` subclass -> HTTP status. Looked up by walking the MRO, so a future
 # subclass with no entry of its own inherits its nearest mapped ancestor's status
@@ -117,6 +129,30 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # submitted grant names an uncatalogued, non-grantable, or unserved (resource,
     # verb) pair (issue #40), alongside FastAPI's own validation-error 422s.
     InvalidGrantError: 422,
+    # 400: the callback request itself is malformed — a missing code/state, or the
+    # identity provider redirected back with its own `error=` (issue #43). Unlike
+    # `CODE_UNAUTHORIZED`, this is never about the caller's own identity — no
+    # identity has been established yet at `GET /auth/oidc/callback`.
+    OidcCallbackError: 400,
+    # 400, same family — the `state` presented to the callback is unknown, expired,
+    # or already redeemed. Distinguishable from `OidcCallbackError` by `code` alone:
+    # this one means "the request shape was fine, but this specific login can't be
+    # completed," the other means "this request could never have been valid."
+    OidcStateError: 400,
+    # 401: the id_token itself failed validation (signature/issuer/audience/expiry/
+    # nonce) — the caller presented *something*, but it doesn't hold up, the same
+    # family `CODE_UNAUTHORIZED` already uses for "a credential was presented and
+    # rejected."
+    OidcTokenError: 401,
+    # 403, same family as ForbiddenError — a validated login was refused at the
+    # provisioning step (a tombstoned/deactivated/bootstrap-identity target). The
+    # caller proved who the IdP says they are; that's not the same as being welcome.
+    OidcProvisioningError: 403,
+    # 502: the identity provider (or the network path to it) failed to hold up its
+    # end — discovery, JWKS, or token-exchange transport/status/JSON failure. A
+    # server-to-server failure Ansina has no control over, the standard "upstream
+    # failed" status for a service acting as a client to another one.
+    OidcProviderError: 502,
 }
 
 

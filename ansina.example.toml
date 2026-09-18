@@ -181,3 +181,45 @@ lockout_seconds = 900.0
 # existing TOTP enrollments must be cleared (DELETE /auth/users/{id}/totp) and
 # re-enrolled from scratch.
 # key = "..."
+
+[security.oidc]
+# OAuth 2.0 / OIDC federated login (issue #43): POST /auth/oidc/login starts a login,
+# GET /auth/oidc/callback completes it. Both are public routes (reachable with no
+# bearer token, even with security.enabled = true) -- a caller can't hold a token
+# before it has logged in. false (the default) means neither route does anything but
+# answer 503; enabling performs no network call at boot, so an unreachable or
+# misconfigured IdP only ever fails an individual login, never startup.
+enabled = false
+
+# The IdP's issuer URL -- discovery is fetched from
+# "<issuer>/.well-known/openid-configuration" on every login (never cached, so an
+# IdP's own key rotation takes effect on the very next one). A trailing slash is
+# stripped automatically. Required when enabled = true.
+# issuer = "https://idp.example.com"
+
+# This client's registered id with the IdP. Required when enabled = true.
+# client_id = "ansina"
+
+# Where the IdP redirects back to after login -- must match what's registered with
+# the IdP. Required when enabled = true.
+# redirect_uri = "http://127.0.0.1:8000/auth/oidc/callback"
+
+# Scopes requested at the authorization endpoint. "openid" is required by the OIDC
+# spec itself; "profile"/"email" back the preferred_username/email fallback chain
+# just-in-time provisioning derives a username from.
+scopes = ["openid", "profile", "email"]
+
+# How long the api_token minted at the end of a successful login stays valid.
+token_ttl_seconds = 3600.0
+
+# How long an issued state/nonce/PKCE code_verifier may sit unconsumed (i.e. how long
+# a browser may sit on the IdP's login page) before the flow must be restarted.
+state_ttl_seconds = 600.0
+
+# Timeout for every outbound call to the IdP (discovery, JWKS, token exchange).
+http_timeout_seconds = 10.0
+
+# client_secret, like every secret, is env-only -- setting it in this file is a hard
+# startup error. Required together with issuer/client_id/redirect_uri when
+# enabled = true:
+#   ANSINA_SECURITY__OIDC__CLIENT_SECRET=...

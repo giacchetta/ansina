@@ -38,6 +38,23 @@ dependencies = [
     # Ships prebuilt wheels for macos-arm64 and linux-x86_64, so neither CI leg compiles
     # from source.
     "cryptography>=44",
+    # OIDC ID-token signature validation against the issuer's JWKS (issue #43,
+    # `ansina.auth.oidc`) — approved during M3 planning alongside `cryptography` above,
+    # whose `[crypto]` extra it pulls (no extra wheel-compilation cost, since
+    # `cryptography` is already a base dependency). Pure Python otherwise. Floor is the
+    # actual latest release as of this issue (verified against PyPI, not an arbitrary
+    # older one) — the same "floor = the version actually resolved/tested against"
+    # reasoning `openai`'s and `mlx-lm`'s floors above already follow.
+    "pyjwt[crypto]>=2.14",
+    # The OIDC login exchange's transport for discovery/JWKS/token-endpoint calls
+    # (issue #43, `ansina.auth.oidc`). Approved as a *base* dependency during #43's
+    # planning — until now it was only a transitive dependency (via `openai`/
+    # `huggingface-hub`) and a `[dependency-groups] dev` pin for `tests/e2e`; declaring
+    # it directly here makes that existing, already-resolved dependency honest rather
+    # than adding real new surface. See `[dependency-groups] dev` below — the duplicate
+    # floor there is removed so the two can't drift. Floor is the actual latest release
+    # as of this issue, same reasoning as `pyjwt` above.
+    "httpx>=0.28.1",
 ]
 
 # `mlx` — the only HeartRuntime adapter shipped by issue #10 — is an *optional* extra,
@@ -67,7 +84,6 @@ dev = [
     "pytest>=9.1",
     "pytest-asyncio>=1.4",
     "pytest-cov>=7.1",
-    "httpx>=0.27",
     "httpx2>=2.12",
     "pre-commit>=4.0",
 ]

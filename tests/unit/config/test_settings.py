@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from ansina.config import ConfigError, load_settings
 from ansina.config.settings import (
     EncryptionSettings,
+    OidcSettings,
     SecuritySettings,
     ServerSettings,
     _token_entropy_bits_per_char,
@@ -713,3 +714,129 @@ def test_encryption_settings_accepts_an_explicit_none_key() -> None:
     settings = EncryptionSettings(key=None)
 
     assert settings.key is None
+
+
+# --- issue #43: [security.oidc] -----------------------------------------------------
+
+_OIDC_ENV = {
+    "ANSINA_SECURITY__OIDC__ENABLED": "true",
+    "ANSINA_SECURITY__OIDC__ISSUER": "https://idp.example.com",
+    "ANSINA_SECURITY__OIDC__CLIENT_ID": "ansina",
+    "ANSINA_SECURITY__OIDC__CLIENT_SECRET": "a-strong-test-secret-value",
+    "ANSINA_SECURITY__OIDC__REDIRECT_URI": "https://ansina.example.com/auth/oidc/callback",
+}
+
+
+def test_oidc_disabled_by_default(clean_env: None, tmp_cwd: Path) -> None:
+    settings = load_settings()
+
+    assert settings.security.oidc.enabled is False
+    assert settings.security.oidc.issuer == ""
+    assert settings.security.oidc.scopes == ("openid", "profile", "email")
+    assert settings.security.oidc.token_ttl_seconds == 3600.0
+    assert settings.security.oidc.state_ttl_seconds == 600.0
+    assert settings.security.oidc.http_timeout_seconds == 10.0
+
+
+def test_oidc_enabled_with_every_field_loads_fine(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key, value in _OIDC_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    settings = load_settings()
+
+    assert settings.security.oidc.enabled is True
+    assert settings.security.oidc.issuer == "https://idp.example.com"
+    assert settings.security.oidc.client_id == "ansina"
+    assert settings.security.oidc.client_secret is not None
+    assert (
+        settings.security.oidc.client_secret.get_secret_value()
+        == "a-strong-test-secret-value"
+    )
+    assert (
+        settings.security.oidc.redirect_uri
+        == "https://ansina.example.com/auth/oidc/callback"
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    ["ANSINA_SECURITY__OIDC__ISSUER", "ANSINA_SECURITY__OIDC__CLIENT_ID"],
+)
+def test_oidc_enabled_without_a_required_field_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, missing_key: str
+) -> None:
+    for key, value in _OIDC_ENV.items():
+        if key != missing_key:
+            monkeypatch.setenv(key, value)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.oidc" in str(exc_info.value)
+
+
+def test_oidc_enabled_without_a_redirect_uri_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key, value in _OIDC_ENV.items():
+        if key != "ANSINA_SECURITY__OIDC__REDIRECT_URI":
+            monkeypatch.setenv(key, value)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.oidc.redirect_uri" in str(exc_info.value)
+
+
+def test_oidc_enabled_without_a_client_secret_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key, value in _OIDC_ENV.items():
+        if key != "ANSINA_SECURITY__OIDC__CLIENT_SECRET":
+            monkeypatch.setenv(key, value)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.oidc.client_secret" in str(exc_info.value)
+
+
+def test_oidc_client_secret_in_toml_file_rejected(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[security.oidc]\nclient_secret = "should-not-be-here"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_SECURITY__OIDC__CLIENT_SECRET" in message
+    assert "should-not-be-here" not in message
+
+
+def test_oidc_issuer_trailing_slash_is_stripped(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key, value in _OIDC_ENV.items():
+        monkeypatch.setenv(
+            key, value + "/" if key == "ANSINA_SECURITY__OIDC__ISSUER" else value
+        )
+
+    settings = load_settings()
+
+    assert settings.security.oidc.issuer == "https://idp.example.com"
+
+
+def test_oidc_settings_disabled_accepts_a_none_client_secret_directly() -> None:
+    """`_validate_enabled_requires_credentials`'s early return for `enabled=False` —
+    `OidcSettings` can be constructed directly with every field left at its default.
+    """
+    settings = OidcSettings()
+
+    assert settings.enabled is False
+    assert settings.client_secret is None

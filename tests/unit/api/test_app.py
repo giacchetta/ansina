@@ -12,6 +12,7 @@ from ansina.api.app import create_app
 from ansina.auth.clock import iso, utc_now
 from ansina.auth.encryption import EncryptionKeyMissingError
 from ansina.auth.models import RoleSlug
+from ansina.auth.oidc_login import OidcLoginService
 from ansina.auth.repositories import (
     CredentialRepository,
     ExternalIdentityRepository,
@@ -267,6 +268,83 @@ def test_brain_enabled_independent_of_heart(
     assert app.state.brain is not None
 
 
+def test_oidc_disabled_by_default_no_state(app: FastAPI) -> None:
+    assert app.state.oidc is None
+
+
+def test_oidc_factory_builds_a_service_when_enabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`oidc_factory` receives `(db, settings)`, not just `settings` like `heart_
+    factory`/`brain_factory` — see `create_app`'s own docstring for why.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__OIDC__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_SECURITY__OIDC__ISSUER", "https://idp.example.com")
+    monkeypatch.setenv("ANSINA_SECURITY__OIDC__CLIENT_ID", "ansina")
+    monkeypatch.setenv("ANSINA_SECURITY__OIDC__CLIENT_SECRET", "a-test-secret")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__OIDC__REDIRECT_URI", "https://ansina.example.com/callback"
+    )
+    settings = load_settings()
+    received: list[tuple[Database, Settings]] = []
+
+    class _FakeClient:
+        def get_json(self, url: str) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("never called by this test")
+
+        def post_form(
+            self, url: str, form: object, *, auth: object
+        ) -> dict[str, object]:  # pragma: no cover
+            raise AssertionError("never called by this test")
+
+    def _factory(db: Database, oidc_settings: Settings) -> OidcLoginService:
+        received.append((db, oidc_settings))
+        return OidcLoginService(db, oidc_settings.security.oidc, client=_FakeClient())
+
+    app = create_app(settings, oidc_factory=_factory)
+
+    assert isinstance(app.state.oidc, OidcLoginService)
+    assert received == [(app.state.db, settings)]
+
+
+def test_oidc_factory_not_called_manually_but_build_returns_none_when_disabled(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    """The default `oidc_factory` (`build_oidc_login_service`) is always *called* —
+    unlike `heart_factory`/`brain_factory`, which `create_app` itself skips calling
+    when disabled — but it returns `None` internally, so `app.state.oidc` still ends
+    up `None` with no network probe and no boot-time failure mode.
+    """
+    app = create_app(load_settings())
+
+    assert app.state.oidc is None
+
+
+def test_oidc_route_reachable_with_no_bearer_token_when_enabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deliberate `PUBLIC_PATHS` widening (issue #43), proven end to end through
+    `create_app`'s real middleware stack rather than just asserting membership in the
+    `PUBLIC_PATHS` set — auth is enforced, and the OIDC routes are still reachable.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", "configured-admin")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__API_TOKEN", "unit-test-token-0123456789abcdefgh"
+    )
+    settings = load_settings()
+    assert settings.security.enabled is True
+
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        response = client.post("/auth/oidc/login")
+
+    # 503 (disabled), never 401 — proves the request passed BearerAuthMiddleware with
+    # no token at all rather than being rejected for lacking one.
+    assert response.status_code == 503
+    assert response.json()["code"] == "ansina.auth.oidc_disabled"
+
+
 def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
     with TestClient(app):
         # Inside the lifespan: migrated and usable.
@@ -275,7 +353,7 @@ def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
             .execute("SELECT version FROM schema_version")
             .fetchall()
         )
-        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7]
+        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8]
 
     # Outside the `with` block, lifespan shutdown has run — the database is closed.
     with pytest.raises(StorageError, match="after close"):

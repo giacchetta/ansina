@@ -40,6 +40,7 @@ def test_fresh_database_reaches_the_latest_version(db: Database) -> None:
         (5, "resource_verbs"),
         (6, "totp_credential"),
         (7, "role_mapping_provenance"),
+        (8, "oidc_login_state"),
     ]
 
 
@@ -48,7 +49,7 @@ def test_second_run_is_idempotent(db: Database) -> None:
     run_migrations(db)
 
     rows = db.connection().execute("SELECT version FROM schema_version").fetchall()
-    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7]
+    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_applies_only_pending_migrations(db: Database, tmp_path: Path) -> None:

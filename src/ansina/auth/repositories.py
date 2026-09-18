@@ -28,6 +28,7 @@ from ansina.auth.models import (
     CredentialType,
     ExternalIdentity,
     Group,
+    OidcLoginState,
     Resource,
     Role,
     RoleAssignment,
@@ -1276,3 +1277,62 @@ class ExternalIdentityRepository:
         identity = self.get_by_provider_subject(provider, subject)
         assert identity is not None  # unreachable — just inserted, in a committed txn
         return identity
+
+
+class OidcLoginStateRepository:
+    """CRUD on `oidc_login_states` (issue #43) — the in-flight state one
+    authorization-code login carries between `POST /auth/oidc/login` and
+    `GET /auth/oidc/callback`. See `storage/migrations/0008_oidc_login_state.sql` and
+    `auth.models.OidcLoginState` for what each column defends against. Timestamps are
+    always caller-supplied ISO 8601 strings (`auth.clock`), never a SQL-side `now` —
+    the same discipline `SudoGrantRepository` already follows, for the same reason:
+    expiry stays driven by whatever clock the caller passes, real or fake.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def create(
+        self, state: str, nonce: str, code_verifier: str, *, expires_at: str
+    ) -> OidcLoginState:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO oidc_login_states (state, nonce, code_verifier, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (state, nonce, code_verifier, expires_at),
+            )
+            row = cursor.execute(
+                "SELECT * FROM oidc_login_states WHERE state = ?", (state,)
+            ).fetchone()
+        return OidcLoginState.from_row(row)
+
+    def take(self, state: str, *, now: str) -> OidcLoginState | None:
+        """Read-and-delete `state` in one transaction, so every row is single-use: a
+        replayed `state` value finds nothing the second time, indistinguishable from
+        one that never existed. Returns `None` if `state` is unknown or its
+        `expires_at` is not after `now` — an expired-but-still-present row is deleted
+        here too, the same "found it, and it's gone either way" shape.
+        """
+        with self._db.transaction() as cursor:
+            row = cursor.execute(
+                "SELECT * FROM oidc_login_states WHERE state = ?", (state,)
+            ).fetchone()
+            if row is None:
+                return None
+            cursor.execute("DELETE FROM oidc_login_states WHERE state = ?", (state,))
+        login_state = OidcLoginState.from_row(row)
+        if login_state.expires_at <= now:
+            return None
+        return login_state
+
+    def delete_expired(self, *, now: str) -> None:
+        """Sweeps rows nobody ever redeemed — an abandoned browser tab, a crashed IdP
+        round trip. `take()` above already self-cleans the common case (a state that
+        *is* redeemed, eventually); this is for the ones that never are.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM oidc_login_states WHERE expires_at <= ?", (now,)
+            )

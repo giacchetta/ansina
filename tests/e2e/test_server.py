@@ -6,6 +6,8 @@ Never imports `ansina.api` internals (blueprint §5) — this is the gate that a
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 import signal
@@ -13,15 +15,21 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 # The one exception to this module's "never import `ansina.api` internals" rule
 # (blueprint §5): `ansina.auth.hashing` is the domain-layer credential-hashing
@@ -57,6 +65,154 @@ def _free_port() -> int:
         sock.bind(("127.0.0.1", 0))
         port: int = sock.getsockname()[1]
         return port
+
+
+def _b64url_uint(value: int) -> str:
+    raw = value.to_bytes((value.bit_length() + 7) // 8, "big")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+_MOCK_IDP_KID = "e2e-mock-idp-key"
+
+
+class _MockIdpHandler(BaseHTTPRequestHandler):
+    """Serves the three endpoints issue #43's login exchange calls: OIDC discovery,
+    JWKS, and the token endpoint. `self.server.idp` is the owning `MockIdp` (below,
+    set by `_mock_idp()`) — this handler only ever reads its already-computed
+    documents and its mutable `next_claims`.
+    """
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass  # keep pytest's captured output free of the stdlib server's own logging
+
+    def _send_json(self, status: int, body: dict[str, Any]) -> None:
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_GET(self) -> None:
+        idp: MockIdp = self.server.idp  # type: ignore[attr-defined]
+        path = urlparse(self.path).path
+        if path == "/.well-known/openid-configuration":
+            self._send_json(200, idp.discovery_document())
+        elif path == "/jwks":
+            self._send_json(200, idp.jwks_document())
+        else:
+            self._send_json(404, {"error": "not_found"})
+
+    def do_POST(self) -> None:
+        idp: MockIdp = self.server.idp  # type: ignore[attr-defined]
+        path = urlparse(self.path).path
+        if path != "/token":
+            self._send_json(404, {"error": "not_found"})
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)  # form body itself is unused — real code is opaque here
+        id_token = idp.sign_id_token()
+        self._send_json(
+            200,
+            {"id_token": id_token, "access_token": "unused", "token_type": "Bearer"},
+        )
+
+
+@dataclass
+class MockIdp:
+    """A real (if minimal) OIDC IdP on loopback — the black-box counterpart to
+    `tests/conftest.py`'s `FakeOidcHttpClient`: `python -m ansina` (a real subprocess)
+    talks to this over a real socket, so this is the thing that actually proves
+    issue #43's login exchange works end to end, not just that its pieces are wired
+    correctly in isolation.
+
+    `next_claims` is mutated by the test between logins to change what the *next*
+    `/token` response's `id_token` asserts — the seam AC #4's "claims change between
+    two logins for the same subject" scenario drives directly.
+    """
+
+    port: int
+    key: rsa.RSAPrivateKey = field(
+        default_factory=lambda: rsa.generate_private_key(
+            public_exponent=65537, key_size=2048
+        )
+    )
+    next_claims: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def issuer(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def discovery_document(self) -> dict[str, Any]:
+        return {
+            "issuer": self.issuer,
+            "authorization_endpoint": f"{self.issuer}/authorize",
+            "token_endpoint": f"{self.issuer}/token",
+            "jwks_uri": f"{self.issuer}/jwks",
+        }
+
+    def jwks_document(self) -> dict[str, Any]:
+        numbers = self.key.public_key().public_numbers()
+        return {
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "use": "sig",
+                    "kid": _MOCK_IDP_KID,
+                    "alg": "RS256",
+                    "n": _b64url_uint(numbers.n),
+                    "e": _b64url_uint(numbers.e),
+                }
+            ]
+        }
+
+    def sign_id_token(self) -> str:
+        now = int(time.time())
+        claims = {
+            "iss": self.issuer,
+            "aud": self.next_claims.get("aud", "e2e-oidc-client"),
+            "sub": self.next_claims.get("sub", "e2e-subject"),
+            "exp": now + 300,
+            "iat": now,
+            **self.next_claims,
+        }
+        return jwt.encode(
+            claims, self.key, algorithm="RS256", headers={"kid": _MOCK_IDP_KID}
+        )
+
+    def set_next_login(
+        self, *, sub: str, nonce: str, extra_claims: dict[str, Any] | None = None
+    ) -> None:
+        """Configure what the *next* `/token` call's `id_token` will assert —
+        `nonce` must be the value ansina's own `POST /auth/oidc/login` response
+        embedded in `authorization_url`, since `GET /auth/oidc/callback` validates
+        it against what it stored server-side.
+        """
+        self.next_claims = {
+            "aud": "e2e-oidc-client",
+            "sub": sub,
+            "nonce": nonce,
+            **(extra_claims or {}),
+        }
+
+
+@contextmanager
+def _mock_idp() -> Iterator[MockIdp]:
+    port = _free_port()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), _MockIdpHandler)
+    idp = MockIdp(port=port)
+    httpd.idp = idp  # type: ignore[attr-defined]  # handlers read `self.server` back as `idp`
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield idp
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
+
+
+def _nonce_from_authorization_url(authorization_url: str) -> str:
+    return parse_qs(urlparse(authorization_url).query)["nonce"][0]
 
 
 @dataclass
@@ -158,6 +314,44 @@ def authed_server(tmp_path: Path) -> Iterator[str]:
         yield srv.base_url
 
 
+_E2E_OIDC_CLIENT_ID = "e2e-oidc-client"
+_E2E_OIDC_CLIENT_SECRET = "e2e-oidc-client-secret-value"
+
+
+@pytest.fixture
+def mock_idp() -> Iterator[MockIdp]:
+    """A real OIDC IdP on loopback (issue #43) — see `MockIdp`'s own docstring for
+    why this, not just another fake, is what actually proves the login exchange
+    against a real (if local) HTTP server.
+    """
+    with _mock_idp() as idp:
+        yield idp
+
+
+@pytest.fixture
+def oidc_server(tmp_path: Path, mock_idp: MockIdp) -> Iterator[str]:
+    """Auth enforced (configured admin, issue #28) *and* OIDC enabled against
+    `mock_idp` — the combination issue #43's own e2e test needs: an Admin to create
+    role mappings with, plus a real IdP to log in against. `redirect_uri` is never
+    actually dialed — this test drives `GET /auth/oidc/callback` directly rather
+    than following a browser redirect, the same way a real browser flow's final hop
+    would land on it.
+    """
+    with _launch_server(
+        tmp_path,
+        env={
+            "ANSINA_SECURITY__ADMIN_USERNAME": _E2E_ADMIN_USERNAME,
+            "ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN,
+            "ANSINA_SECURITY__OIDC__ENABLED": "true",
+            "ANSINA_SECURITY__OIDC__ISSUER": mock_idp.issuer,
+            "ANSINA_SECURITY__OIDC__CLIENT_ID": _E2E_OIDC_CLIENT_ID,
+            "ANSINA_SECURITY__OIDC__CLIENT_SECRET": _E2E_OIDC_CLIENT_SECRET,
+            "ANSINA_SECURITY__OIDC__REDIRECT_URI": "http://127.0.0.1:9/callback",
+        },
+    ) as srv:
+        yield srv.base_url
+
+
 def test_healthz(server: str) -> None:
     response = httpx.get(f"{server}/healthz")
 
@@ -225,6 +419,8 @@ def test_openapi_schema(server: str) -> None:
         "/auth/me/tokens",
         "/auth/me/tokens/{token_id}",
         "/auth/me/totp",
+        "/auth/oidc/login",
+        "/auth/oidc/callback",
     }
 
 
@@ -749,6 +945,127 @@ def test_role_mapping_round_trip(authed_server: str) -> None:
     assert all(m["id"] != mapping_id for m in after_delete.json())
 
 
+def test_oidc_first_login_provisions_and_claims_refresh_updates_roles(
+    oidc_server: str, mock_idp: MockIdp
+) -> None:
+    """Issue #43's own headline flow, black-box end to end against a real (if
+    local) IdP process — not a fake, a second real HTTP server `python -m ansina`'s
+    subprocess actually dials. Covers the issue's own acceptance criteria: first-
+    login provisioning, reuse on a later login for the same subject, replay
+    rejection, and AC #4 — a role granted from a first login's claims is revoked on
+    a second login whose claims no longer match, without ever touching the
+    configured admin's own (`source='local'`) role.
+    """
+    admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+
+    roles = httpx.get(f"{oidc_server}/auth/roles", headers=admin_headers).json()
+    read_role_id = next(r["id"] for r in roles if r["slug"] == "read")
+    mapping = httpx.post(
+        f"{oidc_server}/auth/role-mappings",
+        headers=admin_headers,
+        json={
+            "provider": mock_idp.issuer,
+            "claim": "groups",
+            "value": "ops-team",
+            "role_id": read_role_id,
+        },
+    )
+    assert mapping.status_code == 201
+
+    # First login: "groups" includes "ops-team" -> the mapped role is granted.
+    login1 = httpx.post(f"{oidc_server}/auth/oidc/login")
+    assert login1.status_code == 200
+    login1_body = login1.json()
+    nonce1 = _nonce_from_authorization_url(login1_body["authorization_url"])
+    mock_idp.set_next_login(
+        sub="e2e-oidc-subject",
+        nonce=nonce1,
+        extra_claims={"preferred_username": "e2e-oidc-user", "groups": ["ops-team"]},
+    )
+
+    callback1 = httpx.get(
+        f"{oidc_server}/auth/oidc/callback",
+        params={"code": "e2e-auth-code-1", "state": login1_body["state"]},
+    )
+    assert callback1.status_code == 200
+    callback1_body = callback1.json()
+    assert callback1_body["expires_at"] is not None
+    token1 = callback1_body["token"]
+
+    me1 = httpx.get(
+        f"{oidc_server}/auth/me", headers={"Authorization": f"Bearer {token1}"}
+    )
+    assert me1.status_code == 200
+    assert me1.json()["username"] == "e2e-oidc-user"
+    assert me1.json()["roles"] == ["read"]
+
+    # Exactly one user was provisioned, not one per login.
+    users = httpx.get(f"{oidc_server}/auth/users", headers=admin_headers).json()
+    assert sum(1 for u in users if u["username"] == "e2e-oidc-user") == 1
+
+    # The `state` from the first login can never be redeemed twice.
+    replayed = httpx.get(
+        f"{oidc_server}/auth/oidc/callback",
+        params={"code": "e2e-auth-code-1", "state": login1_body["state"]},
+    )
+    assert replayed.status_code == 400
+    assert replayed.json()["code"] == "ansina.auth.oidc_state_invalid"
+
+    # Second login, same subject, "groups" no longer includes "ops-team" -> AC #4:
+    # the mapped role is revoked on this login, not just left stale until it expires.
+    login2 = httpx.post(f"{oidc_server}/auth/oidc/login")
+    login2_body = login2.json()
+    nonce2 = _nonce_from_authorization_url(login2_body["authorization_url"])
+    mock_idp.set_next_login(
+        sub="e2e-oidc-subject",
+        nonce=nonce2,
+        extra_claims={"preferred_username": "e2e-oidc-user", "groups": []},
+    )
+
+    callback2 = httpx.get(
+        f"{oidc_server}/auth/oidc/callback",
+        params={"code": "e2e-auth-code-2", "state": login2_body["state"]},
+    )
+    assert callback2.status_code == 200
+    token2 = callback2.json()["token"]
+
+    me2 = httpx.get(
+        f"{oidc_server}/auth/me", headers={"Authorization": f"Bearer {token2}"}
+    )
+    # The role granting `me.profile:GET` is gone — 403, not 200.
+    assert me2.status_code == 403
+    assert me2.json()["code"] == "ansina.forbidden"
+
+    # The configured admin (`_E2E_TOKEN`, a `source='local'` assignment) is
+    # unaffected by any of the above.
+    still_admin = httpx.get(f"{oidc_server}/auth/me", headers=admin_headers)
+    assert still_admin.status_code == 200
+    assert "admin" in still_admin.json()["roles"]
+
+
+def test_oidc_callback_rejects_a_forged_nonce(
+    oidc_server: str, mock_idp: MockIdp
+) -> None:
+    """AC #2, end to end against the real subprocess: a mismatched nonce is rejected
+    before any provisioning runs — no user is ever created for it.
+    """
+    login = httpx.post(f"{oidc_server}/auth/oidc/login")
+    login_body = login.json()
+    mock_idp.set_next_login(sub="e2e-forged-subject", nonce="not-the-real-nonce-at-all")
+
+    response = httpx.get(
+        f"{oidc_server}/auth/oidc/callback",
+        params={"code": "e2e-forged-code", "state": login_body["state"]},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.auth.oidc_token_invalid"
+
+    admin_headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+    users = httpx.get(f"{oidc_server}/auth/users", headers=admin_headers).json()
+    assert all(u["username"] != "e2e-forged-subject" for u in users)
+
+
 def test_self_service_token_round_trip(authed_server: str) -> None:
     """Issue #28's headline flow, black-box end to end: mint a token via
     `POST /auth/me/tokens`, authenticate a real request with it, watch
@@ -988,9 +1305,10 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         # model (issue #24); (3,) = sudo grants/lockouts (issue #26); (4,) = the user
         # deletion tombstone (issue #27); (5,) = the resource-served-verbs column
         # (issue #38); (6,) = the totp credential type (issue #41); (7,) = role-mapping
-        # provenance + the role_mappings unique index (issue #42) — bump this
-        # alongside `storage/migrations/` whenever a new migration lands.
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
+        # provenance + the role_mappings unique index (issue #42); (8,) = the in-flight
+        # OIDC login state table (issue #43) — bump this alongside `storage/
+        # migrations/` whenever a new migration lands.
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -1000,7 +1318,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # still exactly these rows — nothing re-applied
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,)]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:

@@ -374,3 +374,30 @@ class ExternalIdentity:
             subject=row["subject"],
             created_at=row["created_at"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OidcLoginState:
+    """A row in `oidc_login_states` (issue #43) — the in-flight state for one
+    authorization-code login, between `POST /auth/oidc/login` issuing it and
+    `GET /auth/oidc/callback` redeeming it via `OidcLoginStateRepository.take`, which
+    deletes the row in the same transaction it reads it, making every row single-use.
+    See `storage/migrations/0008_oidc_login_state.sql` for what each column defends
+    against.
+    """
+
+    state: str
+    nonce: str
+    code_verifier: str
+    created_at: str
+    expires_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Self:
+        return cls(
+            state=row["state"],
+            nonce=row["nonce"],
+            code_verifier=row["code_verifier"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+        )

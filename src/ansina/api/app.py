@@ -36,6 +36,7 @@ from ansina.api.routes.groups import router as groups_router
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
 from ansina.api.routes.me import router as me_router
+from ansina.api.routes.oidc import router as oidc_router
 from ansina.api.routes.openapi import router as openapi_router
 from ansina.api.routes.permissions import router as permissions_router
 from ansina.api.routes.role_assignments import router as role_assignments_router
@@ -44,7 +45,9 @@ from ansina.api.routes.roles import router as roles_router
 from ansina.api.routes.sudo import router as sudo_router
 from ansina.api.routes.users import router as users_router
 from ansina.auth import (
+    OidcLoginService,
     build_authenticators,
+    build_oidc_login_service,
     build_sudo_service,
     ensure_bootstrap_admin,
     ensure_configured_admin,
@@ -75,6 +78,9 @@ def create_app(
         [Settings, HeartRuntime], TickLifecycle
     ] = build_tick_loop,
     brain_factory: Callable[[Settings], BrainProvider] = build_brain_provider,
+    oidc_factory: Callable[
+        [Database, Settings], OidcLoginService | None
+    ] = build_oidc_login_service,
 ) -> FastAPI:
     """Build the FastAPI application. Loads `Settings` via `load_settings()` when none
     is given — tests and `python -m ansina` both pass an already-loaded one instead, so
@@ -91,6 +97,12 @@ def create_app(
     no dependency on the Heart being enabled. Nothing calls `BrainProvider.stream()`
     yet (the tick loop's `escalate` branch stays log-only until a follow-up issue wires
     it up), so `app.state.brain` exists only for that future consumer to reach.
+    `oidc_factory` (default `ansina.auth.build_oidc_login_service`, issue #43) takes
+    `(db, settings)` rather than `heart_factory`/`brain_factory`'s bare `(settings,)` —
+    unlike either, it needs a repository handle at construction time, not just at
+    first use — and, unlike both, is never gated by an external `if .enabled:` here:
+    `build_oidc_login_service` already returns `None` internally, so tests can inject
+    a factory that swaps in a fake `OidcHttpClient` without duplicating that check.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
@@ -104,6 +116,12 @@ def create_app(
     # resolution) — the same "construct once, pass in" shape `sudo` above already
     # uses.
     authenticators = build_authenticators(db, resolved_settings)
+    # Issue #43: `None` when `[security.oidc] enabled = false` (the default) — the
+    # same "`None` when off" shape `heart`/`brain` below use. Unlike either of those,
+    # building this performs no network call at all (not even a capability probe), so
+    # there's nothing to fail loudly about at assembly time — an unreachable or
+    # misconfigured IdP only ever fails an individual login attempt, never boot.
+    oidc = oidc_factory(db, resolved_settings)
 
     # Built here, not inside `lifespan`, so a `HeartUnavailableError` (issue #10) is
     # raised while the app is still being assembled — before uvicorn ever binds a
@@ -207,6 +225,7 @@ def create_app(
     app.state.tick_loop = tick_loop
     app.state.brain = brain
     app.state.sudo = sudo
+    app.state.oidc = oidc
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
@@ -231,6 +250,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(heart_router)
     app.include_router(openapi_router)
+    app.include_router(oidc_router)
     app.include_router(sudo_router)
     app.include_router(users_router)
     app.include_router(groups_router)

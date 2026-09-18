@@ -45,6 +45,22 @@ def test_public_paths_reachable_without_token(
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("method", "path"), [("POST", "/auth/oidc/login"), ("GET", "/auth/oidc/callback")]
+)
+def test_oidc_paths_reachable_without_token(
+    method: str, path: str, authed_client: TestClient
+) -> None:
+    """Issue #43: the first non-health-probe `PUBLIC_PATHS` entries — reachable with
+    no bearer token even when auth is enforced. `authed_client`'s app has OIDC
+    disabled (the default), so the route itself answers 503 — the point here is only
+    that `BearerAuthMiddleware` never intercepts the request for lacking a token.
+    """
+    response = authed_client.request(method, path)
+
+    assert response.status_code != 401
+
+
 @pytest.mark.parametrize("path", ["/version", "/openapi.json"])
 def test_protected_paths_require_token(path: str, authed_client: TestClient) -> None:
     response = authed_client.get(path)
