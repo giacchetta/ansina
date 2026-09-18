@@ -101,6 +101,30 @@ def test_token_already_issued_and_not_found_have_recognized_messages() -> None:
     assert not_found.message == "No such token."
 
 
+def test_step_up_unavailable_names_the_enroll_fix() -> None:
+    problem = parse_problem({"code": "ansina.auth.step_up_unavailable"})
+    assert problem is not None
+    assert "auth totp enroll" in problem.message
+
+
+def test_self_escalation_and_role_in_use_have_recognized_messages() -> None:
+    self_escalation = parse_problem({"code": "ansina.auth.self_escalation"})
+    role_in_use = parse_problem({"code": "ansina.auth.role_in_use"})
+    assert self_escalation is not None
+    assert role_in_use is not None
+    assert "grant a permission" in self_escalation.message
+    assert "detach it first" in role_in_use.message
+
+
+def test_totp_codes_have_recognized_messages() -> None:
+    already_enrolled = parse_problem({"code": "ansina.auth.totp_already_enrolled"})
+    key_missing = parse_problem({"code": "ansina.auth.encryption_key_missing"})
+    assert already_enrolled is not None
+    assert key_missing is not None
+    assert "auth totp disable" in already_enrolled.message
+    assert "security.encryption" in key_missing.message
+
+
 def test_exit_code_for_maps_401_and_403_specifically() -> None:
     assert exit_code_for(401) == ExitCode.NOT_AUTHENTICATED
     assert exit_code_for(403) == ExitCode.FORBIDDEN

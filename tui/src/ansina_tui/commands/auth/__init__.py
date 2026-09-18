@@ -1,5 +1,6 @@
 """The `ansina-tui auth` command group: login, status, logout, sudo, and the nested
-`token mint|list|revoke`. See issue #32.
+`token mint|list|revoke` and `totp enroll|status|disable`. See issue #32, and #44 for
+the `totp` group.
 """
 
 from __future__ import annotations
@@ -11,6 +12,11 @@ from ansina_tui.commands.auth.login import login_command, logout_command
 from ansina_tui.commands.auth.status import auth_status_command
 from ansina_tui.commands.auth.sudo import sudo_command
 from ansina_tui.commands.auth.tokens import list_command, mint_command, revoke_command
+from ansina_tui.commands.auth.totp import (
+    disable_command,
+    enroll_command,
+    totp_status_command,
+)
 from ansina_tui.exits import ExitCode
 
 auth_app = typer.Typer(
@@ -24,6 +30,12 @@ token_app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
     help="Mint, list, and revoke your own API tokens.",
+)
+totp_app = typer.Typer(
+    name="totp",
+    no_args_is_help=False,
+    invoke_without_command=True,
+    help="Enroll, check, and disable your own TOTP second factor.",
 )
 
 
@@ -46,6 +58,11 @@ def _token_main(ctx: typer.Context) -> None:
     _require_subcommand(ctx)
 
 
+@totp_app.callback(invoke_without_command=True)
+def _totp_main(ctx: typer.Context) -> None:
+    _require_subcommand(ctx)
+
+
 auth_app.command("login")(login_command)
 auth_app.command("logout")(logout_command)
 auth_app.command("status")(auth_status_command)
@@ -53,4 +70,8 @@ auth_app.command("sudo")(sudo_command)
 token_app.command("mint")(mint_command)
 token_app.command("list")(list_command)
 token_app.command("revoke")(revoke_command)
+totp_app.command("enroll")(enroll_command)
+totp_app.command("status")(totp_status_command)
+totp_app.command("disable")(disable_command)
 auth_app.add_typer(token_app, name="token")
+auth_app.add_typer(totp_app, name="totp")
