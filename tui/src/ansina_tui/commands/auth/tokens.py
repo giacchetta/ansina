@@ -16,21 +16,13 @@ from dataclasses import replace
 import typer
 
 from ansina_tui.client import ApiResponse, HostUnreachableError
+from ansina_tui.commands.auth.common import require_credential
 from ansina_tui.config import HostEntry, InsecureCredentialsFileError
 from ansina_tui.context import AppContext
 from ansina_tui.exits import ExitCode
 from ansina_tui.failures import report
 from ansina_tui.output import Emitter
 from ansina_tui.session import Session, build_client, resolve_session, save_entry
-
-
-def _require_credential(session: Session, emitter: Emitter) -> None:
-    if session.token is None:
-        emitter.error(
-            f"No credential stored for {session.host}. Run `ansina-tui auth login` "
-            "first."
-        )
-        raise typer.Exit(ExitCode.NOT_AUTHENTICATED)
 
 
 def mint_command(
@@ -54,7 +46,7 @@ def mint_command(
     except InsecureCredentialsFileError as exc:
         emitter.error(str(exc))
         raise typer.Exit(ExitCode.USAGE) from exc
-    _require_credential(session, emitter)
+    require_credential(session, emitter)
 
     try:
         with build_client(session) as client:
@@ -120,7 +112,7 @@ def list_command(ctx: typer.Context) -> None:
     except InsecureCredentialsFileError as exc:
         emitter.error(str(exc))
         raise typer.Exit(ExitCode.USAGE) from exc
-    _require_credential(session, emitter)
+    require_credential(session, emitter)
 
     try:
         with build_client(session) as client:
@@ -185,7 +177,7 @@ def revoke_command(
     except InsecureCredentialsFileError as exc:
         emitter.error(str(exc))
         raise typer.Exit(ExitCode.USAGE) from exc
-    _require_credential(session, emitter)
+    require_credential(session, emitter)
 
     is_current = session.entry.token_id == token_id
     if is_current and not yes and not _confirm_self_revoke(session, token_id, emitter):

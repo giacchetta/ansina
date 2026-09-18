@@ -25,9 +25,10 @@ class ForbiddenError(AuthError):
 
 
 class SudoRequiredError(AuthError):
-    """`principal` holds only `maintain` (not `admin`) on a `sensitive=True` resource,
-    with no live sudo grant. Inert until issue #26 ships a way to make `sudo_active`
-    ever `True` — no route passes `sensitive=True` yet either.
+    """`principal` holds any role but `admin` on a `sensitive=True` resource, with no
+    live sudo grant. Issue #37 made this fail-closed on sensitivity alone — not on the
+    `maintain` role slug — so a custom role (#40) granting an `auth.*` permission can
+    never bypass step-up simply by not being named `maintain`.
     """
 
     code: ClassVar[str] = "ansina.auth.sudo_required"
@@ -55,7 +56,6 @@ def authorize(
 
     if (
         sensitive
-        and RoleSlug.MAINTAIN.value in principal.role_slugs
         and RoleSlug.ADMIN.value not in principal.role_slugs
         and not principal.sudo_active
     ):

@@ -52,8 +52,8 @@ def read_token(*, with_token: bool, stream: TextIO | None = None) -> str:
     return value
 
 
-def read_password(*, prompt: str = "Password", stream: TextIO | None = None) -> str:
-    """The step-up password for `auth sudo`. A piped (non-TTY) stdin is read
+def _read_secret(*, what: str, prompt: str, stream: TextIO | None) -> str:
+    """Shared by `read_password`/`read_totp_code`: a piped (non-TTY) stdin is read
     automatically; otherwise a no-echo prompt. See `read_token` for why `stream`
     resolves to `sys.stdin` in the body, not as a default-argument value."""
     stream = stream if stream is not None else sys.stdin
@@ -62,5 +62,17 @@ def read_password(*, prompt: str = "Password", stream: TextIO | None = None) -> 
     else:
         value = typer.prompt(prompt, hide_input=True)
     if not value:
-        raise SecretInputError("password")
+        raise SecretInputError(what)
     return value
+
+
+def read_password(*, prompt: str = "Password", stream: TextIO | None = None) -> str:
+    """The step-up password for `auth sudo`."""
+    return _read_secret(what="password", prompt=prompt, stream=stream)
+
+
+def read_totp_code(*, prompt: str = "TOTP code", stream: TextIO | None = None) -> str:
+    """The step-up TOTP code for `auth sudo --factor totp` (issue #44). Same
+    no-echo-prompt-or-piped-stdin discipline as `read_password` — never a flag
+    value, per `test_argv_safety.py`'s whole-tree pin."""
+    return _read_secret(what="TOTP code", prompt=prompt, stream=stream)

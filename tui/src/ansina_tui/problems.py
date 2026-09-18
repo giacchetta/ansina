@@ -17,25 +17,34 @@ from typing import Any
 from ansina_tui.exits import ExitCode
 
 # code -> human message. Sourced from:
-#   ansina.unauthorized             api/problems.py CODE_UNAUTHORIZED
-#   ansina.forbidden                 auth/authorization.py ForbiddenError.code
-#   ansina.auth.sudo_required        auth/authorization.py SudoRequiredError.code
-#   ansina.auth.sudo_locked_out      auth/sudo.py SudoLockedOutError.code
-#   ansina.auth.bootstrap_identity   auth/management.py BootstrapIdentityError.code
-#   ansina.auth.token_already_issued auth/management.py TokenAlreadyIssuedError.code
-#   ansina.auth.not_found            auth/management.py NotFoundError.code
-#   ansina.heart.disabled            api/problems.py CODE_HEART_DISABLED
-#   ansina.not_ready                 api/problems.py CODE_NOT_READY
+#   ansina.unauthorized                api/problems.py CODE_UNAUTHORIZED
+#   ansina.forbidden                    auth/authorization.py ForbiddenError.code
+#   ansina.auth.sudo_required           auth/authorization.py SudoRequiredError.code
+#   ansina.auth.sudo_locked_out         auth/sudo.py SudoLockedOutError.code
+#   ansina.auth.step_up_unavailable     auth/sudo.py StepUpUnavailableError.code
+#   ansina.auth.bootstrap_identity      auth/management.py BootstrapIdentityError.code
+#   ansina.auth.token_already_issued    auth/management.py TokenAlreadyIssuedError.code
+#   ansina.auth.totp_already_enrolled   auth/management.py TotpAlreadyEnrolledError.code
+#   ansina.auth.encryption_key_missing  auth/encryption.py EncryptionKeyMissingError
+#   ansina.auth.self_escalation         auth/management.py SelfEscalationError.code
+#   ansina.auth.role_in_use             auth/repositories.py RoleInUseError.code
+#   ansina.auth.not_found                auth/management.py NotFoundError.code
+#   ansina.heart.disabled                api/problems.py CODE_HEART_DISABLED
+#   ansina.not_ready                     api/problems.py CODE_NOT_READY
 #
 # `ansina.unauthorized` is overloaded — `POST /auth/sudo` also returns it for a wrong
-# step-up password (routes/sudo.py), where "Run `auth login`" is the wrong hint since
-# the caller is already authenticated. `commands/auth/sudo.py` overrides this one
+# step-up password/code (routes/sudo.py), where "Run `auth login`" is the wrong hint
+# since the caller is already authenticated. `commands/auth/sudo.py` overrides this one
 # message per-call rather than the table carrying two meanings for one code.
 _KNOWN_MESSAGES: dict[str, str] = {
     "ansina.unauthorized": "Not authenticated. Run `auth login` or set ANSINA_TOKEN.",
     "ansina.forbidden": "Your role doesn't grant this action.",
     "ansina.auth.sudo_required": "Sudo required. Run `ansina-tui auth sudo` first.",
     "ansina.auth.sudo_locked_out": "Sudo locked out after too many failed attempts.",
+    "ansina.auth.step_up_unavailable": (
+        "No step-up factor is enrolled for this account. Run "
+        "`ansina-tui auth totp enroll` first."
+    ),
     "ansina.auth.bootstrap_identity": (
         "The bootstrap identity is a break-glass credential capped at one token, "
         "ever — log in as the configured admin or an ordinary Admin user to mint "
@@ -44,6 +53,20 @@ _KNOWN_MESSAGES: dict[str, str] = {
     "ansina.auth.token_already_issued": (
         "That account already holds an API token. Revoke it first, or mint your "
         "own via `auth token mint` once logged in as that account."
+    ),
+    "ansina.auth.totp_already_enrolled": (
+        "TOTP is already enrolled. Run `ansina-tui auth totp disable` first if you "
+        "need to re-enroll."
+    ),
+    "ansina.auth.encryption_key_missing": (
+        "The daemon has no security.encryption key configured — TOTP can't be "
+        "enrolled until an operator sets one."
+    ),
+    "ansina.auth.self_escalation": (
+        "You can't grant a permission you don't hold yourself."
+    ),
+    "ansina.auth.role_in_use": (
+        "That role is still assigned to a user or group — detach it first."
     ),
     "ansina.auth.not_found": "No such token.",
     "ansina.heart.disabled": "The Heart is disabled on this daemon.",

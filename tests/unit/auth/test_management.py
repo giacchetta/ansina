@@ -7,15 +7,20 @@ import pytest
 from ansina.auth.bootstrap import ensure_bootstrap_admin
 from ansina.auth.management import (
     BootstrapIdentityError,
+    InvalidGrantError,
     LastAdminError,
     SelfEscalationError,
     TokenAlreadyIssuedError,
+    TotpAlreadyEnrolledError,
     assert_admin_remains,
+    assert_grants_grantable,
     assert_may_assign_role,
+    assert_may_grant_permissions,
     assert_no_existing_api_token,
     assert_not_bootstrap_identity,
+    assert_totp_not_enrolled,
 )
-from ansina.auth.models import RoleSlug, SubjectType, User, Verb
+from ansina.auth.models import CredentialType, RoleSlug, SubjectType, User, Verb
 from ansina.auth.principal import Principal
 from ansina.auth.reconciler import reconcile_builtin_roles
 from ansina.auth.repositories import (
@@ -39,7 +44,7 @@ _CALLER = User(
 
 
 def _seed_role(db: Database, slug: str, resource: str, verbs: tuple[Verb, ...]) -> str:
-    ResourceRepository(db).upsert(resource, "")
+    ResourceRepository(db).upsert(resource, "", verbs=frozenset())
     role = RoleRepository(db).ensure_builtin(slug, slug.title(), "")
     for verb in verbs:
         RolePermissionRepository(db).grant(role.id, resource, verb)
@@ -149,6 +154,112 @@ def test_can_assign_a_role_whose_grants_are_a_subset_of_the_callers(
     assert_may_assign_role(db, principal, target_role)  # must not raise
 
 
+# --- assert_may_grant_permissions (issue #40, generalizing the checks above over a ----
+# --- raw grant set rather than an existing role's, so POST/PATCH /auth/roles can run --
+# --- them at grant-edit time, not only at role-assignment time) -----------------------
+
+
+def test_non_admin_cannot_grant_an_auth_resource(db: Database) -> None:
+    ResourceRepository(db).upsert("auth.roles", "", verbs=frozenset({Verb.GET}))
+    principal = Principal(
+        user=_CALLER,
+        role_ids=frozenset(),
+        role_slugs=frozenset({RoleSlug.MAINTAIN.value}),
+    )
+
+    with pytest.raises(SelfEscalationError) as excinfo:
+        assert_may_grant_permissions(
+            db, principal, frozenset({("auth.roles", Verb.GET)})
+        )
+
+    assert excinfo.value.code == "ansina.auth.self_escalation"
+
+
+def test_admin_can_grant_an_auth_resource(db: Database) -> None:
+    admin_role_id = _seed_role(db, "admin", "auth.roles", (Verb.GET,))
+    principal = Principal(
+        user=_CALLER,
+        role_ids=frozenset({admin_role_id}),
+        role_slugs=frozenset({RoleSlug.ADMIN.value}),
+    )
+
+    assert_may_grant_permissions(
+        db, principal, frozenset({("auth.roles", Verb.GET)})
+    )  # must not raise
+
+
+def test_cannot_grant_permissions_the_caller_lacks(db: Database) -> None:
+    caller_role_id = _seed_role(db, "read", "heart.tick", (Verb.GET,))
+    principal = Principal(
+        user=_CALLER,
+        role_ids=frozenset({caller_role_id}),
+        role_slugs=frozenset({RoleSlug.READ.value}),
+    )
+
+    with pytest.raises(SelfEscalationError) as excinfo:
+        assert_may_grant_permissions(
+            db, principal, frozenset({("heart.tick", Verb.POST)})
+        )
+
+    assert excinfo.value.details["excess"]
+
+
+def test_can_grant_a_subset_of_the_callers_own_permissions(db: Database) -> None:
+    caller_role_id = _seed_role(
+        db, "write", "heart.tick", (Verb.GET, Verb.POST, Verb.PATCH)
+    )
+    principal = Principal(
+        user=_CALLER,
+        role_ids=frozenset({caller_role_id}),
+        role_slugs=frozenset({RoleSlug.WRITE.value}),
+    )
+
+    assert_may_grant_permissions(
+        db, principal, frozenset({("heart.tick", Verb.GET)})
+    )  # must not raise
+
+
+# --- assert_grants_grantable (issue #40) -------------------------------------------
+
+
+def test_refuses_an_uncatalogued_resource(db: Database) -> None:
+    with pytest.raises(InvalidGrantError) as excinfo:
+        assert_grants_grantable(db, frozenset({("no.such.resource", Verb.GET)}))
+
+    assert excinfo.value.code == "ansina.auth.invalid_grant"
+    assert "not a catalogued resource" in excinfo.value.details["invalid"][0]
+
+
+def test_refuses_a_non_grantable_self_resource(db: Database) -> None:
+    ResourceRepository(db).upsert("me.profile", "", verbs=frozenset({Verb.GET}))
+
+    with pytest.raises(InvalidGrantError) as excinfo:
+        assert_grants_grantable(db, frozenset({("me.profile", Verb.GET)}))
+
+    assert "not grantable" in excinfo.value.details["invalid"][0]
+
+
+def test_refuses_a_verb_the_resource_does_not_serve(db: Database) -> None:
+    ResourceRepository(db).upsert("system.version", "", verbs=frozenset({Verb.GET}))
+
+    with pytest.raises(InvalidGrantError) as excinfo:
+        assert_grants_grantable(db, frozenset({("system.version", Verb.POST)}))
+
+    assert "verb not served" in excinfo.value.details["invalid"][0]
+
+
+def test_allows_a_served_grantable_grant(db: Database) -> None:
+    ResourceRepository(db).upsert(
+        "heart.tick", "", verbs=frozenset({Verb.GET, Verb.POST})
+    )
+
+    assert_grants_grantable(db, frozenset({("heart.tick", Verb.GET)}))  # must not raise
+
+
+def test_allows_an_empty_grant_set(db: Database) -> None:
+    assert_grants_grantable(db, frozenset())  # must not raise
+
+
 # --- assert_admin_remains -------------------------------------------------------------
 
 
@@ -235,3 +346,30 @@ def test_allows_again_after_the_only_token_is_revoked(db: Database) -> None:
     CredentialRepository(db).delete_api_token(credential.id, user.id)
 
     assert_no_existing_api_token(db, user.id)  # must not raise
+
+
+# --- assert_totp_not_enrolled (issue #41) ---------------------------------------------
+
+
+def test_refuses_a_user_already_enrolled_in_totp(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_totp_secret(user.id, "v1:a:b")
+
+    with pytest.raises(TotpAlreadyEnrolledError) as excinfo:
+        assert_totp_not_enrolled(db, user.id)
+
+    assert excinfo.value.code == "ansina.auth.totp_already_enrolled"
+
+
+def test_allows_a_user_with_no_totp_enrollment_yet(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert_totp_not_enrolled(db, user.id)  # must not raise
+
+
+def test_allows_again_after_the_totp_credential_is_disabled(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_totp_secret(user.id, "v1:a:b")
+    CredentialRepository(db).delete_credentials(user.id, CredentialType.TOTP)
+
+    assert_totp_not_enrolled(db, user.id)  # must not raise

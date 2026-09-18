@@ -13,6 +13,7 @@ from ansina.auth.bootstrap import (
     ensure_configured_admin,
     is_bootstrap_identity,
 )
+from ansina.auth.clock import iso, utc_now
 from ansina.auth.models import CredentialType, RoleSlug
 from ansina.auth.reconciler import reconcile_builtin_roles
 from ansina.auth.repositories import (
@@ -89,7 +90,7 @@ def test_auto_generates_a_token_printed_once_that_authenticates(
 
     users = UserRepository(db).list_all()
     assert len(users) == 1
-    found = CredentialRepository(db).find_user_by_api_token(token)
+    found = CredentialRepository(db).find_user_by_api_token(token, now=iso(utc_now()))
     assert found is not None
     assert found.id == users[0].id
 
@@ -116,7 +117,9 @@ def test_auto_generated_token_is_stable_across_restarts(
     # Not reprinted on the second boot — it was already shown once, forever.
     assert _BANNER_TOKEN_PATTERN.search(second_output) is None
     assert len(UserRepository(db).list_all()) == 1
-    found = CredentialRepository(db).find_user_by_api_token(first_token.group(1))
+    found = CredentialRepository(db).find_user_by_api_token(
+        first_token.group(1), now=iso(utc_now())
+    )
     assert found is not None
 
 
@@ -237,7 +240,9 @@ def test_re_enabling_regenerates_a_credential_when_currently_credential_less(
     output = capsys.readouterr().out
     match = _BANNER_TOKEN_PATTERN.search(output)
     assert match is not None, f"regeneration banner not found:\n{output}"
-    found = CredentialRepository(db).find_user_by_api_token(match.group(1))
+    found = CredentialRepository(db).find_user_by_api_token(
+        match.group(1), now=iso(utc_now())
+    )
     assert found is not None
     assert found.id == bootstrap.user_id
 
@@ -297,6 +302,21 @@ def test_bootstrap_credential_is_an_api_token_not_a_password(
     assert row["type"] == CredentialType.API_TOKEN.value
 
 
+def test_bootstrap_credential_never_expires(
+    db: Database, clean_env: None, tmp_cwd: Path
+) -> None:
+    """Issue #39 AC: every existing token-issuing call path is unaffected —
+    `auth.bootstrap`'s own `create_api_token` calls never pass `expires_at`.
+    """
+    reconcile_builtin_roles(db)
+
+    ensure_bootstrap_admin(db, _settings_auto_generate())
+
+    users = UserRepository(db).list_all()
+    credential = CredentialRepository(db).list_api_tokens(users[0].id)[0]
+    assert credential.expires_at is None
+
+
 # --- is_bootstrap_identity -----------------------------------------------------------
 
 
@@ -347,9 +367,13 @@ def test_creates_an_ordinary_admin_from_configured_env_vars(
     assert is_bootstrap_identity(db, user.id) is False
     roles = RoleAssignmentRepository(db).roles_for_user(user.id)
     assert [r.slug for r in roles] == [RoleSlug.ADMIN.value]
-    found = CredentialRepository(db).find_user_by_api_token(_TOKEN)
+    found = CredentialRepository(db).find_user_by_api_token(_TOKEN, now=iso(utc_now()))
     assert found is not None
     assert found.id == user.id
+    # Issue #39 AC: unaffected by expiry enforcement — `ensure_configured_admin`
+    # never passes `expires_at`.
+    credential = CredentialRepository(db).list_api_tokens(user.id)[0]
+    assert credential.expires_at is None
 
 
 def test_no_op_when_admin_username_and_api_token_are_unset(
@@ -423,7 +447,7 @@ def test_configured_admin_authenticates_immediately(
     reconcile_builtin_roles(db)
     ensure_configured_admin(db, _settings_with_configured_admin(monkeypatch))
 
-    found = CredentialRepository(db).find_user_by_api_token(_TOKEN)
+    found = CredentialRepository(db).find_user_by_api_token(_TOKEN, now=iso(utc_now()))
 
     assert found is not None
     assert found.active is True

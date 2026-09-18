@@ -146,6 +146,14 @@ def test_bare_auth_token_is_a_usage_error(fake_launch: list[object]) -> None:
     assert "Usage" in result.stderr
 
 
+def test_bare_auth_totp_is_a_usage_error(fake_launch: list[object]) -> None:
+    """Mirrors `auth token`'s own bare-subcommand usage error (issue #44)."""
+    result = runner.invoke(app, ["auth", "totp"])
+
+    assert result.exit_code == ExitCode.USAGE
+    assert "Usage" in result.stderr
+
+
 def test_auth_help_writes_to_stdout_and_never_launches(
     fake_launch: list[object],
 ) -> None:

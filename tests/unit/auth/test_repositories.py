@@ -12,6 +12,8 @@ from ansina.auth.repositories import (
     GroupRepository,
     ResourceRepository,
     RoleAssignmentRepository,
+    RoleInUseError,
+    RoleMappingRepository,
     RolePermissionRepository,
     RoleRepository,
     SudoGrantRepository,
@@ -21,26 +23,44 @@ from ansina.auth.repositories import (
 )
 from ansina.storage.database import Database
 
+# A fixed `now` for `find_api_token_credential`/`find_user_by_api_token` calls that
+# don't care about the value — issue #39's expiry filter only excludes a row when
+# `expires_at` is set, and none of these tests set one, so any `now` works here. The
+# expiry-specific tests below (`_EARLY`/`_LATE`) use their own pair instead.
+_ANY_NOW = "2026-01-01T00:00:00.000Z"
+
 # --- ResourceRepository -----------------------------------------------------
 
 
 def test_resource_upsert_creates_and_updates(db: Database) -> None:
     resources = ResourceRepository(db)
 
-    created = resources.upsert("heart.tick", "first description")
+    created = resources.upsert(
+        "heart.tick", "first description", verbs=frozenset({Verb.GET})
+    )
     assert created.name == "heart.tick"
     assert created.description == "first description"
+    assert created.verbs == {Verb.GET}
 
-    updated = resources.upsert("heart.tick", "second description")
+    updated = resources.upsert(
+        "heart.tick", "second description", verbs=frozenset({Verb.GET, Verb.POST})
+    )
     assert updated.description == "second description"
+    assert updated.verbs == {Verb.GET, Verb.POST}
     assert len(resources.list_all()) == 1
+
+
+def test_resource_upsert_round_trips_no_served_verbs(db: Database) -> None:
+    resource = ResourceRepository(db).upsert("me.profile", "", verbs=frozenset())
+
+    assert resource.verbs == frozenset()
 
 
 def test_resource_delete_cascades_role_permissions(db: Database) -> None:
     resources = ResourceRepository(db)
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    resources.upsert("heart.tick", "")
+    resources.upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     role = roles.create("read", "Read", "")
     permissions.grant(role.id, "heart.tick", Verb.GET)
 
@@ -114,13 +134,104 @@ def test_role_delete_refuses_a_builtin_role(db: Database) -> None:
     assert roles.get(role.id) is not None
 
 
+def test_list_custom_with_grant_on_returns_only_non_builtin_holders(
+    db: Database,
+) -> None:
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    admin = roles.ensure_builtin("admin", "Admin", "")
+    custom = roles.create("custom", "Custom", "")
+    permissions.grant(admin.id, "heart.tick", Verb.GET)
+    permissions.grant(custom.id, "heart.tick", Verb.GET)
+
+    holders = roles.list_custom_with_grant_on("heart.tick")
+
+    assert [role.id for role in holders] == [custom.id]
+
+
+def test_list_custom_with_grant_on_returns_empty_when_no_custom_role_holds_it(
+    db: Database,
+) -> None:
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    admin = roles.ensure_builtin("admin", "Admin", "")
+    permissions.grant(admin.id, "heart.tick", Verb.GET)
+
+    assert roles.list_custom_with_grant_on("heart.tick") == []
+
+
+def test_role_create_with_grants_inserts_role_permissions_in_the_same_txn(
+    db: Database,
+) -> None:
+    """Issue #40: `create(grants=...)` structurally guarantees a custom role can
+    never exist without the grants it was created with.
+    """
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+
+    role = RoleRepository(db).create(
+        "custom", "Custom", "", grants=frozenset({("heart.tick", Verb.GET)})
+    )
+
+    grants = RolePermissionRepository(db).list_for_role(role.id)
+    assert [(g.resource, g.verb) for g in grants] == [("heart.tick", Verb.GET)]
+
+
+def test_role_create_with_no_grants_creates_a_bare_role(db: Database) -> None:
+    role = RoleRepository(db).create("custom", "Custom", "")
+
+    assert RolePermissionRepository(db).list_for_role(role.id) == []
+
+
+def test_role_delete_refuses_a_role_still_assigned_to_a_user(db: Database) -> None:
+    role = RoleRepository(db).create("custom", "Custom", "")
+    user = UserRepository(db).create("holder")
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+
+    with pytest.raises(RoleInUseError) as excinfo:
+        RoleRepository(db).delete(role.id)
+
+    assert excinfo.value.code == "ansina.auth.role_in_use"
+    assert RoleRepository(db).get(role.id) is not None  # not deleted
+
+
+def test_role_delete_refuses_a_role_still_assigned_to_a_group(db: Database) -> None:
+    role = RoleRepository(db).create("custom-group", "Custom", "")
+    group = GroupRepository(db).create("g1", "Group One")
+    RoleAssignmentRepository(db).assign(SubjectType.GROUP, group.id, role.id)
+
+    with pytest.raises(RoleInUseError):
+        RoleRepository(db).delete(role.id)
+
+
+def test_role_delete_checks_builtin_before_in_use(db: Database) -> None:
+    """The builtin check runs first — a builtin role gets `BuiltinRoleError`, never
+    `RoleInUseError`, regardless of whether it's assigned.
+    """
+    role = RoleRepository(db).ensure_builtin("admin", "Admin", "")
+    user = UserRepository(db).create("admin-holder")
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+
+    with pytest.raises(BuiltinRoleError):
+        RoleRepository(db).delete(role.id)
+
+
+def test_role_delete_succeeds_for_an_unassigned_custom_role(db: Database) -> None:
+    role = RoleRepository(db).create("throwaway", "Throwaway", "")
+
+    RoleRepository(db).delete(role.id)  # must not raise
+
+    assert RoleRepository(db).get(role.id) is None
+
+
 # --- RolePermissionRepository --------------------------------------------------
 
 
 def test_role_permission_grant_and_list(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     role = roles.create("read", "Read", "")
 
     permissions.grant(role.id, "heart.tick", Verb.GET)
@@ -133,7 +244,7 @@ def test_role_permission_grant_and_list(db: Database) -> None:
 def test_role_permission_revoke(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     role = roles.create("read", "Read", "")
     permissions.grant(role.id, "heart.tick", Verb.GET)
 
@@ -150,10 +261,40 @@ def test_role_permission_revoke_of_ungranted_verb_is_a_no_op(db: Database) -> No
     permissions.revoke(role.id, "heart.tick", Verb.GET)
 
 
+def test_replace_for_role_replaces_rather_than_merges(db: Database) -> None:
+    """Issue #40: `PATCH /auth/roles/{id}` submits the role's entire new grant set,
+    not a delta — `replace_for_role` must drop what isn't resubmitted.
+    """
+    ResourceRepository(db).upsert(
+        "heart.tick", "", verbs=frozenset({Verb.GET, Verb.POST})
+    )
+    role = RoleRepository(db).create(
+        "custom", "Custom", "", grants=frozenset({("heart.tick", Verb.GET)})
+    )
+    permissions = RolePermissionRepository(db)
+
+    permissions.replace_for_role(role.id, frozenset({("heart.tick", Verb.POST)}))
+
+    grants = permissions.list_for_role(role.id)
+    assert [(g.resource, g.verb) for g in grants] == [("heart.tick", Verb.POST)]
+
+
+def test_replace_for_role_with_empty_grants_clears_them(db: Database) -> None:
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    role = RoleRepository(db).create(
+        "custom", "Custom", "", grants=frozenset({("heart.tick", Verb.GET)})
+    )
+    permissions = RolePermissionRepository(db)
+
+    permissions.replace_for_role(role.id, frozenset())
+
+    assert permissions.list_for_role(role.id) == []
+
+
 def test_effective_verbs_unions_across_roles(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
     read_role = roles.create("read", "Read", "")
     write_role = roles.create("write", "Write", "")
     permissions.grant(read_role.id, "heart.tick", Verb.GET)
@@ -177,8 +318,8 @@ def test_effective_verbs_with_no_role_ids_short_circuits_to_empty(
 def test_grants_for_roles_unions_across_roles(db: Database) -> None:
     roles = RoleRepository(db)
     permissions = RolePermissionRepository(db)
-    ResourceRepository(db).upsert("heart.tick", "")
-    ResourceRepository(db).upsert("auth.users", "")
+    ResourceRepository(db).upsert("heart.tick", "", verbs=frozenset({Verb.GET}))
+    ResourceRepository(db).upsert("auth.users", "", verbs=frozenset({Verb.POST}))
     read = roles.create("read", "Read", "")
     write = roles.create("write", "Write", "")
     permissions.grant(read.id, "heart.tick", Verb.GET)
@@ -307,7 +448,7 @@ def test_user_soft_delete_purges_access_but_keeps_the_row_and_identity(
     # The row and its local identity survive, for audit attribution.
     assert identities.get_by_provider_subject("local", "alice") is not None
     # Everything that could grant access again is gone.
-    assert credentials.find_user_by_api_token("a-token") is None
+    assert credentials.find_user_by_api_token("a-token", now=_ANY_NOW) is None
     assert assignments.roles_for_user(user.id) == []
     assert groups.list_members(group.id) == []
     assert (
@@ -598,6 +739,126 @@ def test_user_ids_with_role_excludes_inactive_and_deleted_users(
     assert assignments.user_ids_with_role(admin.id) == frozenset()
 
 
+# --- RoleAssignmentRepository: `source` provenance (issue #42) ------------------
+
+
+def test_assign_defaults_source_to_local(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("read", "Read", "")
+
+    assignment = assignments.assign(SubjectType.USER, user.id, role.id)
+
+    assert assignment.source == "local"
+
+
+def test_assign_accepts_an_explicit_source(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+
+    assignment = assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert assignment.source == "acme"
+
+
+def test_assign_conflict_never_overwrites_an_existing_rows_source(
+    db: Database,
+) -> None:
+    """A `'local'` grant for the same (subject, role) is never silently taken over
+    by a provider's own `assign` call — `ON CONFLICT ... DO NOTHING` leaves the
+    original row, `source` included, exactly as it was.
+    """
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="local")
+
+    assignment = assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert assignment.source == "local"
+
+
+def test_unassign_with_no_source_removes_regardless_of_origin(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assignments.unassign(SubjectType.USER, user.id, role.id)
+
+    assert assignments.roles_for_user(user.id) == []
+
+
+def test_unassign_scoped_to_source_leaves_a_different_source_untouched(
+    db: Database,
+) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="local")
+
+    assignments.unassign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert [r.id for r in assignments.roles_for_user(user.id)] == [role.id]
+
+
+def test_unassign_scoped_to_source_removes_a_matching_row(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("write", "Write", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assignments.unassign(SubjectType.USER, user.id, role.id, source="acme")
+
+    assert assignments.roles_for_user(user.id) == []
+
+
+def test_role_ids_for_subject_is_scoped_to_the_given_source(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    local_role = roles.create("read", "Read", "")
+    acme_role = roles.create("write", "Write", "")
+    other_provider_role = roles.create("maintain", "Maintain", "")
+    assignments.assign(SubjectType.USER, user.id, local_role.id, source="local")
+    assignments.assign(SubjectType.USER, user.id, acme_role.id, source="acme")
+    assignments.assign(
+        SubjectType.USER, user.id, other_provider_role.id, source="other"
+    )
+
+    assert assignments.role_ids_for_subject(
+        SubjectType.USER, user.id, source="acme"
+    ) == frozenset({acme_role.id})
+
+
+def test_role_ids_for_subject_is_empty_for_an_unused_source(db: Database) -> None:
+    users = UserRepository(db)
+    roles = RoleRepository(db)
+    assignments = RoleAssignmentRepository(db)
+    user = users.create("alice")
+    role = roles.create("read", "Read", "")
+    assignments.assign(SubjectType.USER, user.id, role.id, source="local")
+
+    assert (
+        assignments.role_ids_for_subject(SubjectType.USER, user.id, source="acme")
+        == frozenset()
+    )
+
+
 # --- CredentialRepository -------------------------------------------------------
 
 
@@ -641,6 +902,115 @@ def test_credential_set_password_replaces_the_previous_one(
     assert credentials.verify_password(user.id, "second", cheap_argon2) is True
 
 
+def test_has_credential_is_false_before_any_credential_exists(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.PASSWORD)
+        is False
+    )
+
+
+def test_has_credential_is_true_once_a_password_is_set(
+    db: Database, cheap_argon2: Argon2Params
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).set_password(user.id, "hunter2", cheap_argon2)
+
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.PASSWORD)
+        is True
+    )
+
+
+def test_has_credential_distinguishes_credential_type(db: Database) -> None:
+    """Issue #37: `has_credential` checks the exact `CredentialType` requested — an
+    api_token credential must not answer `True` for a `password` enrollment check.
+    """
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(user.id, "a-real-token")
+
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.PASSWORD)
+        is False
+    )
+    assert (
+        CredentialRepository(db).has_credential(user.id, CredentialType.API_TOKEN)
+        is True
+    )
+
+
+# --- issue #41: TOTP credential rows -------------------------------------------------
+
+
+def test_create_totp_secret_and_get_totp_secret(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+
+    created = credentials.create_totp_secret(user.id, "v1:nonce:ciphertext")
+
+    assert created.type is CredentialType.TOTP
+    assert created.hash == "v1:nonce:ciphertext"
+    assert created.salt is None
+    fetched = credentials.get_totp_secret(user.id)
+    assert fetched is not None
+    assert fetched.id == created.id
+
+
+def test_get_totp_secret_returns_none_when_never_enrolled(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    assert CredentialRepository(db).get_totp_secret(user.id) is None
+
+
+def test_get_totp_secret_only_returns_that_users_own(db: Database) -> None:
+    users = UserRepository(db)
+    alice = users.create("alice")
+    bob = users.create("bob")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(alice.id, "v1:alice-nonce:alice-ciphertext")
+
+    assert credentials.get_totp_secret(bob.id) is None
+
+
+def test_only_one_totp_credential_per_user(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(user.id, "v1:a:b")
+
+    with pytest.raises(Exception, match="UNIQUE constraint"):
+        credentials.create_totp_secret(user.id, "v1:c:d")
+
+
+def test_delete_credentials_removes_a_totp_secret(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(user.id, "v1:a:b")
+
+    credentials.delete_credentials(user.id, CredentialType.TOTP)
+
+    assert credentials.get_totp_secret(user.id) is None
+
+
+def test_any_credential_of_type_is_false_before_any_totp_credential_exists(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(user.id, "a-token")
+
+    assert CredentialRepository(db).any_credential_of_type(CredentialType.TOTP) is False
+
+
+def test_any_credential_of_type_is_true_once_any_user_holds_one(db: Database) -> None:
+    users = UserRepository(db)
+    alice = users.create("alice")
+    users.create("bob")
+    credentials = CredentialRepository(db)
+    credentials.create_totp_secret(alice.id, "v1:a:b")
+
+    assert credentials.any_credential_of_type(CredentialType.TOTP) is True
+
+
 def test_credential_create_and_find_api_token(db: Database) -> None:
     users = UserRepository(db)
     credentials = CredentialRepository(db)
@@ -651,7 +1021,7 @@ def test_credential_create_and_find_api_token(db: Database) -> None:
     assert credential.type is CredentialType.API_TOKEN
     assert credential.salt is not None
     assert "a-real-token" not in credential.hash
-    found = credentials.find_user_by_api_token("a-real-token")
+    found = credentials.find_user_by_api_token("a-real-token", now=_ANY_NOW)
     assert found is not None
     assert found.id == user.id
 
@@ -664,13 +1034,16 @@ def test_credential_find_user_by_api_token_rejects_a_wrong_token(
     user = users.create("alice")
     credentials.create_api_token(user.id, "a-real-token")
 
-    assert credentials.find_user_by_api_token("a-wrong-token") is None
+    assert credentials.find_user_by_api_token("a-wrong-token", now=_ANY_NOW) is None
 
 
 def test_credential_find_user_by_api_token_with_no_tokens_returns_none(
     db: Database,
 ) -> None:
-    assert CredentialRepository(db).find_user_by_api_token("anything") is None
+    assert (
+        CredentialRepository(db).find_user_by_api_token("anything", now=_ANY_NOW)
+        is None
+    )
 
 
 def test_credential_replace_api_token_revokes_the_old_one(db: Database) -> None:
@@ -681,8 +1054,8 @@ def test_credential_replace_api_token_revokes_the_old_one(db: Database) -> None:
 
     credentials.replace_api_token(user.id, "new-token")
 
-    assert credentials.find_user_by_api_token("old-token") is None
-    found = credentials.find_user_by_api_token("new-token")
+    assert credentials.find_user_by_api_token("old-token", now=_ANY_NOW) is None
+    found = credentials.find_user_by_api_token("new-token", now=_ANY_NOW)
     assert found is not None
     assert found.id == user.id
 
@@ -695,7 +1068,7 @@ def test_credential_delete_credentials(db: Database) -> None:
 
     credentials.delete_credentials(user.id, CredentialType.API_TOKEN)
 
-    assert credentials.find_user_by_api_token("a-token") is None
+    assert credentials.find_user_by_api_token("a-token", now=_ANY_NOW) is None
 
 
 # --- CredentialRepository: issue #28's self-service token surface ------------------
@@ -777,7 +1150,7 @@ def test_credential_find_api_token_credential_returns_the_full_row(
     user = UserRepository(db).create("alice")
     created = CredentialRepository(db).create_api_token(user.id, "a-token", label="cli")
 
-    found = CredentialRepository(db).find_api_token_credential("a-token")
+    found = CredentialRepository(db).find_api_token_credential("a-token", now=_ANY_NOW)
 
     assert found is not None
     assert found.id == created.id
@@ -788,7 +1161,107 @@ def test_credential_find_api_token_credential_returns_the_full_row(
 def test_credential_find_api_token_credential_returns_none_for_an_unknown_token(
     db: Database,
 ) -> None:
-    assert CredentialRepository(db).find_api_token_credential("nope") is None
+    assert (
+        CredentialRepository(db).find_api_token_credential("nope", now=_ANY_NOW) is None
+    )
+
+
+# --- CredentialRepository: issue #39's `expires_at` enforcement --------------------
+
+_TOKEN_EARLY = "2026-01-01T00:00:00.000Z"
+_TOKEN_LATE = "2026-06-01T00:00:00.000Z"
+
+
+def test_create_api_token_defaults_to_no_expiry(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    credential = CredentialRepository(db).create_api_token(user.id, "a-token")
+
+    assert credential.expires_at is None
+
+
+def test_create_api_token_round_trips_an_expiry(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+
+    credential = CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_LATE
+    )
+
+    assert credential.expires_at == _TOKEN_LATE
+
+
+def test_find_api_token_credential_matches_a_token_before_its_expiry(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_LATE
+    )
+
+    found = CredentialRepository(db).find_api_token_credential(
+        "a-token", now=_TOKEN_EARLY
+    )
+
+    assert found is not None
+    assert found.user_id == user.id
+
+
+def test_find_api_token_credential_stops_matching_after_its_expiry(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_EARLY
+    )
+
+    assert (
+        CredentialRepository(db).find_api_token_credential("a-token", now=_TOKEN_LATE)
+        is None
+    )
+
+
+def test_find_api_token_credential_treats_now_equal_to_expiry_as_already_expired(
+    db: Database,
+) -> None:
+    """The predicate is `expires_at > now`, not `>=` — a token expires exactly at its
+    own `expires_at` instant, not one tick after.
+    """
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_EARLY
+    )
+
+    assert (
+        CredentialRepository(db).find_api_token_credential("a-token", now=_TOKEN_EARLY)
+        is None
+    )
+
+
+def test_find_api_token_credential_ignores_expiry_for_a_never_expiring_token(
+    db: Database,
+) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(user.id, "a-token")  # expires_at=None
+
+    # Any `now`, however far in the future, still matches a `NULL` expiry.
+    found = CredentialRepository(db).find_api_token_credential(
+        "a-token", now="2099-01-01T00:00:00.000Z"
+    )
+
+    assert found is not None
+    assert found.user_id == user.id
+
+
+def test_find_user_by_api_token_stops_matching_after_expiry(db: Database) -> None:
+    user = UserRepository(db).create("alice")
+    CredentialRepository(db).create_api_token(
+        user.id, "a-token", expires_at=_TOKEN_EARLY
+    )
+
+    assert (
+        CredentialRepository(db).find_user_by_api_token("a-token", now=_TOKEN_LATE)
+        is None
+    )
 
 
 def test_credential_delete_api_token_removes_it_and_returns_true(db: Database) -> None:
@@ -798,7 +1271,9 @@ def test_credential_delete_api_token_removes_it_and_returns_true(db: Database) -
     deleted = CredentialRepository(db).delete_api_token(credential.id, user.id)
 
     assert deleted is True
-    assert CredentialRepository(db).find_user_by_api_token("a-token") is None
+    assert (
+        CredentialRepository(db).find_user_by_api_token("a-token", now=_ANY_NOW) is None
+    )
 
 
 def test_credential_delete_api_token_returns_false_for_an_unknown_id(
@@ -821,7 +1296,10 @@ def test_credential_delete_api_token_is_scoped_to_the_owning_user(
     deleted = CredentialRepository(db).delete_api_token(credential.id, other.id)
 
     assert deleted is False
-    assert CredentialRepository(db).find_user_by_api_token("owned-token") is not None
+    assert (
+        CredentialRepository(db).find_user_by_api_token("owned-token", now=_ANY_NOW)
+        is not None
+    )
 
 
 # --- ExternalIdentityRepository --------------------------------------------------
@@ -989,3 +1467,111 @@ def test_sudo_lockout_clear(db: Database) -> None:
 
 def test_sudo_lockout_clear_of_unknown_user_is_a_no_op(db: Database) -> None:
     SudoLockoutRepository(db).clear("nobody")
+
+
+# --- RoleMappingRepository (issue #42) -------------------------------------------
+
+
+def test_role_mapping_create_and_get(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+
+    created = mappings.create("acme", "groups", "ops-team", role.id)
+
+    assert created.provider == "acme"
+    assert created.claim == "groups"
+    assert created.value == "ops-team"
+    assert created.role_id == role.id
+    fetched = mappings.get(created.id)
+    assert fetched == created
+
+
+def test_role_mapping_get_of_unknown_id_returns_none(db: Database) -> None:
+    assert RoleMappingRepository(db).get("no-such-mapping") is None
+
+
+def test_role_mapping_create_refuses_a_duplicate_tuple(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    mappings.create("acme", "groups", "ops-team", role.id)
+
+    with pytest.raises(DuplicateError):
+        mappings.create("acme", "groups", "ops-team", role.id)
+
+
+def test_role_mapping_same_triple_different_role_is_not_a_duplicate(
+    db: Database,
+) -> None:
+    """The unique index is on the full `(provider, claim, value, role_id)` tuple —
+    the same claim mapping onto two different roles is two distinct rows.
+    """
+    roles = RoleRepository(db)
+    ops_role = roles.create("ops", "Ops", "")
+    other_role = roles.create("other", "Other", "")
+    mappings = RoleMappingRepository(db)
+
+    mappings.create("acme", "groups", "ops-team", ops_role.id)
+    mappings.create("acme", "groups", "ops-team", other_role.id)
+
+    assert len(mappings.list_all()) == 2
+
+
+def test_role_mapping_list_all_orders_by_provider_claim_value(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    mappings.create("zeta", "groups", "b", role.id)
+    mappings.create("acme", "groups", "b", role.id)
+    mappings.create("acme", "groups", "a", role.id)
+
+    listed = mappings.list_all()
+
+    assert [(m.provider, m.value) for m in listed] == [
+        ("acme", "a"),
+        ("acme", "b"),
+        ("zeta", "b"),
+    ]
+
+
+def test_role_mapping_list_for_provider_is_scoped(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    mappings.create("acme", "groups", "ops-team", role.id)
+    mappings.create("other", "groups", "ops-team", role.id)
+
+    listed = mappings.list_for_provider("acme")
+
+    assert [m.provider for m in listed] == ["acme"]
+
+
+def test_role_mapping_list_for_provider_empty_when_none_match(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    RoleMappingRepository(db).create("acme", "groups", "ops-team", role.id)
+
+    assert RoleMappingRepository(db).list_for_provider("other") == []
+
+
+def test_role_mapping_delete_removes_the_row(db: Database) -> None:
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    created = mappings.create("acme", "groups", "ops-team", role.id)
+
+    mappings.delete(created.id)
+
+    assert mappings.get(created.id) is None
+
+
+def test_role_mapping_delete_of_unknown_id_is_a_no_op(db: Database) -> None:
+    RoleMappingRepository(db).delete("no-such-mapping")
+
+
+def test_role_mapping_cascades_away_when_its_role_is_deleted(db: Database) -> None:
+    """`role_mappings.role_id REFERENCES roles (id) ON DELETE CASCADE` — deleting an
+    unassigned, unmapped-anywhere-else custom role takes its mappings with it.
+    """
+    role = RoleRepository(db).create("ops", "Ops", "")
+    mappings = RoleMappingRepository(db)
+    created = mappings.create("acme", "groups", "ops-team", role.id)
+
+    RoleRepository(db).delete(role.id)
+
+    assert mappings.get(created.id) is None

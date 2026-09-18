@@ -78,14 +78,31 @@ ansina-tui auth token mint --label ci --no-store # print it, but don't store it 
 ansina-tui auth token list                       # metadata only — never a secret
 ansina-tui auth token revoke <id>
 ansina-tui auth token revoke <id> --yes          # skip the in-use confirmation
-ansina-tui auth sudo                             # no-echo password prompt or stdin
+ansina-tui auth sudo                             # auto-picks your one enrolled factor
+ansina-tui auth sudo --factor totp               # picks explicitly (2+ enrolled, or skip the lookup)
 ansina-tui auth sudo --status                    # local only, never touches the daemon
 ansina-tui auth sudo --revoke
+ansina-tui auth totp enroll                      # secret + otpauth:// URI, shown once
+ansina-tui auth totp status                      # enrolled? since when?
+ansina-tui auth totp disable                     # requires a live sudo grant
 ansina-tui auth logout                           # local only — see below
 ```
 
-A token or password is **never** a flag value or a bare argument — only `--with-token`
-(reading stdin), a piped stdin, or a no-echo prompt. `auth logout` drops the local credential
+A token, password, or TOTP code is **never** a flag value or a bare argument — only
+`--with-token` (reading stdin), a piped stdin, or a no-echo prompt.
+
+`auth sudo` reads `GET /auth/me`'s `step_up_factors` (issue #37) and resolves which factor to
+use without you naming one, whenever it can: exactly one enrolled factor is used automatically;
+two or more require `--factor password|totp` to disambiguate (interactively, it prompts instead
+of failing); zero enrolled exits `4` naming `auth totp enroll` as the fix. Passing `--factor`
+explicitly skips the `GET /auth/me` lookup entirely, so a scripted/CI call that already knows
+which factor to use stays at one request. `auth totp enroll` (issue #44) shows the raw secret and
+an `otpauth://` URI **exactly once** — add it to an authenticator app or scan/paste the URI; there
+is nothing to store locally, since only the daemon holds the encrypted envelope. `auth totp
+disable` requires a live sudo grant (the same one `auth sudo` obtains) — a missing one surfaces
+the daemon's `ansina.auth.sudo_required` message, with no separate local confirmation prompt.
+
+`auth logout` drops the local credential
 and any sudo grant but does **not** revoke the token server-side (a token you log out of on one
 machine may still be in use on another) — `auth token revoke` is the server-side action, and it
 warns before revoking the token currently in use as this host's own credential (`--yes` skips

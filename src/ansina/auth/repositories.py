@@ -28,15 +28,18 @@ from ansina.auth.models import (
     CredentialType,
     ExternalIdentity,
     Group,
+    OidcLoginState,
     Resource,
     Role,
     RoleAssignment,
+    RoleMapping,
     RolePermission,
     SubjectType,
     SudoGrant,
     SudoLockout,
     User,
     Verb,
+    encode_verbs,
 )
 from ansina.errors import AuthError
 from ansina.storage.database import Database
@@ -65,6 +68,17 @@ class UnknownSubjectError(AuthError):
     code: ClassVar[str] = "ansina.auth.unknown_subject"
 
 
+class RoleInUseError(AuthError):
+    """A caller tried to delete a role still referenced by at least one
+    `role_assignments` row (a user or a group). Enforced here, in the repository
+    layer, rather than left to `role_assignments.role_id`'s `ON DELETE CASCADE` —
+    issue #40's own framing is that the cascade must never be the mechanism that
+    decides this.
+    """
+
+    code: ClassVar[str] = "ansina.auth.role_in_use"
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 
@@ -85,14 +99,21 @@ class ResourceRepository:
         )
         return [Resource.from_row(row) for row in rows]
 
-    def upsert(self, name: str, description: str) -> Resource:
+    def upsert(
+        self, name: str, description: str, *, verbs: frozenset[Verb]
+    ) -> Resource:
+        """`verbs` is keyword-only and required (issue #38) — no "all verbs" default,
+        since every call site should state what a route actually serves rather than
+        silently claiming grantability nothing enforces.
+        """
         with self._db.transaction() as cursor:
             cursor.execute(
                 """
-                INSERT INTO resources (name, description) VALUES (?, ?)
-                ON CONFLICT (name) DO UPDATE SET description = excluded.description
+                INSERT INTO resources (name, description, verbs) VALUES (?, ?, ?)
+                ON CONFLICT (name) DO UPDATE SET
+                    description = excluded.description, verbs = excluded.verbs
                 """,
-                (name, description),
+                (name, description, encode_verbs(verbs)),
             )
             row = cursor.execute(
                 "SELECT * FROM resources WHERE name = ?", (name,)
@@ -138,8 +159,20 @@ class RoleRepository:
         return Role.from_row(row) if row is not None else None
 
     def create(
-        self, slug: str, name: str, description: str, *, builtin: bool = False
+        self,
+        slug: str,
+        name: str,
+        description: str,
+        *,
+        builtin: bool = False,
+        grants: frozenset[tuple[str, Verb]] = frozenset(),
     ) -> Role:
+        """`grants` (issue #40) is inserted as `role_permissions` rows in the same
+        transaction as the `roles` row itself — the same structural-invariant
+        pattern `UserRepository.create`'s `external_identities` insert already
+        sets, so a custom role can never exist without the grants it was created
+        with (or, on a rollback, without existing at all).
+        """
         role_id = _new_id()
         try:
             with self._db.transaction() as cursor:
@@ -150,6 +183,15 @@ class RoleRepository:
                     """,
                     (role_id, slug, name, description, int(builtin)),
                 )
+                for resource, verb in grants:
+                    cursor.execute(
+                        """
+                        INSERT INTO role_permissions (role_id, resource, verb)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT (role_id, resource, verb) DO NOTHING
+                        """,
+                        (role_id, resource, verb.value),
+                    )
         except sqlite3.IntegrityError as exc:
             raise DuplicateError(f"a role with slug {slug!r} already exists") from exc
         role = self.get(role_id)
@@ -168,6 +210,11 @@ class RoleRepository:
         return self.create(slug, name, description, builtin=True)
 
     def delete(self, role_id: str) -> None:
+        """Refuses (`BuiltinRoleError`) a builtin role, checked first, and (issue
+        #40, `RoleInUseError`) a role still referenced by any `role_assignments`
+        row — both checked before any `DELETE` statement runs, never left to
+        `ON DELETE CASCADE` to decide.
+        """
         role = self.get(role_id)
         if role is None:
             return
@@ -175,8 +222,50 @@ class RoleRepository:
             raise BuiltinRoleError(
                 f"role {role.slug!r} is builtin and cannot be deleted"
             )
+        assignments = (
+            self._db.connection()
+            .execute(
+                "SELECT subject_type, subject_id FROM role_assignments "
+                "WHERE role_id = ?",
+                (role_id,),
+            )
+            .fetchall()
+        )
+        if assignments:
+            raise RoleInUseError(
+                f"role {role.slug!r} is still assigned and cannot be deleted",
+                details={
+                    "role_id": role_id,
+                    "assignments": sorted(
+                        f"{row['subject_type']}:{row['subject_id']}"
+                        for row in assignments
+                    ),
+                },
+            )
         with self._db.transaction() as cursor:
             cursor.execute("DELETE FROM roles WHERE id = ?", (role_id,))
+
+    def list_custom_with_grant_on(self, resource: str) -> list[Role]:
+        """Every non-builtin role holding at least one grant on `resource` — backs
+        `auth.reconciler.sync_resources`'s retire-warning (issue #38): builtin roles'
+        grants are rebuilt unconditionally at every boot regardless of what's
+        retiring, so only a custom role's grant is worth warning about before the
+        `role_permissions` rows on this resource cascade away.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                """
+                SELECT DISTINCT r.* FROM roles r
+                JOIN role_permissions rp ON rp.role_id = r.id
+                WHERE rp.resource = ? AND r.builtin = 0
+                ORDER BY r.slug
+                """,
+                (resource,),
+            )
+            .fetchall()
+        )
+        return [Role.from_row(row) for row in rows]
 
 
 class RolePermissionRepository:
@@ -215,6 +304,28 @@ class RolePermissionRepository:
                 "WHERE role_id = ? AND resource = ? AND verb = ?",
                 (role_id, resource, verb.value),
             )
+
+    def replace_for_role(
+        self, role_id: str, grants: frozenset[tuple[str, Verb]]
+    ) -> None:
+        """Atomically replace every `role_permissions` row for `role_id` with
+        `grants` — one transaction, unlike `auth.reconciler.reconcile_builtin_roles`'s
+        per-row diff-then-`grant`/`revoke` loop (which is only shaped that way because
+        it reconciles four roles against the whole catalog at every boot). Backs
+        `PATCH /auth/roles/{id}` (issue #40): the caller submits the role's *entire*
+        new grant set, not a delta.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute("DELETE FROM role_permissions WHERE role_id = ?", (role_id,))
+            for resource, verb in grants:
+                cursor.execute(
+                    """
+                    INSERT INTO role_permissions (role_id, resource, verb)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (role_id, resource, verb) DO NOTHING
+                    """,
+                    (role_id, resource, verb.value),
+                )
 
     def grants_for_roles(self, role_ids: frozenset[str]) -> frozenset[tuple[str, Verb]]:
         """Every `(resource, verb)` pair granted to any of `role_ids` — the whole grant
@@ -485,8 +596,22 @@ class RoleAssignmentRepository:
         return row is not None
 
     def assign(
-        self, subject_type: SubjectType, subject_id: str, role_id: str
+        self,
+        subject_type: SubjectType,
+        subject_id: str,
+        role_id: str,
+        *,
+        source: str = "local",
     ) -> RoleAssignment:
+        """`source` (issue #42) defaults to `'local'` — every existing call site
+        (`routes/role_assignments.py`, `auth.bootstrap`) is unaffected.
+        `ansina.auth.role_sync.sync_mapped_roles` is the one caller that passes a
+        provider identifier instead. If a row for this `(subject_type, subject_id,
+        role_id)` already exists under a *different* `source` (e.g. a manual `'local'`
+        grant), `ON CONFLICT ... DO NOTHING` leaves it exactly as it was — its
+        `source` is never overwritten, so a provider can neither take over nor later
+        revoke a manually-made grant.
+        """
         if not self._subject_exists(subject_type, subject_id):
             raise UnknownSubjectError(
                 f"no {subject_type.value} with id {subject_id!r} exists"
@@ -495,11 +620,12 @@ class RoleAssignmentRepository:
         with self._db.transaction() as cursor:
             cursor.execute(
                 """
-                INSERT INTO role_assignments (id, subject_type, subject_id, role_id)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO role_assignments
+                    (id, subject_type, subject_id, role_id, source)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (subject_type, subject_id, role_id) DO NOTHING
                 """,
-                (assignment_id, subject_type.value, subject_id, role_id),
+                (assignment_id, subject_type.value, subject_id, role_id, source),
             )
             row = cursor.execute(
                 "SELECT * FROM role_assignments "
@@ -509,14 +635,33 @@ class RoleAssignmentRepository:
         return RoleAssignment.from_row(row)
 
     def unassign(
-        self, subject_type: SubjectType, subject_id: str, role_id: str
+        self,
+        subject_type: SubjectType,
+        subject_id: str,
+        role_id: str,
+        *,
+        source: str | None = None,
     ) -> None:
+        """`source` (issue #42) is keyword-only and optional — `None` (the default)
+        deletes the assignment regardless of who created it, preserving every existing
+        caller's behavior (an Admin detaching a role by hand works no matter its
+        origin). `ansina.auth.role_sync.sync_mapped_roles` passes its own provider
+        name, so it can only ever remove the rows it itself owns.
+        """
         with self._db.transaction() as cursor:
-            cursor.execute(
-                "DELETE FROM role_assignments "
-                "WHERE subject_type = ? AND subject_id = ? AND role_id = ?",
-                (subject_type.value, subject_id, role_id),
-            )
+            if source is None:
+                cursor.execute(
+                    "DELETE FROM role_assignments "
+                    "WHERE subject_type = ? AND subject_id = ? AND role_id = ?",
+                    (subject_type.value, subject_id, role_id),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM role_assignments "
+                    "WHERE subject_type = ? AND subject_id = ? AND role_id = ? "
+                    "AND source = ?",
+                    (subject_type.value, subject_id, role_id, source),
+                )
 
     def list_for_subject(
         self, subject_type: SubjectType, subject_id: str
@@ -571,6 +716,27 @@ class RoleAssignmentRepository:
         )
         return frozenset(row["id"] for row in rows)
 
+    def role_ids_for_subject(
+        self, subject_type: SubjectType, subject_id: str, *, source: str
+    ) -> frozenset[str]:
+        """Every role id directly assigned to `subject_id` whose `source` equals
+        `source` exactly (issue #42) — the provider-scoped read half of
+        `ansina.auth.role_sync.sync_mapped_roles`'s diff. Deliberately narrower than
+        `list_for_subject` (which is source-blind and returns full `Role`s): a sync
+        must never see a `'local'` or other-provider row, so there is no unscoped
+        variant of this query to misuse by omitting a filter.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                "SELECT role_id FROM role_assignments "
+                "WHERE subject_type = ? AND subject_id = ? AND source = ?",
+                (subject_type.value, subject_id, source),
+            )
+            .fetchall()
+        )
+        return frozenset(row["role_id"] for row in rows)
+
     def roles_for_user(self, user_id: str) -> list[Role]:
         """Every role reachable by `user_id`, direct or via group membership."""
         rows = (
@@ -590,6 +756,77 @@ class RoleAssignmentRepository:
             .fetchall()
         )
         return [Role.from_row(row) for row in rows]
+
+
+class RoleMappingRepository:
+    """CRUD on `role_mappings` (issue #42) — the IdP claim -> role table, unique on
+    `(provider, claim, value, role_id)` (`idx_role_mappings_tuple`). Ships empty and
+    unused until #43's OIDC login exchange calls `ansina.auth.role_sync
+    .sync_mapped_roles`, which reads it via `list_for_provider`.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def list_all(self) -> list[RoleMapping]:
+        rows = (
+            self._db.connection()
+            .execute("SELECT * FROM role_mappings ORDER BY provider, claim, value")
+            .fetchall()
+        )
+        return [RoleMapping.from_row(row) for row in rows]
+
+    def list_for_provider(self, provider: str) -> list[RoleMapping]:
+        """Every mapping for `provider` — the sync read `sync_mapped_roles` matches
+        a login's claims against.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                "SELECT * FROM role_mappings WHERE provider = ? ORDER BY claim, value",
+                (provider,),
+            )
+            .fetchall()
+        )
+        return [RoleMapping.from_row(row) for row in rows]
+
+    def get(self, mapping_id: str) -> RoleMapping | None:
+        row = (
+            self._db.connection()
+            .execute("SELECT * FROM role_mappings WHERE id = ?", (mapping_id,))
+            .fetchone()
+        )
+        return RoleMapping.from_row(row) if row is not None else None
+
+    def create(
+        self, provider: str, claim: str, value: str, role_id: str
+    ) -> RoleMapping:
+        """Raises `DuplicateError` (409) if `(provider, claim, value, role_id)`
+        already exists — `idx_role_mappings_tuple` is the backstop, same
+        try/except-around-`IntegrityError` shape as `RoleRepository.create`.
+        """
+        mapping_id = _new_id()
+        try:
+            with self._db.transaction() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO role_mappings (id, provider, claim, value, role_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (mapping_id, provider, claim, value, role_id),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise DuplicateError(
+                f"a mapping for {provider!r}/{claim!r}={value!r} -> {role_id!r} "
+                "already exists"
+            ) from exc
+        mapping = self.get(mapping_id)
+        assert mapping is not None  # unreachable — just inserted, in a committed txn
+        return mapping
+
+    def delete(self, mapping_id: str) -> None:
+        with self._db.transaction() as cursor:
+            cursor.execute("DELETE FROM role_mappings WHERE id = ?", (mapping_id,))
 
 
 class CredentialRepository:
@@ -641,19 +878,100 @@ class CredentialRepository:
             return False
         return verify_password(raw_password, row["hash"], params)
 
+    def any_credential_of_type(self, credential_type: CredentialType) -> bool:
+        """Whether *any* user holds a `credential_type` row — unlike `has_credential`,
+        not scoped to one user. Backs `auth.encryption.ensure_key_configured_if_needed`
+        (issue #41): boot must refuse to start if any `totp` row exists with no
+        encryption key configured, checked once across the whole table rather than
+        per user.
+        """
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT 1 FROM credentials WHERE type = ? LIMIT 1",
+                (credential_type.value,),
+            )
+            .fetchone()
+        )
+        return row is not None
+
+    def has_credential(self, user_id: str, credential_type: CredentialType) -> bool:
+        """Whether `user_id` holds any `credential_type` row — the enrollment question
+        `auth.step_up.StepUpVerifier.is_enrolled` implementations answer against (issue
+        #37). A single indexed existence check (`idx_credentials_user_type`), never a
+        hash read; deliberately ignores `expires_at` (issue #39 enforces expiry only on
+        authentication, via `find_api_token_credential`) — nothing sets an expiry on a
+        `password` row, and `verify_password` itself doesn't filter on it either, so
+        filtering enrollment alone here would make the two disagree.
+        """
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT 1 FROM credentials WHERE user_id = ? AND type = ? LIMIT 1",
+                (user_id, credential_type.value),
+            )
+            .fetchone()
+        )
+        return row is not None
+
+    def create_totp_secret(self, user_id: str, envelope: str) -> Credential:
+        """Inserts a `totp` row — `envelope` is `auth.encryption.encrypt`'s versioned
+        AES-GCM output, stored in `hash` (an opaque string column regardless of
+        credential type, not a one-way hash for this one — see `auth.encryption`'s
+        module docstring). `salt` stays `NULL`, same as a `password` row: the nonce
+        already lives inside the envelope itself. The partial unique index
+        `idx_credentials_one_totp_per_user` is the backstop if a caller ever races
+        past `auth.management.assert_totp_not_enrolled`'s own check.
+        """
+        credential_id = _new_id()
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO credentials (id, user_id, type, hash, salt)
+                VALUES (?, ?, 'totp', ?, NULL)
+                """,
+                (credential_id, user_id, envelope),
+            )
+            row = cursor.execute(
+                "SELECT * FROM credentials WHERE id = ?", (credential_id,)
+            ).fetchone()
+        return Credential.from_row(row)
+
+    def get_totp_secret(self, user_id: str) -> Credential | None:
+        """`user_id`'s `totp` credential row, or `None` if never enrolled."""
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT * FROM credentials WHERE user_id = ? AND type = 'totp'",
+                (user_id,),
+            )
+            .fetchone()
+        )
+        return Credential.from_row(row) if row is not None else None
+
     def create_api_token(
-        self, user_id: str, raw_token: str, *, label: str = ""
+        self,
+        user_id: str,
+        raw_token: str,
+        *,
+        label: str = "",
+        expires_at: str | None = None,
     ) -> Credential:
+        """`expires_at` is `None` by default — every M2/M4-era caller keeps minting a
+        token that never expires. Issue #39's first caller with a real TTL is
+        `ansina.api.tokens.issue_token`.
+        """
         salt = new_token_salt()
         token_hash = hash_token(raw_token, salt)
         credential_id = _new_id()
         with self._db.transaction() as cursor:
             cursor.execute(
                 """
-                INSERT INTO credentials (id, user_id, type, hash, salt, label)
-                VALUES (?, ?, 'api_token', ?, ?, ?)
+                INSERT INTO credentials
+                    (id, user_id, type, hash, salt, label, expires_at)
+                VALUES (?, ?, 'api_token', ?, ?, ?, ?)
                 """,
-                (credential_id, user_id, token_hash, salt, label),
+                (credential_id, user_id, token_hash, salt, label, expires_at),
             )
             row = cursor.execute(
                 "SELECT * FROM credentials WHERE id = ?", (credential_id,)
@@ -733,16 +1051,27 @@ class CredentialRepository:
                 (now, credential_id),
             )
 
-    def find_api_token_credential(self, token: str) -> Credential | None:
-        """Scans every `api_token` credential, comparing in constant time, and
-        returns the matched row itself — issue #28's authenticator needs the
+    def find_api_token_credential(self, token: str, *, now: str) -> Credential | None:
+        """Scans every *unexpired* `api_token` credential, comparing in constant time,
+        and returns the matched row itself — issue #28's authenticator needs the
         credential's id and `last_used_at` to run its coalesced staleness check, not
         just the owning user. Fine at M2 scale — a token-id-prefix index is the
         change to make if this table ever grows large enough for the scan to matter.
+
+        `now` (issue #39) is always caller-supplied, never a SQL-side `now` — the same
+        discipline `SudoGrantRepository.find_active`'s `expires_at > ?` already
+        follows — and filters the query itself: `expires_at IS NULL` (never expires)
+        or `expires_at > now`, the identical lexicographic-ISO-8601 string comparison
+        `find_active` relies on (no parse, no parse-failure path). An expired token is
+        therefore indistinguishable from an unknown one to every caller here.
         """
         rows = (
             self._db.connection()
-            .execute("SELECT * FROM credentials WHERE type = 'api_token'")
+            .execute(
+                "SELECT * FROM credentials WHERE type = 'api_token' "
+                "AND (expires_at IS NULL OR expires_at > ?)",
+                (now,),
+            )
             .fetchall()
         )
         for row in rows:
@@ -752,13 +1081,14 @@ class CredentialRepository:
                 return Credential.from_row(row)
         return None
 
-    def find_user_by_api_token(self, token: str) -> User | None:
+    def find_user_by_api_token(self, token: str, *, now: str) -> User | None:
         """The matched credential's owning user, or `None`. Delegates to
-        `find_api_token_credential` (issue #28) so the constant-time scan exists in
+        `find_api_token_credential` (issue #28, threading `now` through as of #39) so
+        the constant-time scan — and the expiry filter sitting on it — exists in
         exactly one place; kept as its own method since most callers only ever want
         the user, not the credential row itself.
         """
-        credential = self.find_api_token_credential(token)
+        credential = self.find_api_token_credential(token, now=now)
         if credential is None:
             return None
         user_row = (
@@ -947,3 +1277,62 @@ class ExternalIdentityRepository:
         identity = self.get_by_provider_subject(provider, subject)
         assert identity is not None  # unreachable — just inserted, in a committed txn
         return identity
+
+
+class OidcLoginStateRepository:
+    """CRUD on `oidc_login_states` (issue #43) — the in-flight state one
+    authorization-code login carries between `POST /auth/oidc/login` and
+    `GET /auth/oidc/callback`. See `storage/migrations/0008_oidc_login_state.sql` and
+    `auth.models.OidcLoginState` for what each column defends against. Timestamps are
+    always caller-supplied ISO 8601 strings (`auth.clock`), never a SQL-side `now` —
+    the same discipline `SudoGrantRepository` already follows, for the same reason:
+    expiry stays driven by whatever clock the caller passes, real or fake.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def create(
+        self, state: str, nonce: str, code_verifier: str, *, expires_at: str
+    ) -> OidcLoginState:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO oidc_login_states (state, nonce, code_verifier, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (state, nonce, code_verifier, expires_at),
+            )
+            row = cursor.execute(
+                "SELECT * FROM oidc_login_states WHERE state = ?", (state,)
+            ).fetchone()
+        return OidcLoginState.from_row(row)
+
+    def take(self, state: str, *, now: str) -> OidcLoginState | None:
+        """Read-and-delete `state` in one transaction, so every row is single-use: a
+        replayed `state` value finds nothing the second time, indistinguishable from
+        one that never existed. Returns `None` if `state` is unknown or its
+        `expires_at` is not after `now` — an expired-but-still-present row is deleted
+        here too, the same "found it, and it's gone either way" shape.
+        """
+        with self._db.transaction() as cursor:
+            row = cursor.execute(
+                "SELECT * FROM oidc_login_states WHERE state = ?", (state,)
+            ).fetchone()
+            if row is None:
+                return None
+            cursor.execute("DELETE FROM oidc_login_states WHERE state = ?", (state,))
+        login_state = OidcLoginState.from_row(row)
+        if login_state.expires_at <= now:
+            return None
+        return login_state
+
+    def delete_expired(self, *, now: str) -> None:
+        """Sweeps rows nobody ever redeemed — an abandoned browser tab, a crashed IdP
+        round trip. `take()` above already self-cleans the common case (a state that
+        *is* redeemed, eventually); this is for the ones that never are.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM oidc_login_states WHERE expires_at <= ?", (now,)
+            )

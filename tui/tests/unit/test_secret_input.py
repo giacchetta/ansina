@@ -7,7 +7,12 @@ import io
 
 import pytest
 
-from ansina_tui.secret_input import SecretInputError, read_password, read_token
+from ansina_tui.secret_input import (
+    SecretInputError,
+    read_password,
+    read_token,
+    read_totp_code,
+)
 
 
 class _FakeTty(io.StringIO):
@@ -73,3 +78,25 @@ def test_read_password_empty_raises() -> None:
     with pytest.raises(SecretInputError) as exc_info:
         read_password(stream=stream)
     assert "password" in str(exc_info.value)
+
+
+def test_read_totp_code_auto_detects_a_piped_non_tty_stdin() -> None:
+    stream = io.StringIO("123456\n")
+    assert read_totp_code(stream=stream) == "123456"
+
+
+def test_read_totp_code_prompts_when_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "ansina_tui.secret_input.typer.prompt", lambda *a, **k: "654321"
+    )
+    stream = _FakeTty("")
+    assert read_totp_code(stream=stream) == "654321"
+
+
+def test_read_totp_code_empty_raises() -> None:
+    stream = io.StringIO("")
+    with pytest.raises(SecretInputError) as exc_info:
+        read_totp_code(stream=stream)
+    assert "TOTP code" in str(exc_info.value)

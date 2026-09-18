@@ -394,6 +394,7 @@ def test_issued_token_authenticates(
     )
     assert issued.status_code == 201
     assert issued.json()["label"] == "kevin's laptop"
+    assert issued.json()["expires_at"] is None
     kevin_token = issued.json()["token"]
 
     # The token authenticates (401 -> would-be-401 path not hit); Kevin has no role
@@ -647,3 +648,72 @@ def test_revoking_the_bootstrap_identitys_token_is_403(
 
     assert response.status_code == 403
     assert response.json()["code"] == "ansina.auth.bootstrap_identity"
+
+
+# --- DELETE /auth/users/{id}/totp: issue #41's Admin lost-device recovery path -------
+
+
+def test_admin_reset_clears_an_existing_totp_enrollment(
+    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+    created = authed_client.post(
+        "/auth/users", headers=admin_headers, json={"username": "nora"}
+    ).json()
+    CredentialRepository(authed_app.state.db).create_totp_secret(
+        created["id"], "v1:a:b"
+    )
+
+    response = authed_client.delete(
+        f"/auth/users/{created['id']}/totp", headers=admin_headers
+    )
+
+    assert response.status_code == 204
+    assert (
+        CredentialRepository(authed_app.state.db).get_totp_secret(created["id"]) is None
+    )
+
+
+def test_admin_reset_is_idempotent_when_never_enrolled(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+    created = authed_client.post(
+        "/auth/users", headers=admin_headers, json={"username": "oscar"}
+    ).json()
+
+    response = authed_client.delete(
+        f"/auth/users/{created['id']}/totp", headers=admin_headers
+    )
+
+    assert response.status_code == 204
+
+
+def test_admin_reset_for_unknown_user_is_404(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    response = authed_client.delete(
+        "/auth/users/does-not-exist/totp",
+        headers={"Authorization": f"Bearer {authed_token}"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_maintain_needs_sudo_to_reset_totp(
+    authed_client: TestClient,
+    authed_token: str,
+    token_for_role: Callable[[str], str],
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+    created = authed_client.post(
+        "/auth/users", headers=admin_headers, json={"username": "petra"}
+    ).json()
+    maintain_headers = {"Authorization": f"Bearer {token_for_role('maintain')}"}
+
+    response = authed_client.delete(
+        f"/auth/users/{created['id']}/totp", headers=maintain_headers
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "ansina.auth.sudo_required"

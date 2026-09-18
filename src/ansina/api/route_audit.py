@@ -17,8 +17,11 @@ from fastapi.routing import APIRoute, iter_route_contexts
 
 from ansina.api.auth import PUBLIC_PATHS
 from ansina.api.authorization import DECLARATION_ATTR, ResourceDeclaration
+from ansina.auth.models import Verb
 from ansina.auth.policy import ResourceSpec
 from ansina.errors import AuthError
+
+_VERB_VALUES: frozenset[str] = frozenset(verb.value for verb in Verb)
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -54,7 +57,8 @@ def audit_route_coverage(app: FastAPI) -> tuple[ResourceSpec, ...]:
     `auth.policy.BOOTSTRAP_RESOURCES`.
     """
     problems: list[str] = []
-    specs_by_name: dict[str, ResourceSpec] = {}
+    descriptions_by_name: dict[str, str] = {}
+    verbs_by_name: dict[str, set[Verb]] = {}
 
     for context in iter_route_contexts(app.routes):
         path = context.path
@@ -81,27 +85,42 @@ def audit_route_coverage(app: FastAPI) -> tuple[ResourceSpec, ...]:
             continue
 
         declaration = declarations[0]
-        existing = specs_by_name.get(declaration.name)
+        # Issue #38: every surviving route contributes its own methods to its
+        # resource's served-verb set, unioned across every route declaring that
+        # resource (e.g. `auth.users` is served by seven routes and must end up with
+        # all five verbs) — a method outside `Verb` (e.g. `OPTIONS`, explicitly
+        # declared via `api_route(methods=[...])`) is filtered out, since `require()`
+        # itself 403s an unmapped verb and it's never something a role could be
+        # granted.
+        verbs_by_name.setdefault(declaration.name, set()).update(
+            Verb(method) for method in route.methods or () if method in _VERB_VALUES
+        )
+
+        existing_description = descriptions_by_name.get(declaration.name)
         if (
-            existing is not None
-            and existing.description
+            existing_description is not None
+            and existing_description
             and declaration.description
-            and existing.description != declaration.description
+            and existing_description != declaration.description
         ):
             problems.append(
                 f"resource {declaration.name!r} declared with conflicting "
-                f"descriptions: {existing.description!r} vs "
+                f"descriptions: {existing_description!r} vs "
                 f"{declaration.description!r}"
             )
             continue
-        if existing is None or (not existing.description and declaration.description):
-            specs_by_name[declaration.name] = ResourceSpec(
-                declaration.name, declaration.description
-            )
+        if existing_description is None or (
+            not existing_description and declaration.description
+        ):
+            descriptions_by_name[declaration.name] = declaration.description
 
     if problems:
         raise RouteCoverageError(
             "route coverage audit failed:\n  " + "\n  ".join(problems)
         )
 
-    return tuple(sorted(specs_by_name.values(), key=lambda spec: spec.name))
+    specs = (
+        ResourceSpec(name, description, frozenset(verbs_by_name[name]))
+        for name, description in descriptions_by_name.items()
+    )
+    return tuple(sorted(specs, key=lambda spec: spec.name))

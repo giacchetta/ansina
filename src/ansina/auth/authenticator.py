@@ -17,11 +17,18 @@ loop and any concurrent reader. The write instead fires only when the stored
 `last_used_at` is older than `last_used_resolution_seconds` — at most once per token
 per interval — via an injectable `clock` so the staleness threshold is testable
 without real sleeping, the same pattern `auth.sudo.SudoService` already uses.
+
+Issue #39 enforces `credentials.expires_at` on the same lookup: `authenticate` reads
+the injected clock exactly once and passes that single instant to both
+`find_api_token_credential`'s expiry filter and the staleness check below, so expiry
+and `last_used_at` bookkeeping can never disagree about "now". An expired token simply
+doesn't match — `resolve_principal` sees the same `None` it would for an unknown
+token, never a distinguishable outcome.
 """
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from ansina.auth.clock import Clock, iso, utc_now
@@ -48,9 +55,10 @@ class Authenticator(Protocol):
 
 
 class ApiTokenAuthenticator:
-    """Matches `credential` against any active `api_token` row via
-    `CredentialRepository.find_api_token_credential`, then (issue #28) coalesces a
-    `last_used_at` touch onto the matched row before returning its owning user.
+    """Matches `credential` against any active, unexpired `api_token` row via
+    `CredentialRepository.find_api_token_credential` (issue #39 adds the expiry
+    filter), then (issue #28) coalesces a `last_used_at` touch onto the matched row
+    before returning its owning user.
     """
 
     method = AuthMethod.API_TOKEN
@@ -68,10 +76,11 @@ class ApiTokenAuthenticator:
         self._clock = clock
 
     def authenticate(self, credential: str) -> User | None:
-        matched = self._credentials.find_api_token_credential(credential)
+        now = self._clock()
+        matched = self._credentials.find_api_token_credential(credential, now=iso(now))
         if matched is None:
             return None
-        self._touch_if_stale(matched.id, matched.last_used_at)
+        self._touch_if_stale(matched.id, matched.last_used_at, now=now)
         user_row = (
             self._db.connection()
             .execute("SELECT * FROM users WHERE id = ?", (matched.user_id,))
@@ -79,16 +88,20 @@ class ApiTokenAuthenticator:
         )
         return User.from_row(user_row) if user_row is not None else None
 
-    def _touch_if_stale(self, credential_id: str, last_used_at: str | None) -> None:
+    def _touch_if_stale(
+        self, credential_id: str, last_used_at: str | None, *, now: datetime
+    ) -> None:
         """A **string** comparison against `now - resolution`, not a parse of
         `last_used_at` — millisecond-precision ISO 8601 UTC (`auth.clock.iso`) sorts
         identically as text, the same property `SudoGrantRepository.find_active`'s
         `expires_at > ?` comparison already relies on. That avoids a parse-failure
         path to cover, and keeps this check as cheap as the write it's guarding.
+        `now` is the same instant `authenticate` already used for the expiry filter,
+        not a fresh clock read.
         """
-        threshold = iso(self._clock() - timedelta(seconds=self._resolution_seconds))
+        threshold = iso(now - timedelta(seconds=self._resolution_seconds))
         if last_used_at is None or last_used_at < threshold:
-            self._credentials.touch_last_used(credential_id, now=iso(self._clock()))
+            self._credentials.touch_last_used(credential_id, now=iso(now))
 
 
 def build_authenticators(db: Database, settings: Settings) -> tuple[Authenticator, ...]:
@@ -116,7 +129,9 @@ def resolve_principal(
     An inactive user's token deliberately stops authenticating here — neither
     `find_api_token_credential` nor `find_user_by_api_token` filters on `users.active`
     (issue #24 never asked either to), so this is the one place that invariant is
-    enforced.
+    enforced. Credential *expiry*, by contrast, is filtered one layer down, inside
+    `find_api_token_credential`'s own query (issue #39) — an expired token never even
+    reaches this function as a match.
     """
     for authenticator in authenticators:
         user = authenticator.authenticate(credential)

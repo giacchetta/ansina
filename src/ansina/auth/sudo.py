@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
     from ansina.auth.models import SudoGrant, SudoLockout
     from ansina.auth.principal import Principal
+    from ansina.auth.step_up import StepUpVerifier
     from ansina.config.settings import Settings, SudoSettings
     from ansina.storage.database import Database
 
@@ -46,6 +47,22 @@ class SudoLockedOutError(AuthError):
     """
 
     code: ClassVar[str] = "ansina.auth.sudo_locked_out"
+
+
+class StepUpUnavailableError(AuthError):
+    """`principal` has no usable step-up factor to resolve against (issue #37) — one
+    of three causes, distinguished only by `details["available_factors"]` and the
+    message, not by a separate code each: zero enrolled factors at all (the default
+    shape of any user created without a password), a requested `payload["factor"]`
+    that names a verifier the caller isn't enrolled in, or 2+ enrolled factors with no
+    `factor` given to disambiguate. Raised *before* `_record_failure` ever runs, so
+    none of the three consumes a failed-attempt lockout slot — a caller who could never
+    have succeeded shouldn't be locked out as if they'd guessed wrong. Mapped to 403,
+    same family as `ForbiddenError`/`SudoRequiredError`: the caller is authenticated,
+    just not equipped to step up this way.
+    """
+
+    code: ClassVar[str] = "ansina.auth.step_up_unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,10 +112,14 @@ class SudoService:
         """Verify `payload` against the registry's resolved verifier for `principal`.
 
         Raises `SudoLockedOutError` if this user is currently locked out (without
-        consuming another attempt). Returns `None` on a failed verification (the
-        route maps that to 401) — records the failure and locks the user out once
-        `max_failed_attempts` is reached within `attempt_window_seconds`. Returns the
-        `IssuedGrant` on success, after clearing any lockout state.
+        consuming another attempt), checked first since a locked-out caller is
+        refused regardless of what factors they hold. Raises `StepUpUnavailableError`
+        (issue #37) if no usable factor can be resolved — also without consuming an
+        attempt, since the caller could never have succeeded here. Returns `None` on
+        a failed verification (the route maps that to 401) — records the failure and
+        locks the user out once `max_failed_attempts` is reached within
+        `attempt_window_seconds`. Returns the `IssuedGrant` on success, after clearing
+        any lockout state.
         """
         user_id = principal.user.id
         now = self._clock()
@@ -115,7 +136,7 @@ class SudoService:
                 details={"retry_after_seconds": max(0.0, retry_after)},
             )
 
-        verifier = self._registry.for_principal(principal)
+        verifier = self._resolve_factor(principal, payload)
         if not verifier.verify(principal, payload):
             self._record_failure(user_id, now)
             logger.warning(
@@ -153,6 +174,62 @@ class SudoService:
             verifier=verifier.name,
             expires_at=grant.expires_at,
         )
+
+    def _resolve_factor(
+        self, principal: Principal, payload: Mapping[str, Any]
+    ) -> StepUpVerifier:
+        """Pick which of `principal`'s enrolled verifiers `payload` targets (issue
+        #37). A non-empty string `payload["factor"]` matches by `verifier.name`;
+        absent `factor` with exactly one enrolled verifier uses it (M2's existing
+        password-only shape keeps working with a bare `{"password": ...}` body — no
+        `factor` key required). Anything else — zero enrolled, an unrecognized
+        `factor`, or 2+ enrolled with no `factor` to disambiguate — raises
+        `StepUpUnavailableError` without ever calling `verify()`.
+        """
+        factors = self._registry.for_principal(principal)
+        requested = payload.get("factor")
+        available = [f.name for f in factors]
+
+        if isinstance(requested, str) and requested:
+            for verifier in factors:
+                if verifier.name == requested:
+                    return verifier
+            logger.warning(
+                "sudo step-up refused — unrecognized factor",
+                extra={
+                    "actor": principal.actor,
+                    "user_id": principal.user.id,
+                    "factor": requested,
+                },
+            )
+            raise StepUpUnavailableError(
+                f"{principal.actor!r} holds no step-up factor named {requested!r}",
+                details={"available_factors": available},
+            )
+
+        if len(factors) == 1:
+            return factors[0]
+
+        logger.warning(
+            "sudo step-up refused — no usable step-up factor",
+            extra={
+                "actor": principal.actor,
+                "user_id": principal.user.id,
+                "available_factors": available,
+            },
+        )
+        detail = (
+            f"{principal.actor!r} has no enrolled step-up factor"
+            if not factors
+            else f"{principal.actor!r} must specify which of {available} to use"
+        )
+        raise StepUpUnavailableError(detail, details={"available_factors": available})
+
+    def enrolled_factors(self, principal: Principal) -> list[str]:
+        """The verifier names `principal` could currently succeed with — backs `GET
+        /auth/me`'s `step_up_factors` (issue #37). Never raises.
+        """
+        return [v.name for v in self._registry.for_principal(principal)]
 
     def _record_failure(self, user_id: str, now: datetime) -> None:
         current = self._lockouts.get(user_id)

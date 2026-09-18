@@ -40,16 +40,23 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/auth/users/{user_id}/password",
         "/auth/users/{user_id}/tokens",
         "/auth/users/{user_id}/tokens/{token_id}",
+        "/auth/users/{user_id}/totp",
         "/auth/users/{user_id}/roles/{role_id}",
         "/auth/groups",
         "/auth/groups/{group_id}",
         "/auth/groups/{group_id}/members/{user_id}",
         "/auth/groups/{group_id}/roles/{role_id}",
         "/auth/roles",
+        "/auth/roles/{role_id}",
+        "/auth/role-mappings",
+        "/auth/role-mappings/{mapping_id}",
         "/auth/permissions",
         "/auth/me",
         "/auth/me/tokens",
         "/auth/me/tokens/{token_id}",
+        "/auth/me/totp",
+        "/auth/oidc/login",
+        "/auth/oidc/callback",
     }
 
 

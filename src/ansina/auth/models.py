@@ -34,6 +34,32 @@ MUTATING_VERBS: frozenset[Verb] = frozenset(
     {Verb.POST, Verb.PUT, Verb.PATCH, Verb.DELETE}
 )
 
+# Canonical declaration order — used everywhere a set of verbs needs a stable, readable
+# ordering: encoding a `resources.verbs` column value and rendering `GET /auth/
+# permissions`'s own `verbs` list (issue #38).
+_VERB_ORDER: tuple[Verb, ...] = tuple(Verb)
+
+
+def ordered_verbs(verbs: frozenset[Verb]) -> tuple[Verb, ...]:
+    """`verbs`, in `Verb`'s declaration order (GET, POST, PUT, PATCH, DELETE) — the one
+    ordering every verb-list-shaped output uses, so two call sites never disagree.
+    """
+    return tuple(verb for verb in _VERB_ORDER if verb in verbs)
+
+
+def encode_verbs(verbs: frozenset[Verb]) -> str:
+    """A `resources.verbs` column value: a comma-separated, canonically ordered list
+    (e.g. `"GET,POST,PATCH"`), empty string for no served verbs.
+    """
+    return ",".join(verb.value for verb in ordered_verbs(verbs))
+
+
+def decode_verbs(raw: str) -> frozenset[Verb]:
+    """The inverse of `encode_verbs` — tolerates the empty string (no verbs)."""
+    if not raw:
+        return frozenset()
+    return frozenset(Verb(part) for part in raw.split(","))
+
 
 class RoleSlug(StrEnum):
     """The four builtin roles (issue #24). Not compared by ordinal anywhere — every
@@ -58,23 +84,30 @@ class SubjectType(StrEnum):
 
 class CredentialType(StrEnum):
     """What a `credentials` row authenticates. Typed from day one (issue #24) so a
-    future second-factor type is a new member, not a schema change.
+    future second-factor type is a new member, not a schema change. `TOTP` (issue #41)
+    is the first to actually exercise that — its `credentials.type` CHECK widening
+    (`storage/migrations/0006_totp_credential.sql`) is the schema change; the enum
+    itself only grows a member.
     """
 
     PASSWORD = "password"
     API_TOKEN = "api_token"
+    TOTP = "totp"
 
 
 @dataclass(frozen=True, slots=True)
 class Resource:
     """A row in `resources` — a stable, dotted, URL-independent identifier a route
     declares for itself (e.g. `heart.tick`), decoupled from the URL so renaming a route
-    never orphans a stored permission grant.
+    never orphans a stored permission grant. `verbs` (issue #38) is the set of HTTP
+    methods a route actually answers to for this resource — not every grantable
+    `Verb`, which `GET /auth/permissions` used to assume.
     """
 
     name: str
     description: str
     registered_at: str
+    verbs: frozenset[Verb]
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Self:
@@ -82,6 +115,7 @@ class Resource:
             name=row["name"],
             description=row["description"],
             registered_at=row["registered_at"],
+            verbs=decode_verbs(row["verbs"]),
         )
 
 
@@ -182,6 +216,9 @@ class RoleAssignment:
     """A row in `role_assignments`. `subject_id` refers to a `users.id` or
     `"groups".id` depending on `subject_type` — deliberately not a foreign key (SQLite
     has no polymorphic FK); the repository layer verifies the subject exists.
+    `source` (issue #42) is `'local'` for a row created through the ordinary
+    role-assignment routes, or a provider identifier for one
+    `ansina.auth.role_sync.sync_mapped_roles` created and owns.
     """
 
     id: str
@@ -189,6 +226,7 @@ class RoleAssignment:
     subject_id: str
     role_id: str
     created_at: str
+    source: str = "local"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Self:
@@ -198,6 +236,34 @@ class RoleAssignment:
             subject_id=row["subject_id"],
             role_id=row["role_id"],
             created_at=row["created_at"],
+            source=row["source"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RoleMapping:
+    """A row in `role_mappings` (issue #42) — an IdP claim value mapped onto a role.
+    `ansina.auth.role_sync.sync_mapped_roles` resolves which of a login's claims match
+    a `(provider, claim, value)` triple and reconciles the user's `role_assignments`
+    rows for that `provider` to match exactly. `(provider, claim, value, role_id)` is
+    unique (`idx_role_mappings_tuple`), so a duplicate submission is a 409, not a
+    second, redundant row.
+    """
+
+    id: str
+    provider: str
+    claim: str
+    value: str
+    role_id: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Self:
+        return cls(
+            id=row["id"],
+            provider=row["provider"],
+            claim=row["claim"],
+            value=row["value"],
+            role_id=row["role_id"],
         )
 
 
@@ -307,4 +373,31 @@ class ExternalIdentity:
             provider=row["provider"],
             subject=row["subject"],
             created_at=row["created_at"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class OidcLoginState:
+    """A row in `oidc_login_states` (issue #43) — the in-flight state for one
+    authorization-code login, between `POST /auth/oidc/login` issuing it and
+    `GET /auth/oidc/callback` redeeming it via `OidcLoginStateRepository.take`, which
+    deletes the row in the same transaction it reads it, making every row single-use.
+    See `storage/migrations/0008_oidc_login_state.sql` for what each column defends
+    against.
+    """
+
+    state: str
+    nonce: str
+    code_verifier: str
+    created_at: str
+    expires_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Self:
+        return cls(
+            state=row["state"],
+            nonce=row["nonce"],
+            code_verifier=row["code_verifier"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
         )

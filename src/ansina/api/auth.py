@@ -35,7 +35,17 @@ if TYPE_CHECKING:
 
 # Reachable with no token, even when auth is enabled. Everything else is
 # deny-by-default, including /version and the OpenAPI/docs routes.
-PUBLIC_PATHS = frozenset({"/healthz", "/readyz"})
+#
+# Issue #43 adds the first non-health-probe entries: a caller cannot be authenticated
+# *before* completing an OIDC login, so `/auth/oidc/login` (start the authorization-code
+# flow) and `/auth/oidc/callback` (redeem it) must be reachable with no bearer token —
+# the deliberate, minimal widening of this set the issue's own scope calls out by name.
+# Both routes are 503 when `[security.oidc] enabled = false`
+# (`api.routes.oidc._disabled_response`), and neither declares a `require(...)` — see
+# `api.routes.oidc`'s module docstring for the full reasoning.
+PUBLIC_PATHS = frozenset(
+    {"/healthz", "/readyz", "/auth/oidc/login", "/auth/oidc/callback"}
+)
 
 _HEADER_NAME = b"authorization"
 _SCHEME = "bearer"

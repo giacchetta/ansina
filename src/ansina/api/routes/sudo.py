@@ -1,12 +1,16 @@
-"""Sudo step-up endpoints. See issue #26.
+"""Sudo step-up endpoints. See issue #26, generalized to a verifier set by issue #37.
 
-`POST /auth/sudo` re-verifies the caller's identity through whatever `StepUpVerifier`
-`ansina.auth.step_up.StepUpRegistry` resolves for them (M2: password) and, on success,
-issues a short-lived grant the caller then presents on sensitive `auth.*` calls via
-`X-Sudo-Token` (`ansina.api.auth.BearerAuthMiddleware` reads it). `DELETE /auth/sudo`
-lets the caller step back down deliberately; `DELETE /auth/sudo/grants` is the
-break-glass path — it revokes *every* user's active grant, itself gated
-`sensitive=True` so reaching it already requires a live grant.
+`POST /auth/sudo` re-verifies the caller's identity through whichever `StepUpVerifier`
+`ansina.auth.step_up.StepUpRegistry` resolves from the caller's *enrolled* factors and
+an optional `payload["factor"]` (M2 shipped password only; #37 generalizes resolution,
+still password-only until #41 adds TOTP) and, on success, issues a short-lived grant the
+caller then presents on sensitive `auth.*` calls via `X-Sudo-Token`
+(`ansina.api.auth.BearerAuthMiddleware` reads it). A caller with no usable factor gets
+403 `ansina.auth.step_up_unavailable` rather than burning a failed-attempt lockout slot
+against a credential it could never hold. `DELETE /auth/sudo` lets the caller step back
+down deliberately; `DELETE /auth/sudo/grants` is the break-glass path — it revokes
+*every* user's active grant, itself gated `sensitive=True` so reaching it already
+requires a live grant.
 
 All three are `auth.*` resources, so `auth.policy.permitted_verbs` already restricts
 them to Maintain/Admin with no policy change needed — `Read`/`Write` get the ordinary
@@ -45,7 +49,10 @@ _GRANTS_DESCRIPTION = (
 class SudoRequest(BaseModel):
     """Opaque payload handed to the resolved `StepUpVerifier` unexamined — the *port*
     decides what a payload must contain (a `password` key, for M2's one verifier),
-    never this route.
+    never this route. `factor` (issue #37, optional) names which of the caller's
+    enrolled verifiers to resolve against — required only when 2+ are enrolled;
+    `SudoService` reads it, not this model, since `extra="allow"` already lets it
+    through unexamined.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -77,6 +84,11 @@ def _require_sudo_grants() -> Depends:
     responses={
         200: {"model": SudoGrantResponse},
         401: {"description": "Step-up verification failed."},
+        403: {
+            "description": "No usable step-up factor — zero enrolled, an "
+            "unrecognized `factor`, or 2+ enrolled with no `factor` to disambiguate "
+            "(issue #37)."
+        },
         429: {"description": "Locked out after too many failed attempts."},
     },
     dependencies=[_require_sudo()],

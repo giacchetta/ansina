@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from ansina.auth.models import RoleSlug, Verb
 from ansina.auth.policy import ResourceSpec, permitted_verbs
 from ansina.auth.reconciler import reconcile_builtin_roles, sync_resources
@@ -11,8 +14,8 @@ from ansina.auth.repositories import (
 from ansina.storage.database import Database
 
 _SPECS = (
-    ResourceSpec("heart.tick", "tick loop"),
-    ResourceSpec("auth.users", "user management"),
+    ResourceSpec("heart.tick", "tick loop", frozenset({Verb.GET})),
+    ResourceSpec("auth.users", "user management", frozenset(Verb)),
 )
 
 
@@ -23,10 +26,20 @@ def test_sync_resources_creates_every_named_resource(db: Database) -> None:
     assert names == {"heart.tick", "auth.users"}
 
 
+def test_sync_resources_persists_served_verbs(db: Database) -> None:
+    sync_resources(db, _SPECS)
+
+    by_name = {r.name: r for r in ResourceRepository(db).list_all()}
+    assert by_name["heart.tick"].verbs == {Verb.GET}
+    assert by_name["auth.users"].verbs == set(Verb)
+
+
 def test_sync_resources_updates_a_changed_description(db: Database) -> None:
     sync_resources(db, _SPECS)
 
-    sync_resources(db, (ResourceSpec("heart.tick", "updated"), _SPECS[1]))
+    sync_resources(
+        db, (ResourceSpec("heart.tick", "updated", frozenset({Verb.GET})), _SPECS[1])
+    )
 
     resource = next(
         r for r in ResourceRepository(db).list_all() if r.name == "heart.tick"
@@ -67,12 +80,64 @@ def test_reconcile_builtin_roles_produces_exactly_the_policy_predicted_grants(
         role = roles.get_by_slug(slug.value)
         assert role is not None
         actual = {(p.resource, p.verb) for p in permissions.list_for_role(role.id)}
+        # Issue #47: the policy-predicted verbs, intersected with what the resource
+        # actually serves (`heart.tick` is GET-only in `_SPECS`).
         expected = {
             (spec.name, verb)
             for spec in _SPECS
-            for verb in permitted_verbs(slug, spec.name)
+            for verb in permitted_verbs(slug, spec.name) & spec.verbs
         }
         assert actual == expected
+
+
+def test_reconcile_builtin_roles_never_grants_a_verb_the_resource_does_not_serve(
+    db: Database,
+) -> None:
+    """Issue #47 AC: no builtin role holds a grant for `(resource, verb)` where
+    `verb` is not in that resource's `resources.verbs` — `heart.tick` only serves GET,
+    so even Admin/Maintain (whose fixed policy predicts every verb) end up with GET
+    only, never POST/PUT/PATCH/DELETE.
+    """
+    sync_resources(db, _SPECS)
+
+    reconcile_builtin_roles(db)
+
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    for slug in RoleSlug:
+        role = roles.get_by_slug(slug.value)
+        assert role is not None
+        grants = {
+            p for p in permissions.list_for_role(role.id) if p.resource == "heart.tick"
+        }
+        assert {p.verb for p in grants} == {Verb.GET}
+
+
+def test_reconcile_builtin_roles_prunes_a_grant_the_catalog_no_longer_serves(
+    db: Database,
+) -> None:
+    """Issue #47's migration path: a grant `permitted_verbs` still predicts but the
+    served-verb catalog no longer admits (as a pre-#47 boot would have materialized)
+    is pruned on the next reconcile — the deliberate one-time diff the issue calls for.
+    """
+    sync_resources(db, _SPECS)
+    reconcile_builtin_roles(db)
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    admin = roles.get_by_slug(RoleSlug.ADMIN.value)
+    assert admin is not None
+    # Simulate a pre-#47 boot's over-grant: `heart.tick` only serves GET, but the old
+    # reconciler would have granted Admin every mutating verb too.
+    permissions.grant(admin.id, "heart.tick", Verb.DELETE)
+
+    reconcile_builtin_roles(db)
+
+    remaining = {
+        p.verb
+        for p in permissions.list_for_role(admin.id)
+        if p.resource == "heart.tick"
+    }
+    assert remaining == {Verb.GET}
 
 
 def test_reconcile_builtin_roles_is_idempotent(db: Database) -> None:
@@ -127,3 +192,37 @@ def test_reconcile_builtin_roles_never_touches_a_non_builtin_roles_grants(
     refreshed = roles.get(custom.id)
     assert refreshed is not None
     assert refreshed.builtin is False
+
+
+def test_retiring_a_resource_held_by_a_custom_role_warns_naming_it(
+    db: Database,
+    captured_logs: Callable[[], list[dict[str, Any]]],
+) -> None:
+    """Issue #38 AC: retiring a resource a custom role holds a grant on logs a
+    warning naming that role, before the `ON DELETE CASCADE` drops the grant.
+    """
+    sync_resources(db, _SPECS)
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    custom = roles.create("auditor", "Auditor", "a hand-defined role")
+    permissions.grant(custom.id, "auth.users", Verb.GET)
+
+    sync_resources(db, (_SPECS[0],))  # drops "auth.users" from the catalog
+
+    warnings = [entry for entry in captured_logs() if entry["level"] == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0]["extra"]["resource"] == "auth.users"
+    assert warnings[0]["extra"]["roles"] == "auditor"
+
+
+def test_retiring_a_resource_held_only_by_builtin_roles_warns_nothing(
+    db: Database,
+    captured_logs: Callable[[], list[dict[str, Any]]],
+) -> None:
+    sync_resources(db, _SPECS)
+    reconcile_builtin_roles(db)  # grants every builtin role's role_permissions rows
+
+    sync_resources(db, (_SPECS[0],))  # drops "auth.users" from the catalog
+
+    warnings = [entry for entry in captured_logs() if entry["level"] == "WARNING"]
+    assert warnings == []

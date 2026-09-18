@@ -45,6 +45,22 @@ def test_public_paths_reachable_without_token(
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("method", "path"), [("POST", "/auth/oidc/login"), ("GET", "/auth/oidc/callback")]
+)
+def test_oidc_paths_reachable_without_token(
+    method: str, path: str, authed_client: TestClient
+) -> None:
+    """Issue #43: the first non-health-probe `PUBLIC_PATHS` entries — reachable with
+    no bearer token even when auth is enforced. `authed_client`'s app has OIDC
+    disabled (the default), so the route itself answers 503 — the point here is only
+    that `BearerAuthMiddleware` never intercepts the request for lacking a token.
+    """
+    response = authed_client.request(method, path)
+
+    assert response.status_code != 401
+
+
 @pytest.mark.parametrize("path", ["/version", "/openapi.json"])
 def test_protected_paths_require_token(path: str, authed_client: TestClient) -> None:
     response = authed_client.get(path)
@@ -213,6 +229,57 @@ def test_an_inactive_users_token_no_longer_authenticates(
 
     assert response.status_code == 401
     assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_an_expired_tokens_no_longer_authenticates(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """Issue #39's headline AC, exercised end to end through `BearerAuthMiddleware`
+    rather than just `CredentialRepository`/`ApiTokenAuthenticator` directly: a token
+    whose `expires_at` is already in the past gets the exact same 401
+    `ansina.unauthorized` an unknown token would, never a distinguishable response.
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("expired-user")
+    role = RoleRepository(db).get_by_slug("admin")
+    assert role is not None
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+    CredentialRepository(db).create_api_token(
+        user.id,
+        "expired-user-token",
+        expires_at="2020-01-01T00:00:00.000Z",
+    )
+
+    response = authed_client.get(
+        "/version", headers={"Authorization": "Bearer expired-user-token"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_a_not_yet_expired_tokens_authenticates(
+    authed_app: FastAPI, authed_client: TestClient
+) -> None:
+    """The mirror of the test above: a future `expires_at` is a live token, not an
+    expired one — proves the comparison direction, not just "some filter exists."
+    """
+    db = authed_app.state.db
+    user = UserRepository(db).create("not-yet-expired-user")
+    role = RoleRepository(db).get_by_slug("admin")
+    assert role is not None
+    RoleAssignmentRepository(db).assign(SubjectType.USER, user.id, role.id)
+    CredentialRepository(db).create_api_token(
+        user.id,
+        "not-yet-expired-token",
+        expires_at="2099-01-01T00:00:00.000Z",
+    )
+
+    response = authed_client.get(
+        "/version", headers={"Authorization": "Bearer not-yet-expired-token"}
+    )
+
+    assert response.status_code == 200
 
 
 def test_a_read_role_user_gets_403_on_a_mutating_route_before_route_logic_runs(
