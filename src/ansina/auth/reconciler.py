@@ -58,8 +58,19 @@ def sync_resources(db: Database, specs: tuple[ResourceSpec, ...]) -> None:
 
 def reconcile_builtin_roles(db: Database) -> None:
     """Seed the four builtin roles, then make every builtin role's `role_permissions`
-    rows match `auth.policy.permitted_verbs` exactly, for every currently-catalogued
-    resource.
+    rows match `auth.policy.permitted_verbs` *intersected with* each resource's own
+    `resources.verbs` (issue #47) — never a grant on a verb no route actually serves,
+    even where the fixed policy would otherwise predict one (e.g. `system.version` only
+    ever answers GET, so `permitted_verbs` predicting Admin/Maintain `DELETE` there
+    never survives into `role_permissions`). Issue #38 already made `GET
+    /auth/permissions` report only served verbs; this closes the matching gap on the
+    write side, so `GET /auth/roles` and `GET /auth/permissions` can never disagree
+    about what's grantable for a builtin role.
+
+    Deliberate one-time visible diff: the first boot after this ships prunes every
+    existing builtin-role grant on a verb its resource doesn't serve — harmless, since
+    `require()` never fires without a route to reach it, but a real, visible change to
+    `GET /auth/roles`' output.
 
     Scoped to `builtin = 1` roles only — a future custom role's grants are never read,
     inserted, or deleted by this function, by construction (the query it diffs against
@@ -74,14 +85,14 @@ def reconcile_builtin_roles(db: Database) -> None:
         for spec in BUILTIN_ROLES
     }
 
-    catalogued = [r.name for r in resources.list_all()]
+    catalogued = resources.list_all()
 
     for slug, role in role_by_slug.items():
         current = {(p.resource, p.verb) for p in permissions.list_for_role(role.id)}
         desired = {
-            (resource, verb)
+            (resource.name, verb)
             for resource in catalogued
-            for verb in permitted_verbs(slug, resource)
+            for verb in permitted_verbs(slug, resource.name) & resource.verbs
         }
 
         for resource, verb in desired - current:

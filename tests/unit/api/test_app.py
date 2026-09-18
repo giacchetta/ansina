@@ -16,7 +16,9 @@ from ansina.auth.oidc_login import OidcLoginService
 from ansina.auth.repositories import (
     CredentialRepository,
     ExternalIdentityRepository,
+    ResourceRepository,
     RoleAssignmentRepository,
+    RolePermissionRepository,
     RoleRepository,
     UserRepository,
 )
@@ -398,6 +400,26 @@ def test_lifespan_seeds_builtin_roles_and_resources(app: FastAPI) -> None:
         slugs = {r.slug for r in roles.list_all()}
         assert slugs == {slug.value for slug in RoleSlug}
         assert all(r.builtin for r in roles.list_all())
+
+
+def test_lifespan_never_grants_a_builtin_role_a_verb_its_resource_does_not_serve(
+    app: FastAPI,
+) -> None:
+    """Issue #47 AC, against the real route catalog: `system.version` only ever
+    answers GET, so no builtin role should end up with e.g. `system.version:DELETE`.
+    """
+    with TestClient(app):
+        roles = RoleRepository(app.state.db)
+        permissions = RolePermissionRepository(app.state.db)
+        resources_by_name = {
+            r.name: r for r in ResourceRepository(app.state.db).list_all()
+        }
+
+        for role in roles.list_all():
+            if not role.builtin:
+                continue
+            for grant in permissions.list_for_role(role.id):
+                assert grant.verb in resources_by_name[grant.resource].verbs
 
 
 def test_lifespan_with_auth_disabled_creates_no_bootstrap_admin(app: FastAPI) -> None:

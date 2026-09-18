@@ -63,6 +63,27 @@ def test_lists_builtin_roles_with_their_grants(
     assert any(g["resource"] == "auth.roles" for g in admin["permissions"])
 
 
+def test_roles_and_permissions_never_disagree_about_what_is_grantable(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    """Issue #47 AC: `GET /auth/roles` and `GET /auth/permissions` never disagree —
+    every builtin role's grant is on a verb its resource is listed as actually
+    serving.
+    """
+    headers = {"Authorization": f"Bearer {authed_token}"}
+    roles_body = authed_client.get("/auth/roles", headers=headers).json()
+    permissions_body = authed_client.get("/auth/permissions", headers=headers).json()
+    served_verbs = {
+        entry["resource"]: set(entry["verbs"]) for entry in permissions_body
+    }
+
+    for role in roles_body:
+        if not role["builtin"]:
+            continue
+        for grant in role["permissions"]:
+            assert grant["verb"] in served_verbs[grant["resource"]]
+
+
 # --- write: the sudo gate (issue #37's fail-closed-on-sensitivity change) ----------
 
 

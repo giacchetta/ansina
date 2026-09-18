@@ -80,12 +80,64 @@ def test_reconcile_builtin_roles_produces_exactly_the_policy_predicted_grants(
         role = roles.get_by_slug(slug.value)
         assert role is not None
         actual = {(p.resource, p.verb) for p in permissions.list_for_role(role.id)}
+        # Issue #47: the policy-predicted verbs, intersected with what the resource
+        # actually serves (`heart.tick` is GET-only in `_SPECS`).
         expected = {
             (spec.name, verb)
             for spec in _SPECS
-            for verb in permitted_verbs(slug, spec.name)
+            for verb in permitted_verbs(slug, spec.name) & spec.verbs
         }
         assert actual == expected
+
+
+def test_reconcile_builtin_roles_never_grants_a_verb_the_resource_does_not_serve(
+    db: Database,
+) -> None:
+    """Issue #47 AC: no builtin role holds a grant for `(resource, verb)` where
+    `verb` is not in that resource's `resources.verbs` — `heart.tick` only serves GET,
+    so even Admin/Maintain (whose fixed policy predicts every verb) end up with GET
+    only, never POST/PUT/PATCH/DELETE.
+    """
+    sync_resources(db, _SPECS)
+
+    reconcile_builtin_roles(db)
+
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    for slug in RoleSlug:
+        role = roles.get_by_slug(slug.value)
+        assert role is not None
+        grants = {
+            p for p in permissions.list_for_role(role.id) if p.resource == "heart.tick"
+        }
+        assert {p.verb for p in grants} == {Verb.GET}
+
+
+def test_reconcile_builtin_roles_prunes_a_grant_the_catalog_no_longer_serves(
+    db: Database,
+) -> None:
+    """Issue #47's migration path: a grant `permitted_verbs` still predicts but the
+    served-verb catalog no longer admits (as a pre-#47 boot would have materialized)
+    is pruned on the next reconcile — the deliberate one-time diff the issue calls for.
+    """
+    sync_resources(db, _SPECS)
+    reconcile_builtin_roles(db)
+    roles = RoleRepository(db)
+    permissions = RolePermissionRepository(db)
+    admin = roles.get_by_slug(RoleSlug.ADMIN.value)
+    assert admin is not None
+    # Simulate a pre-#47 boot's over-grant: `heart.tick` only serves GET, but the old
+    # reconciler would have granted Admin every mutating verb too.
+    permissions.grant(admin.id, "heart.tick", Verb.DELETE)
+
+    reconcile_builtin_roles(db)
+
+    remaining = {
+        p.verb
+        for p in permissions.list_for_role(admin.id)
+        if p.resource == "heart.tick"
+    }
+    assert remaining == {Verb.GET}
 
 
 def test_reconcile_builtin_roles_is_idempotent(db: Database) -> None:
