@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ansina.auth.authorization import ForbiddenError, SudoRequiredError
 from ansina.auth.encryption import EncryptionKeyMissingError
+from ansina.auth.login_throttle import LoginThrottledError
 from ansina.auth.management import (
     BootstrapIdentityError,
     InvalidGrantError,
@@ -57,6 +58,7 @@ CODE_OIDC_DISABLED = "ansina.auth.oidc_disabled"
 CODE_FORBIDDEN = ForbiddenError.code
 CODE_SUDO_REQUIRED = SudoRequiredError.code
 CODE_SUDO_LOCKED_OUT = SudoLockedOutError.code
+CODE_LOGIN_THROTTLED = LoginThrottledError.code
 CODE_STEP_UP_UNAVAILABLE = StepUpUnavailableError.code
 CODE_SELF_ESCALATION = SelfEscalationError.code
 CODE_LAST_ADMIN = LastAdminError.code
@@ -95,6 +97,12 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # already suggest, and it's a rate-limiting concern, not an identity/permission
     # one (issue #26).
     SudoLockedOutError: 429,
+    # 429, same family — `POST /auth/login` (#50), not yet built as of this issue, is
+    # refused before a password is even checked. Unlike `SudoLockedOutError`'s caller,
+    # this one is *not* authenticated — throttling anonymous attempts is the entire
+    # point of issue #49 (see `auth.login_throttle`'s module docstring for why this
+    # can't reuse `SudoLockedOutError`'s own machinery).
+    LoginThrottledError: 429,
     # 503: `POST /auth/me/totp` (issue #41) tried to encrypt a fresh secret with no
     # `[security.encryption] key` configured — a server misconfiguration, never a
     # client mistake, and the "feature isn't available right now" family

@@ -3,13 +3,14 @@ from __future__ import annotations
 import pytest
 
 from ansina.auth.hashing import Argon2Params
-from ansina.auth.models import CredentialType, SubjectType, Verb
+from ansina.auth.models import CredentialType, LoginAttemptScope, SubjectType, Verb
 from ansina.auth.repositories import (
     BuiltinRoleError,
     CredentialRepository,
     DuplicateError,
     ExternalIdentityRepository,
     GroupRepository,
+    LoginAttemptRepository,
     ResourceRepository,
     RoleAssignmentRepository,
     RoleInUseError,
@@ -1467,6 +1468,125 @@ def test_sudo_lockout_clear(db: Database) -> None:
 
 def test_sudo_lockout_clear_of_unknown_user_is_a_no_op(db: Database) -> None:
     SudoLockoutRepository(db).clear("nobody")
+
+
+# --- LoginAttemptRepository (issue #49) -------------------------------------------
+
+
+def test_login_attempt_get_of_unknown_key_returns_none(db: Database) -> None:
+    assert LoginAttemptRepository(db).get(LoginAttemptScope.USERNAME, "nobody") is None
+
+
+def test_login_attempt_set_creates_and_updates(db: Database) -> None:
+    attempts = LoginAttemptRepository(db)
+
+    attempts.set(
+        LoginAttemptScope.USERNAME,
+        "alice",
+        failed_count=1,
+        first_failed_at=_EARLY,
+        locked_until=None,
+    )
+    updated = attempts.set(
+        LoginAttemptScope.USERNAME,
+        "alice",
+        failed_count=2,
+        first_failed_at=_EARLY,
+        locked_until=_LATE,
+    )
+
+    assert updated.failed_count == 2
+    assert updated.locked_until == _LATE
+    fetched = attempts.get(LoginAttemptScope.USERNAME, "alice")
+    assert fetched is not None
+    assert fetched.failed_count == 2
+
+
+def test_login_attempt_scopes_are_independent_keys(db: Database) -> None:
+    """A 'username' row and an 'ip' row with the same `key` string never collide —
+    scope is part of the primary key."""
+    attempts = LoginAttemptRepository(db)
+
+    attempts.set(
+        LoginAttemptScope.USERNAME,
+        "10.0.0.1",
+        failed_count=1,
+        first_failed_at=_EARLY,
+        locked_until=None,
+    )
+    attempts.set(
+        LoginAttemptScope.IP,
+        "10.0.0.1",
+        failed_count=9,
+        first_failed_at=_EARLY,
+        locked_until=None,
+    )
+
+    username_row = attempts.get(LoginAttemptScope.USERNAME, "10.0.0.1")
+    ip_row = attempts.get(LoginAttemptScope.IP, "10.0.0.1")
+    assert username_row is not None
+    assert ip_row is not None
+    assert username_row.failed_count == 1
+    assert ip_row.failed_count == 9
+
+
+def test_login_attempt_clear(db: Database) -> None:
+    attempts = LoginAttemptRepository(db)
+    attempts.set(
+        LoginAttemptScope.USERNAME,
+        "alice",
+        failed_count=1,
+        first_failed_at=_EARLY,
+        locked_until=None,
+    )
+
+    attempts.clear(LoginAttemptScope.USERNAME, "alice")
+
+    assert attempts.get(LoginAttemptScope.USERNAME, "alice") is None
+
+
+def test_login_attempt_clear_of_unknown_key_is_a_no_op(db: Database) -> None:
+    LoginAttemptRepository(db).clear(LoginAttemptScope.USERNAME, "nobody")
+
+
+def test_login_attempt_delete_expired_removes_only_unlocked_and_stale_rows(
+    db: Database,
+) -> None:
+    attempts = LoginAttemptRepository(db)
+    far_future = "2027-01-01T00:00:00.000Z"
+    # Unlocked, and its first failure is before the cutoff — dead, must be swept.
+    attempts.set(
+        LoginAttemptScope.USERNAME,
+        "stale",
+        failed_count=1,
+        first_failed_at=_EARLY,
+        locked_until=None,
+    )
+    # Still locked (its `locked_until` is after `now`, even though its first failure
+    # predates the cutoff) — must survive: nothing guarantees
+    # lockout_seconds >= attempt_window_seconds.
+    attempts.set(
+        LoginAttemptScope.USERNAME,
+        "locked",
+        failed_count=5,
+        first_failed_at=_EARLY,
+        locked_until=far_future,
+    )
+    # Unlocked, but its first failure is after the cutoff — a live streak, must
+    # survive.
+    attempts.set(
+        LoginAttemptScope.USERNAME,
+        "fresh",
+        failed_count=1,
+        first_failed_at=_LATE,
+        locked_until=None,
+    )
+
+    attempts.delete_expired(now=_LATE, first_failed_before=_EARLY)
+
+    assert attempts.get(LoginAttemptScope.USERNAME, "stale") is None
+    assert attempts.get(LoginAttemptScope.USERNAME, "locked") is not None
+    assert attempts.get(LoginAttemptScope.USERNAME, "fresh") is not None
 
 
 # --- RoleMappingRepository (issue #42) -------------------------------------------

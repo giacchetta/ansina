@@ -28,6 +28,8 @@ from ansina.auth.models import (
     CredentialType,
     ExternalIdentity,
     Group,
+    LoginAttempt,
+    LoginAttemptScope,
     OidcLoginState,
     Resource,
     Role,
@@ -1227,6 +1229,84 @@ class SudoLockoutRepository:
     def clear(self, user_id: str) -> None:
         with self._db.transaction() as cursor:
             cursor.execute("DELETE FROM sudo_lockouts WHERE user_id = ?", (user_id,))
+
+
+class LoginAttemptRepository:
+    """CRUD on `login_attempts` (issue #49) — at most one row per `(scope, key)` pair.
+    Mirrors `SudoLockoutRepository` method for method: the lockout arithmetic itself
+    (when to reset, when to lock) lives in `auth.login_throttle.LoginThrottle`, this
+    repository only persists whatever it decides.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def get(self, scope: LoginAttemptScope, key: str) -> LoginAttempt | None:
+        row = (
+            self._db.connection()
+            .execute(
+                "SELECT * FROM login_attempts WHERE scope = ? AND key = ?",
+                (scope.value, key),
+            )
+            .fetchone()
+        )
+        return LoginAttempt.from_row(row) if row is not None else None
+
+    def set(
+        self,
+        scope: LoginAttemptScope,
+        key: str,
+        *,
+        failed_count: int,
+        first_failed_at: str | None,
+        locked_until: str | None,
+    ) -> LoginAttempt:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO login_attempts
+                    (scope, key, failed_count, first_failed_at, locked_until)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (scope, key) DO UPDATE SET
+                    failed_count = excluded.failed_count,
+                    first_failed_at = excluded.first_failed_at,
+                    locked_until = excluded.locked_until
+                """,
+                (scope.value, key, failed_count, first_failed_at, locked_until),
+            )
+            row = cursor.execute(
+                "SELECT * FROM login_attempts WHERE scope = ? AND key = ?",
+                (scope.value, key),
+            ).fetchone()
+        return LoginAttempt.from_row(row)
+
+    def clear(self, scope: LoginAttemptScope, key: str) -> None:
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM login_attempts WHERE scope = ? AND key = ?",
+                (scope.value, key),
+            )
+
+    def delete_expired(self, *, now: str, first_failed_before: str) -> None:
+        """Sweeps rows that are both unlocked (`locked_until` is `None` or already
+        past) and outside their failure-streak window (`first_failed_at` is `None` or
+        older than `first_failed_before`) — a row failing either test is still live
+        and must survive the sweep. Two separate cutoffs rather than one: nothing
+        guarantees `lockout_seconds >= attempt_window_seconds`, so a row can be
+        outside its streak window while still locked, or vice versa. Called as a
+        documented side effect of `LoginThrottle.record_failure`, the same "sweep on
+        the already-writing path" shape `OidcLoginService.start_login` uses for
+        `oidc_login_states`.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM login_attempts
+                 WHERE (locked_until IS NULL OR locked_until <= ?)
+                   AND (first_failed_at IS NULL OR first_failed_at <= ?)
+                """,
+                (now, first_failed_before),
+            )
 
 
 class ExternalIdentityRepository:

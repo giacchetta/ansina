@@ -179,6 +179,23 @@ max_failed_attempts = 5
 attempt_window_seconds = 300.0
 lockout_seconds = 900.0
 
+[security.login]
+# Login throttle (issue #49): per-username and per-IP brute-force protection for
+# POST /auth/login (#50). Deliberately separate from [security.sudo] above -- an
+# anonymous login attempt is a different caller and threat model than an
+# already-authenticated step-up, so the two are independently tunable.
+#
+# Two independent thresholds: max_failed_attempts_per_username catches repeated
+# guesses against one account (throttled identically whether or not that username
+# exists, so the throttle itself can't be used to enumerate valid usernames);
+# max_failed_attempts_per_ip (a higher ceiling, since one IP legitimately serves many
+# users) catches a spray across many distinct usernames that never trips any single
+# username bucket.
+max_failed_attempts_per_username = 5
+max_failed_attempts_per_ip = 20
+attempt_window_seconds = 900.0
+lockout_seconds = 900.0
+
 [security.encryption]
 # AES-GCM key for TOTP secrets at rest (issue #41, "ansina.auth.encryption"). Unset by
 # default -- nothing needs it until a user enrolls TOTP via POST /auth/me/totp, but

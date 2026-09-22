@@ -253,6 +253,26 @@ class SudoSettings(BaseModel):
     lockout_seconds: float = Field(default=900.0, gt=0)
 
 
+class LoginSettings(BaseModel):
+    """Login-throttle tuning for `ansina.auth.login_throttle.LoginThrottle`, consumed
+    by issue #49 ahead of `POST /auth/login` (#50). Deliberately separate from
+    `SudoSettings` above — different caller (an anonymous login attempt, not an
+    already-authenticated step-up), different threat model, independently tunable.
+
+    Two independent thresholds, not one: `max_failed_attempts_per_username` catches
+    repeated guesses against one account; `max_failed_attempts_per_ip` (a higher
+    ceiling, since one IP legitimately serves many users) catches a spray across many
+    distinct usernames that never trips any single username bucket.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    max_failed_attempts_per_username: int = Field(default=5, ge=1)
+    max_failed_attempts_per_ip: int = Field(default=20, ge=1)
+    attempt_window_seconds: float = Field(default=900.0, gt=0)
+    lockout_seconds: float = Field(default=900.0, gt=0)
+
+
 # AES-256 needs exactly 32 raw bytes; `secrets.token_urlsafe(32)` is the generator this
 # validator's own error message recommends, so the shape it produces (unpadded
 # url-safe base64) is exactly what's accepted here.
@@ -474,6 +494,7 @@ class SecuritySettings(BaseModel):
     bootstrap_admin_enabled: bool = True
     password: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
     sudo: SudoSettings = Field(default_factory=SudoSettings)
+    login: LoginSettings = Field(default_factory=LoginSettings)
     encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
     oidc: OidcSettings = Field(default_factory=OidcSettings)
 

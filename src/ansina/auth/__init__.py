@@ -32,6 +32,7 @@ from ansina.auth.encryption import (
     EncryptionKeyMissingError,
     ensure_key_configured_if_needed,
 )
+from ansina.auth.login_throttle import LoginThrottle, LoginThrottledError
 from ansina.auth.management import (
     BootstrapIdentityError,
     LastAdminError,
@@ -80,6 +81,8 @@ __all__ = [
     "EncryptionKeyMissingError",
     "ForbiddenError",
     "LastAdminError",
+    "LoginThrottle",
+    "LoginThrottledError",
     "NotFoundError",
     "OidcCallbackError",
     "OidcLoginService",

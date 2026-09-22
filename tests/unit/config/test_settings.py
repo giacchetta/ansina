@@ -41,6 +41,10 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.security.sudo.max_failed_attempts == 5
     assert settings.security.sudo.attempt_window_seconds == 300.0
     assert settings.security.sudo.lockout_seconds == 900.0
+    assert settings.security.login.max_failed_attempts_per_username == 5
+    assert settings.security.login.max_failed_attempts_per_ip == 20
+    assert settings.security.login.attempt_window_seconds == 900.0
+    assert settings.security.login.lockout_seconds == 900.0
     assert settings.security.encryption.key is None
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"

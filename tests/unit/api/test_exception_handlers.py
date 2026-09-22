@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
+from ansina.auth.login_throttle import LoginThrottledError
 from ansina.errors import AnsinaError
 
 
@@ -33,6 +34,17 @@ def _install_test_routes(app: FastAPI) -> None:
     @app.get("/__test/boom")
     async def _raise_unexpected() -> None:
         raise ValueError("something exploded")
+
+    @app.get("/__test/login-throttled")
+    async def _raise_login_throttled() -> None:
+        # Issue #49: `LoginThrottle`'s own error, with no HTTP caller yet (that's
+        # #50's job) — raised directly here to prove it needs no handler-side special
+        # case of its own, riding the same generic `retry_after_seconds` -> header
+        # path `_TeapotError` above already proves.
+        raise LoginThrottledError(
+            "too many failed login attempts",
+            details={"retry_after_seconds": 60.0},
+        )
 
     @app.post("/__test/validated")
     async def _validated(body: _Body) -> _Body:
@@ -65,6 +77,22 @@ def test_retry_after_seconds_detail_becomes_a_real_header(app: FastAPI) -> None:
 
     assert response.headers["retry-after"] == "42"
     assert response.json()["retry_after_seconds"] == 42.7
+
+
+def test_login_throttled_error_is_429_with_retry_after(app: FastAPI) -> None:
+    """Issue #49: `LoginThrottledError` maps to 429 (`api.problems`) and rides the
+    same generic `retry_after_seconds` -> `Retry-After` header path issue #26
+    introduced — no handler-side special case needed.
+    """
+    _install_test_routes(app)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/__test/login-throttled")
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "60"
+    body = response.json()
+    assert body["code"] == "ansina.auth.login_throttled"
+    assert body["retry_after_seconds"] == 60.0
 
 
 def test_unknown_path_is_404_problem_json(client: TestClient) -> None:

@@ -41,6 +41,7 @@ def test_fresh_database_reaches_the_latest_version(db: Database) -> None:
         (6, "totp_credential"),
         (7, "role_mapping_provenance"),
         (8, "oidc_login_state"),
+        (9, "login_throttle"),
     ]
 
 
@@ -49,7 +50,7 @@ def test_second_run_is_idempotent(db: Database) -> None:
     run_migrations(db)
 
     rows = db.connection().execute("SELECT version FROM schema_version").fetchall()
-    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 
 def test_applies_only_pending_migrations(db: Database, tmp_path: Path) -> None:
@@ -269,6 +270,37 @@ def test_role_mappings_unique_index_rejects_a_duplicate_tuple(db: Database) -> N
         conn.execute(
             "INSERT INTO role_mappings (id, provider, claim, value, role_id) "
             "VALUES ('m2', 'acme', 'groups', 'ops', 'r1')"
+        )
+
+
+def test_login_attempts_scope_check_rejects_an_unknown_scope(db: Database) -> None:
+    """Issue #49: `login_attempts.scope` is constrained to 'username'/'ip' the same
+    way `role_assignments.subject_type` is constrained to 'user'/'group'.
+    """
+    run_migrations(db)
+    conn = db.connection()
+
+    with pytest.raises(Exception, match="CHECK constraint failed"):
+        conn.execute(
+            "INSERT INTO login_attempts (scope, key, failed_count) "
+            "VALUES ('not-a-real-scope', 'alice', 1)"
+        )
+
+
+def test_login_attempts_primary_key_rejects_a_duplicate_scope_key(
+    db: Database,
+) -> None:
+    run_migrations(db)
+    conn = db.connection()
+    conn.execute(
+        "INSERT INTO login_attempts (scope, key, failed_count) "
+        "VALUES ('username', 'alice', 1)"
+    )
+
+    with pytest.raises(Exception, match="UNIQUE constraint failed"):
+        conn.execute(
+            "INSERT INTO login_attempts (scope, key, failed_count) "
+            "VALUES ('username', 'alice', 2)"
         )
 
 
