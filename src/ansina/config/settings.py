@@ -186,12 +186,25 @@ class BrainSettings(BaseModel):
 
 
 class PasswordHashSettings(BaseModel):
-    """Tunable argon2id work factors for `ansina.auth.hashing`, consumed by issue #24.
+    """Everything about passwords: argon2id work factors (issue #24) plus the
+    acceptability policy `ansina.auth.password_policy.assert_password_acceptable`
+    enforces at every password-setting path (issue #48). One table, kept under its
+    original name — widening it here needed no config-key rename and breaks no
+    existing `ansina.toml`.
 
-    Defaults follow the OWASP-recommended argon2id baseline (m=64 MiB, t=3, p=4) — high
-    enough to make an offline brute-force of a stolen hash expensive, low enough not to
-    dominate a login request. The unit suite overrides these with minimal values (see
-    `tests/unit/auth/conftest.py`) so hashing doesn't dominate test runtime.
+    `time_cost`/`memory_cost_kib`/`parallelism` follow the OWASP-recommended argon2id
+    baseline (m=64 MiB, t=3, p=4) — high enough to make an offline brute-force of a
+    stolen hash expensive, low enough not to dominate a login request. The unit suite
+    overrides these with minimal values (see `tests/unit/auth/conftest.py`) so hashing
+    doesn't dominate test runtime.
+
+    `min_length` defaults to 12 but is bounded `ge=8` — configurable down, but never
+    below NIST SP 800-63B's own stated minimum for a user-chosen secret, the same
+    standard `password_policy`'s module docstring cites for deliberately *not* adding
+    character-class/composition rules. `max_length` (default 1024) is an argon2
+    work-factor DoS ceiling, not a strength rule — it bounds how large an input a
+    caller can force an expensive hash over, nothing more. `reject_common` toggles the
+    bundled common-password list (`auth/data/common_passwords.txt`).
     """
 
     model_config = _MODEL_CONFIG
@@ -199,6 +212,30 @@ class PasswordHashSettings(BaseModel):
     time_cost: int = Field(default=3, ge=1)
     memory_cost_kib: int = Field(default=65536, ge=1)
     parallelism: int = Field(default=4, ge=1)
+
+    min_length: int = Field(default=12, ge=8)
+    max_length: int = Field(default=1024, ge=8)
+    reject_common: bool = True
+
+    @model_validator(mode="after")
+    def _validate_length_bounds(self) -> PasswordHashSettings:
+        """A config where no password could ever be accepted must fail at boot, not
+        surface as every password-setting request mysteriously refusing everything —
+        the same "fail loudly before uvicorn binds a port" reasoning
+        `OidcSettings._validate_enabled_requires_credentials` already applies.
+        """
+        if self.max_length < self.min_length:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "security.password.max_length must be >= "
+                        "security.password.min_length "
+                        f"(got max_length={self.max_length}, "
+                        f"min_length={self.min_length})"
+                    ]
+                )
+            )
+        return self
 
 
 class SudoSettings(BaseModel):

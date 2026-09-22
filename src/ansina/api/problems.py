@@ -32,6 +32,7 @@ from ansina.auth.oidc_login import (
     OidcProvisioningError,
     OidcStateError,
 )
+from ansina.auth.password_policy import WeakPasswordError
 from ansina.auth.repositories import (
     BuiltinRoleError,
     DuplicateError,
@@ -69,6 +70,7 @@ CODE_ROLE_IN_USE = RoleInUseError.code
 CODE_INVALID_GRANT = InvalidGrantError.code
 CODE_TOTP_ALREADY_ENROLLED = TotpAlreadyEnrolledError.code
 CODE_ENCRYPTION_KEY_MISSING = EncryptionKeyMissingError.code
+CODE_WEAK_PASSWORD = WeakPasswordError.code
 CODE_OIDC_STATE_INVALID = OidcStateError.code
 CODE_OIDC_CALLBACK_FAILED = OidcCallbackError.code
 CODE_OIDC_TOKEN_INVALID = OidcTokenError.code
@@ -129,6 +131,14 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # submitted grant names an uncatalogued, non-grantable, or unserved (resource,
     # verb) pair (issue #40), alongside FastAPI's own validation-error 422s.
     InvalidGrantError: 422,
+    # 400: the request is well-formed and semantically resolvable (a real password was
+    # submitted, in a real request body) — it's the *value* that
+    # `auth.password_policy.assert_password_acceptable` refuses, the same distinction
+    # that keeps this out of 422 (reserved here for a submitted reference that doesn't
+    # resolve against a catalog, e.g. `InvalidGrantError`). Raised on every
+    # password-setting path (issue #48): `POST /auth/users`,
+    # `PUT /auth/users/{id}/password`, `PUT /auth/me/password`.
+    WeakPasswordError: 400,
     # 400: the callback request itself is malformed — a missing code/state, or the
     # identity provider redirected back with its own `error=` (issue #43). Unlike
     # `CODE_UNAUTHORIZED`, this is never about the caller's own identity — no

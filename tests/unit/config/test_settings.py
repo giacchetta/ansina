@@ -34,6 +34,9 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.security.password.time_cost == 3
     assert settings.security.password.memory_cost_kib == 65536
     assert settings.security.password.parallelism == 4
+    assert settings.security.password.min_length == 12
+    assert settings.security.password.max_length == 1024
+    assert settings.security.password.reject_common is True
     assert settings.security.sudo.ttl_seconds == 600.0
     assert settings.security.sudo.max_failed_attempts == 5
     assert settings.security.sudo.attempt_window_seconds == 300.0
@@ -714,6 +717,60 @@ def test_encryption_settings_accepts_an_explicit_none_key() -> None:
     settings = EncryptionSettings(key=None)
 
     assert settings.key is None
+
+
+# --- issue #48: [security.password]'s min_length/max_length/reject_common -----------
+
+
+def test_password_min_length_is_configurable(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MIN_LENGTH", "16")
+
+    settings = load_settings()
+
+    assert settings.security.password.min_length == 16
+
+
+def test_password_min_length_below_the_floor_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`min_length` is configurable down, but never below NIST SP 800-63B's own
+    stated minimum for a user-chosen secret (`ge=8`) — issue #48.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MIN_LENGTH", "6")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.password.min_length" in str(exc_info.value)
+
+
+def test_password_max_length_below_min_length_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config where no password could ever be accepted must fail at boot, not
+    surface as every password-setting request mysteriously refusing everything.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MIN_LENGTH", "20")
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MAX_LENGTH", "10")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "security.password.max_length" in message
+    assert "security.password.min_length" in message
+
+
+def test_password_reject_common_is_configurable(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__REJECT_COMMON", "false")
+
+    settings = load_settings()
+
+    assert settings.security.password.reject_common is False
 
 
 # --- issue #43: [security.oidc] -----------------------------------------------------

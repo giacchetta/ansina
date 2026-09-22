@@ -23,6 +23,11 @@ path.
 device — an Admin (or sudo'd Maintain) clears the enrollment on the user's behalf, on
 the same `auth.users` resource, so the user can re-enroll via `POST /auth/me/totp`
 afterward even if the credential they lost was their only step-up factor.
+
+Every password this router sets — `CreateUserRequest.password` and
+`SetPasswordRequest.password` alike — runs through
+`ansina.auth.password_policy.assert_password_acceptable` (issue #48) before it ever
+reaches `CredentialRepository.set_password`, which itself stays policy-free.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from ansina.auth.management import (
     assert_not_bootstrap_identity,
 )
 from ansina.auth.models import CredentialType
+from ansina.auth.password_policy import assert_password_acceptable
 from ansina.auth.repositories import CredentialRepository, UserRepository
 
 if TYPE_CHECKING:
@@ -102,7 +108,11 @@ class UpdateUserRequest(BaseModel):
 
 
 class SetPasswordRequest(BaseModel):
-    password: str = Field(min_length=1)
+    # No `min_length` here — `auth.password_policy.assert_password_acceptable` (issue
+    # #48) owns every refusal shape for a submitted password, including "too short".
+    # A pydantic-level `min_length` would make an empty string 422
+    # `ansina.request.invalid` instead of 400 `ansina.auth.weak_password`.
+    password: str
 
 
 def _get_live_user(db: Database, user_id: str) -> User:
@@ -129,6 +139,12 @@ def _get_user(db: Database, user_id: str) -> UserOut:
 def _create_user(
     db: Database, settings: Settings, payload: CreateUserRequest
 ) -> UserOut:
+    # Checked before the user row is created (issue #48) — a weak password must not
+    # leave an orphan `users` row behind.
+    if payload.password is not None:
+        assert_password_acceptable(
+            payload.password, username=payload.username, settings=settings
+        )
     user = UserRepository(db).create(
         payload.username, display_name=payload.display_name
     )
@@ -162,7 +178,13 @@ def _delete_user(db: Database, user_id: str) -> None:
 def _set_password(
     db: Database, settings: Settings, user_id: str, payload: SetPasswordRequest
 ) -> None:
+    # `_get_live_user` first, policy check second (issue #48): a tombstoned/unknown
+    # user must still 404 rather than 400 on a weak password, and the
+    # contains-username check needs the resolved user's own username anyway.
     user = _get_live_user(db, user_id)
+    assert_password_acceptable(
+        payload.password, username=user.username, settings=settings
+    )
     CredentialRepository(db).set_password(
         user.id, payload.password, Argon2Params.from_settings(settings)
     )

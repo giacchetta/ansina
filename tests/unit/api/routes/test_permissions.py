@@ -66,3 +66,9 @@ def test_lists_each_resource_with_its_served_verbs_policy_class_and_grantability
     assert by_resource["me.profile"]["verbs"] == ["GET"]
     assert by_resource["me.profile"]["policy_class"] == "self"
     assert by_resource["me.profile"]["grantable"] is False
+
+    # Issue #48: `me.password` is a `me.*` self-resource like every other one above —
+    # served by exactly `PUT`, non-grantable for the same reason.
+    assert by_resource["me.password"]["verbs"] == ["PUT"]
+    assert by_resource["me.password"]["policy_class"] == "self"
+    assert by_resource["me.password"]["grantable"] is False

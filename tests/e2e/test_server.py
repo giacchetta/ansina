@@ -419,6 +419,7 @@ def test_openapi_schema(server: str) -> None:
         "/auth/me/tokens",
         "/auth/me/tokens/{token_id}",
         "/auth/me/totp",
+        "/auth/me/password",
         "/auth/oidc/login",
         "/auth/oidc/callback",
     }

@@ -1,24 +1,25 @@
-"""Self-identity: `GET /auth/me` (issue #30), self-service tokens (issue #28), and
-self-service TOTP enrollment (issue #41).
+"""Self-identity: `GET /auth/me` (issue #30), self-service tokens (issue #28),
+self-service TOTP enrollment (issue #41), and self-service password change (issue #48).
 
-The resources declared here are `me.profile`, `me.tokens`, and `me.totp`, while the
-paths are `/auth/me`, `/auth/me/tokens`, and `/auth/me/totp` — that is consistent, not
-sloppy. A resource is a stable, dotted, **URL-independent** name
-(`docs/architecture/blueprint.md` §Identity & access control); the policy has always
-keyed on the resource, never the path.
+The resources declared here are `me.profile`, `me.tokens`, `me.totp`, and `me.password`
+while the paths are `/auth/me`, `/auth/me/tokens`, `/auth/me/totp`, and
+`/auth/me/password` — that is consistent, not sloppy. A resource is a stable, dotted,
+**URL-independent** name (`docs/architecture/blueprint.md` §Identity & access control);
+the policy has always keyed on the resource, never the path.
 
-All three fall under `auth.policy`'s `me.*` carve-out (`is_self_resource`): every
-builtin role — `Read` included — holds every verb on all three, so no route here is
+All four fall under `auth.policy`'s `me.*` carve-out (`is_self_resource`): every
+builtin role — `Read` included — holds every verb on all four, so no route here is
 ever `ForbiddenError`-blocked by role alone. This is not an escalation: the subject of
 a `me.*` action is always the authenticated caller themselves, resolved once by
 `BearerAuthMiddleware` onto `request.state.principal`, so no route here can reach
 another user's data. `GET /auth/me` reads everything but `step_up_factors` from the
 already-resolved `Principal` — that one field costs a single indexed `credentials`
 read via `SudoService.enrolled_factors` (issue #37), since enrollment isn't part of
-what `resolve_principal` resolves. The token and TOTP routes also touch the database
-(`ansina.api.tokens`, shared with `api.routes.users`'s admin-on-behalf-of surface, and
-`ansina.auth.encryption`/`ansina.auth.totp` respectively), through
-`anyio.to_thread.run_sync` like every other DB-touching route.
+what `resolve_principal` resolves. The token, TOTP, and password routes also touch the
+database (`ansina.api.tokens`, shared with `api.routes.users`'s admin-on-behalf-of
+surface; `ansina.auth.encryption`/`ansina.auth.totp`; and
+`ansina.auth.password_policy`/`CredentialRepository.set_password` respectively),
+through `anyio.to_thread.run_sync` like every other DB-touching route.
 
 One caller is refused on the token routes regardless of role: the synthetic bootstrap
 identity, which holds exactly one `api_token`, ever — `POST`/`DELETE` 403
@@ -32,6 +33,19 @@ require()`-call flag, not a pattern match on the resource name, so a `me.*` reso
 can still demand a live sudo grant on the one verb that needs it (issue #41 AC:
 disabling a factor requires sudo; enrolling one deliberately cannot, or a
 password-less user could never obtain its first factor at all).
+
+`me.password`'s own `PUT` is deliberately never `sensitive=True` either, for a
+different reason than `me.totp`'s enrollment: the request body's own
+`current_password` check *is* the proof-of-possession — the identical one
+`PasswordStepUpVerifier` performs at `POST /auth/sudo` — so requiring a live sudo grant
+on top would mean requiring the password to change the password. A caller holding no
+password credential yet (the default shape of any user `POST /auth/users` creates
+without one) may set a first one with `current_password` omitted — the same
+chicken-and-egg carve-out `POST /auth/me/totp` already makes for a first step-up
+factor, since the caller already holds a bearer token for this account and confers no
+new authority on itself. Enforced by `ansina.auth.password_policy
+.assert_password_acceptable`, the same as every other password-setting path
+(`api.routes.users`).
 
 `security.enabled = false` never resolves a `Principal` at all; handled the same way
 `routes/sudo.py`/`routes/role_assignments.py` already do, via `api.identity`.
@@ -53,10 +67,13 @@ from pydantic import BaseModel
 from ansina.api import tokens as tokens_api
 from ansina.api.authorization import require
 from ansina.api.identity import current_principal, no_identity_response
+from ansina.api.problems import CODE_UNAUTHORIZED, problem_response
 from ansina.auth import totp
 from ansina.auth.encryption import EncryptionKeyMissingError, encrypt, resolve_key
+from ansina.auth.hashing import Argon2Params
 from ansina.auth.management import assert_totp_not_enrolled
 from ansina.auth.models import CredentialType
+from ansina.auth.password_policy import assert_password_acceptable
 from ansina.auth.repositories import CredentialRepository
 
 if TYPE_CHECKING:
@@ -80,6 +97,9 @@ _TOTP_DESCRIPTION = (
     "disable."
 )
 _TOTP_ISSUER = "Ansina"
+
+_PASSWORD_RESOURCE = "me.password"
+_PASSWORD_DESCRIPTION = "The authenticated caller's own password: set or change it."
 
 
 def _require_read() -> Depends:
@@ -106,6 +126,14 @@ def _require_totp_disable() -> Depends:
     return Depends(
         require(_TOTP_RESOURCE, description=_TOTP_DESCRIPTION, sensitive=True)
     )
+
+
+def _require_password() -> Depends:
+    """Not `sensitive=True` — see the module docstring's `me.password` paragraph: the
+    request body's own `current_password` check is the proof-of-possession, the same
+    one a sudo grant would otherwise exist to provide.
+    """
+    return Depends(require(_PASSWORD_RESOURCE, description=_PASSWORD_DESCRIPTION))
 
 
 class MeOut(BaseModel):
@@ -358,4 +386,98 @@ async def disable_totp(request: Request) -> Response:
     await anyio.to_thread.run_sync(
         _disable_totp, request.app.state.db, principal.user.id
     )
+    return Response(status_code=204)
+
+
+# --- /auth/me/password: issue #48's self-service password change --------------------
+
+
+class ChangePasswordRequest(BaseModel):
+    """`current_password` is optional only for the first-password carve-out — see the
+    module docstring's `me.password` paragraph. A caller who already holds a password
+    credential and omits it simply fails proof-of-possession (401), the same as
+    presenting a wrong one; it is never a distinct error shape, so a probing caller
+    can't use the presence/absence of the field to learn whether an account has a
+    password without proving one it does.
+    """
+
+    current_password: str | None = None
+    new_password: str
+
+
+def _change_own_password(
+    db: Database,
+    settings: Settings,
+    principal: Principal,
+    payload: ChangePasswordRequest,
+) -> bool:
+    """Returns `True` on success, `False` on a failed proof-of-possession — the caller
+    (`change_own_password` below) turns `False` into the same 401 shape
+    `POST /auth/sudo` already uses for a failed step-up. Policy
+    (`assert_password_acceptable`) is checked *after* proof-of-possession succeeds, so
+    a caller who can't prove they hold the account never gets to probe the password
+    policy.
+    """
+    credentials = CredentialRepository(db)
+    holds_password = credentials.has_credential(
+        principal.user.id, CredentialType.PASSWORD
+    )
+    params = Argon2Params.from_settings(settings)
+
+    # The first-password carve-out (no `else` branch needed): a caller holding no
+    # password credential yet already holds a bearer token for this account, so
+    # setting a first password confers no new authority regardless of whether
+    # `current_password` was supplied.
+    if holds_password and (
+        payload.current_password is None
+        or not credentials.verify_password(
+            principal.user.id, payload.current_password, params
+        )
+    ):
+        return False
+
+    assert_password_acceptable(
+        payload.new_password, username=principal.user.username, settings=settings
+    )
+    credentials.set_password(principal.user.id, payload.new_password, params)
+    return True
+
+
+@router.put(
+    "/me/password",
+    status_code=204,
+    responses={
+        204: {"description": "Password set/changed."},
+        400: {
+            "description": "The new password fails policy (too short, too long, "
+            "contains the username, or on the common-password list)."
+        },
+        401: {
+            "description": "No resolved identity, or `current_password` is missing/"
+            "wrong for a caller who already holds a password credential."
+        },
+    },
+    dependencies=[_require_password()],
+)
+async def change_own_password(
+    request: Request, payload: ChangePasswordRequest
+) -> Response:
+    principal = current_principal(request)
+    if principal is None:
+        return no_identity_response()
+
+    ok = await anyio.to_thread.run_sync(
+        _change_own_password,
+        request.app.state.db,
+        request.app.state.settings,
+        principal,
+        payload,
+    )
+    if not ok:
+        return problem_response(
+            status=401,
+            code=CODE_UNAUTHORIZED,
+            title="Unauthorized",
+            detail="current_password is missing or does not match.",
+        )
     return Response(status_code=204)

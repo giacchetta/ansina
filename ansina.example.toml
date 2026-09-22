@@ -150,6 +150,21 @@ time_cost = 3
 memory_cost_kib = 65536
 parallelism = 4
 
+# Password acceptability policy (issue #48), enforced at every password-setting path:
+# POST /auth/users, PUT /auth/users/{id}/password, and PUT /auth/me/password.
+# Deliberately no character-class/composition rules (no forced digit/symbol/mixed
+# case) -- per NIST SP 800-63B, which is also why min_length is bounded below: it's
+# configurable down, but never under 8, that standard's own stated minimum for a
+# user-chosen secret. max_length is an argon2 work-factor DoS ceiling, not a strength
+# rule -- it bounds how large an input a caller can force an expensive hash over.
+min_length = 12
+max_length = 1024
+
+# Whether a submitted password is checked against the bundled common-password
+# rejection list (src/ansina/auth/data/common_passwords.txt, ~2,100 entries derived
+# from a public top-10k breach corpus, filtered to >= 8 characters).
+reject_common = true
+
 [security.sudo]
 # Sudo step-up (issue #26): a Maintain caller must present a live grant on any
 # sensitive auth.* action (Admin never does). Get one via POST /auth/sudo (body:
