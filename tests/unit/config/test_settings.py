@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from ansina.config import ConfigError, load_settings
 from ansina.config.settings import (
+    CorsSettings,
     EncryptionSettings,
     OidcSettings,
     SecuritySettings,
@@ -34,10 +35,18 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.security.password.time_cost == 3
     assert settings.security.password.memory_cost_kib == 65536
     assert settings.security.password.parallelism == 4
+    assert settings.security.password.min_length == 12
+    assert settings.security.password.max_length == 1024
+    assert settings.security.password.reject_common is True
     assert settings.security.sudo.ttl_seconds == 600.0
     assert settings.security.sudo.max_failed_attempts == 5
     assert settings.security.sudo.attempt_window_seconds == 300.0
     assert settings.security.sudo.lockout_seconds == 900.0
+    assert settings.security.login.max_failed_attempts_per_username == 5
+    assert settings.security.login.max_failed_attempts_per_ip == 20
+    assert settings.security.login.attempt_window_seconds == 900.0
+    assert settings.security.login.lockout_seconds == 900.0
+    assert settings.security.login.token_ttl_seconds == 3600.0
     assert settings.security.encryption.key is None
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"
@@ -716,6 +725,60 @@ def test_encryption_settings_accepts_an_explicit_none_key() -> None:
     assert settings.key is None
 
 
+# --- issue #48: [security.password]'s min_length/max_length/reject_common -----------
+
+
+def test_password_min_length_is_configurable(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MIN_LENGTH", "16")
+
+    settings = load_settings()
+
+    assert settings.security.password.min_length == 16
+
+
+def test_password_min_length_below_the_floor_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`min_length` is configurable down, but never below NIST SP 800-63B's own
+    stated minimum for a user-chosen secret (`ge=8`) — issue #48.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MIN_LENGTH", "6")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.password.min_length" in str(exc_info.value)
+
+
+def test_password_max_length_below_min_length_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config where no password could ever be accepted must fail at boot, not
+    surface as every password-setting request mysteriously refusing everything.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MIN_LENGTH", "20")
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__MAX_LENGTH", "10")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "security.password.max_length" in message
+    assert "security.password.min_length" in message
+
+
+def test_password_reject_common_is_configurable(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__PASSWORD__REJECT_COMMON", "false")
+
+    settings = load_settings()
+
+    assert settings.security.password.reject_common is False
+
+
 # --- issue #43: [security.oidc] -----------------------------------------------------
 
 _OIDC_ENV = {
@@ -840,3 +903,98 @@ def test_oidc_settings_disabled_accepts_a_none_client_secret_directly() -> None:
 
     assert settings.enabled is False
     assert settings.client_secret is None
+
+
+# --- issue #51: [security.cors] --------------------------------------------------
+
+
+def test_cors_disabled_by_default(clean_env: None, tmp_cwd: Path) -> None:
+    settings = load_settings()
+
+    assert settings.security.cors.enabled is False
+    assert settings.security.cors.allowed_origins == ()
+    assert settings.security.cors.max_age_seconds == 600
+
+
+def test_cors_enabled_with_origins_loads_fine(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS",
+        '["https://dash.example", "https://other.example"]',
+    )
+
+    settings = load_settings()
+
+    assert settings.security.cors.enabled is True
+    assert settings.security.cors.allowed_origins == (
+        "https://dash.example",
+        "https://other.example",
+    )
+
+
+def test_cors_allowed_origins_trailing_slash_is_stripped(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same copy-paste footgun `OidcSettings._strip_trailing_slash` already
+    normalizes for `issuer` — a browser's own `Origin` header never carries a
+    trailing slash, so a configured value that still had one would otherwise
+    silently match nothing.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["https://dash.example/"]'
+    )
+
+    settings = load_settings()
+
+    assert settings.security.cors.allowed_origins == ("https://dash.example",)
+
+
+def test_cors_wildcard_origin_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["*"]')
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.cors.allowed_origins" in str(exc_info.value)
+
+
+def test_cors_wildcard_origin_rejected_even_when_disabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "*" is refused outright — regardless of `enabled` — per the issue's own AC."""
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "false")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["https://dash.example", "*"]'
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.cors.allowed_origins" in str(exc_info.value)
+
+
+def test_cors_enabled_with_empty_origins_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.cors.allowed_origins" in str(exc_info.value)
+    assert "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS" in str(exc_info.value)
+
+
+def test_cors_settings_disabled_accepts_empty_origins_directly() -> None:
+    """`_validate_enabled_requires_origins`'s early return for `enabled=False` —
+    `CorsSettings` can be constructed directly with every field left at its default.
+    """
+    settings = CorsSettings()
+
+    assert settings.enabled is False
+    assert settings.allowed_origins == ()

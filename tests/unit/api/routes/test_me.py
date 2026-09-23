@@ -1,5 +1,5 @@
-"""Unit tests for `GET /auth/me` (issue #30), `/auth/me/tokens` (issue #28), and
-`/auth/me/totp` (issue #41).
+"""Unit tests for `GET /auth/me` (issue #30), `/auth/me/tokens` (issue #28),
+`/auth/me/totp` (issue #41), and `/auth/me/password` (issue #48).
 
 Reuses `tests/unit/api/conftest.py`'s `authed_client`/`token_for_role`/`sudoed_maintain`
 fixtures — the same shape `test_sudo.py`/`test_permissions.py` already use. This
@@ -29,6 +29,12 @@ from ansina.config import load_settings
 # A url-safe-base64, 32-raw-byte value — the shape `[security.encryption] key`
 # requires (issue #41).
 _ENCRYPTION_KEY = "inl1_UnlPfMEYIPwFZnl46Nx2GXZmHoHdT-OC4I9nYA"
+
+_CHEAP_ARGON2 = Argon2Params(time_cost=1, memory_cost_kib=8, parallelism=1)
+
+# Clears the default policy (`[security.password]`: min_length=12, max_length=1024,
+# reject_common=True) and never contains any username `token_for_role` mints.
+_ACCEPTABLE = "a truly excellent passphrase"
 
 
 @pytest.fixture
@@ -581,3 +587,181 @@ def test_enroll_fails_503_with_no_encryption_key_configured(
 
     assert response.status_code == 503
     assert response.json()["code"] == "ansina.auth.encryption_key_missing"
+
+
+# --- /auth/me/password: issue #48's self-service password change --------------------
+
+
+@pytest.mark.parametrize("role", list(RoleSlug))
+def test_every_builtin_role_can_set_its_first_password(
+    authed_client: TestClient, token_for_role: Callable[[str], str], role: RoleSlug
+) -> None:
+    """The `me.*` carve-out again: `Read` can set its own password with no 403,
+    unlike every `auth.*` route. `token_for_role` mints a user with no password
+    credential, so this also exercises the first-password carve-out.
+    """
+    token = token_for_role(role.value)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = authed_client.put(
+        "/auth/me/password", headers=headers, json={"new_password": _ACCEPTABLE}
+    )
+
+    assert response.status_code == 204
+
+
+def test_change_password_never_requires_sudo(
+    authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    """Issue #48 AC: `current_password` *is* the proof-of-possession — `Maintain`
+    reaches this with no `X-Sudo-Token`, unlike every other `auth.*` mutation.
+    """
+    token = token_for_role("maintain")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = authed_client.put(
+        "/auth/me/password", headers=headers, json={"new_password": _ACCEPTABLE}
+    )
+
+    assert response.status_code == 204
+
+
+def test_first_password_carve_out_ignores_a_submitted_current_password(
+    authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    """A caller with no password credential yet may include a (meaningless)
+    `current_password` without it being checked against anything.
+    """
+    token = token_for_role("read")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = authed_client.put(
+        "/auth/me/password",
+        headers=headers,
+        json={"current_password": "anything at all", "new_password": _ACCEPTABLE},
+    )
+
+    assert response.status_code == 204
+
+
+def test_changing_an_existing_password_requires_the_current_one(
+    authed_app: FastAPI, authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    token = token_for_role("read")
+    headers = {"Authorization": f"Bearer {token}"}
+    db = authed_app.state.db
+    user = CredentialRepository(db).find_user_by_api_token(token, now=iso(utc_now()))
+    assert user is not None
+    CredentialRepository(db).set_password(
+        user.id, "the original password", _CHEAP_ARGON2
+    )
+
+    response = authed_client.put(
+        "/auth/me/password",
+        headers=headers,
+        json={"current_password": "the original password", "new_password": _ACCEPTABLE},
+    )
+
+    assert response.status_code == 204
+    assert CredentialRepository(db).verify_password(user.id, _ACCEPTABLE, _CHEAP_ARGON2)
+
+
+def test_omitting_current_password_when_one_exists_is_401(
+    authed_app: FastAPI, authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    token = token_for_role("read")
+    headers = {"Authorization": f"Bearer {token}"}
+    db = authed_app.state.db
+    user = CredentialRepository(db).find_user_by_api_token(token, now=iso(utc_now()))
+    assert user is not None
+    CredentialRepository(db).set_password(
+        user.id, "the original password", _CHEAP_ARGON2
+    )
+
+    response = authed_client.put(
+        "/auth/me/password", headers=headers, json={"new_password": _ACCEPTABLE}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+    # The stored credential is untouched — re-authenticating with the old password
+    # still works (issue #48 AC).
+    assert CredentialRepository(db).verify_password(
+        user.id, "the original password", _CHEAP_ARGON2
+    )
+
+
+def test_wrong_current_password_is_401_and_leaves_the_credential_unchanged(
+    authed_app: FastAPI, authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    token = token_for_role("read")
+    headers = {"Authorization": f"Bearer {token}"}
+    db = authed_app.state.db
+    user = CredentialRepository(db).find_user_by_api_token(token, now=iso(utc_now()))
+    assert user is not None
+    CredentialRepository(db).set_password(
+        user.id, "the original password", _CHEAP_ARGON2
+    )
+
+    response = authed_client.put(
+        "/auth/me/password",
+        headers=headers,
+        json={"current_password": "totally wrong", "new_password": _ACCEPTABLE},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+    assert CredentialRepository(db).verify_password(
+        user.id, "the original password", _CHEAP_ARGON2
+    )
+    assert not CredentialRepository(db).verify_password(
+        user.id, _ACCEPTABLE, _CHEAP_ARGON2
+    )
+
+
+def test_weak_new_password_is_400(
+    authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    token = token_for_role("read")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = authed_client.put(
+        "/auth/me/password", headers=headers, json={"new_password": "short1"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
+
+
+def test_new_password_can_then_be_used_to_step_up(
+    authed_client: TestClient, token_for_role: Callable[[str], str]
+) -> None:
+    token = token_for_role("maintain")
+    headers = {"Authorization": f"Bearer {token}"}
+    authed_client.put(
+        "/auth/me/password", headers=headers, json={"new_password": _ACCEPTABLE}
+    )
+
+    step_up = authed_client.post(
+        "/auth/sudo", headers=headers, json={"password": _ACCEPTABLE}
+    )
+
+    assert step_up.status_code == 200
+
+
+def test_password_routes_401_with_no_token(authed_client: TestClient) -> None:
+    response = authed_client.put(
+        "/auth/me/password", json={"new_password": _ACCEPTABLE}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_password_route_has_no_identity_when_security_is_disabled(
+    client: TestClient,
+) -> None:
+    response = client.put("/auth/me/password", json={"new_password": _ACCEPTABLE})
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"

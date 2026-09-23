@@ -150,6 +150,21 @@ time_cost = 3
 memory_cost_kib = 65536
 parallelism = 4
 
+# Password acceptability policy (issue #48), enforced at every password-setting path:
+# POST /auth/users, PUT /auth/users/{id}/password, and PUT /auth/me/password.
+# Deliberately no character-class/composition rules (no forced digit/symbol/mixed
+# case) -- per NIST SP 800-63B, which is also why min_length is bounded below: it's
+# configurable down, but never under 8, that standard's own stated minimum for a
+# user-chosen secret. max_length is an argon2 work-factor DoS ceiling, not a strength
+# rule -- it bounds how large an input a caller can force an expensive hash over.
+min_length = 12
+max_length = 1024
+
+# Whether a submitted password is checked against the bundled common-password
+# rejection list (src/ansina/auth/data/common_passwords.txt, ~2,100 entries derived
+# from a public top-10k breach corpus, filtered to >= 8 characters).
+reject_common = true
+
 [security.sudo]
 # Sudo step-up (issue #26): a Maintain caller must present a live grant on any
 # sensitive auth.* action (Admin never does). Get one via POST /auth/sudo (body:
@@ -163,6 +178,28 @@ ttl_seconds = 600.0
 max_failed_attempts = 5
 attempt_window_seconds = 300.0
 lockout_seconds = 900.0
+
+[security.login]
+# Login throttle (issue #49): per-username and per-IP brute-force protection for
+# POST /auth/login (#50). Deliberately separate from [security.sudo] above -- an
+# anonymous login attempt is a different caller and threat model than an
+# already-authenticated step-up, so the two are independently tunable.
+#
+# Two independent thresholds: max_failed_attempts_per_username catches repeated
+# guesses against one account (throttled identically whether or not that username
+# exists, so the throttle itself can't be used to enumerate valid usernames);
+# max_failed_attempts_per_ip (a higher ceiling, since one IP legitimately serves many
+# users) catches a spray across many distinct usernames that never trips any single
+# username bucket.
+max_failed_attempts_per_username = 5
+max_failed_attempts_per_ip = 20
+attempt_window_seconds = 900.0
+lockout_seconds = 900.0
+
+# How long the api_token minted at the end of a successful POST /auth/login stays
+# valid -- mirrors [security.oidc]'s own token_ttl_seconds below, a separate knob per
+# feature rather than one shared setting.
+token_ttl_seconds = 3600.0
 
 [security.encryption]
 # AES-GCM key for TOTP secrets at rest (issue #41, "ansina.auth.encryption"). Unset by
@@ -223,3 +260,28 @@ http_timeout_seconds = 10.0
 # startup error. Required together with issuer/client_id/redirect_uri when
 # enabled = true:
 #   ANSINA_SECURITY__OIDC__CLIENT_SECRET=...
+
+[security.cors]
+# Cross-Origin Resource Sharing (issue #51), for a browser-hosted third-party
+# dashboard on another origin -- without this, a browser cannot call Ansina's REST
+# API at all, and the failure is reported by the browser, never by Ansina, so it's
+# invisible in the daemon's own logs. false (the default) adds no CORS middleware
+# at all -- the daemon + ansina-tui deployment (which is not a browser and never
+# sends an Origin header) is byte-for-byte unchanged.
+enabled = false
+
+# Every entry must be an exact "scheme://host[:port]" origin, the same string a
+# browser sends in its Origin header -- compared exactly, so list each one that
+# needs access. A trailing slash is stripped automatically (the same footgun
+# [security.oidc] issuer strips one for). "*" is refused outright, even with
+# enabled = false: every Ansina route but the health probes and the login routes
+# is authenticated, and a wildcard origin on a credential-bearing API is never the
+# right answer. Required (non-empty) when enabled = true.
+# allowed_origins = ["https://dashboard.example.com"]
+
+# How long a browser may cache a preflight's answer before repeating it.
+max_age_seconds = 600
+
+# No allow_credentials setting exists: Ansina authenticates with an Authorization
+# header, never a cookie, so there is nothing for a credentialed CORS mode to
+# protect -- it would only add CSRF surface for no benefit.

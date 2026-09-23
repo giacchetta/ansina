@@ -95,6 +95,18 @@ class CredentialType(StrEnum):
     TOTP = "totp"
 
 
+class LoginAttemptScope(StrEnum):
+    """Which bucket a `login_attempts` row throttles (issue #49) — a submitted,
+    casefolded username (recorded whether or not such a user exists — that's what
+    keeps the throttle from being a user-enumeration oracle) or a caller IP, so a
+    spray across many distinct usernames still trips the IP bucket even though no
+    single username bucket reaches its own threshold.
+    """
+
+    USERNAME = "username"
+    IP = "ip"
+
+
 @dataclass(frozen=True, slots=True)
 class Resource:
     """A row in `resources` — a stable, dotted, URL-independent identifier a route
@@ -346,6 +358,31 @@ class SudoLockout:
     def from_row(cls, row: sqlite3.Row) -> Self:
         return cls(
             user_id=row["user_id"],
+            failed_count=row["failed_count"],
+            first_failed_at=row["first_failed_at"],
+            locked_until=row["locked_until"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LoginAttempt:
+    """A row in `login_attempts` (issue #49) — at most one per `(scope, key)` pair.
+    `locked_until` is `None` until `failed_count` reaches the configured threshold for
+    `scope` (`[security.login] max_failed_attempts_per_username`/`_per_ip`). Mirrors
+    `SudoLockout` exactly, keyed on `(scope, key)` instead of `user_id` alone.
+    """
+
+    scope: LoginAttemptScope
+    key: str
+    failed_count: int
+    first_failed_at: str | None
+    locked_until: str | None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> Self:
+        return cls(
+            scope=LoginAttemptScope(row["scope"]),
+            key=row["key"],
             failed_count=row["failed_count"],
             first_failed_at=row["first_failed_at"],
             locked_until=row["locked_until"],

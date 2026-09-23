@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ansina import __version__
 from ansina.api.auth import BearerAuthMiddleware
+from ansina.api.cors import add_cors_middleware
 from ansina.api.exception_handlers import (
     ansina_error_handler,
     http_exception_handler,
@@ -35,6 +36,7 @@ from ansina.api.route_audit import audit_route_coverage
 from ansina.api.routes.groups import router as groups_router
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
+from ansina.api.routes.login import router as login_router
 from ansina.api.routes.me import router as me_router
 from ansina.api.routes.oidc import router as oidc_router
 from ansina.api.routes.openapi import router as openapi_router
@@ -45,6 +47,7 @@ from ansina.api.routes.roles import router as roles_router
 from ansina.api.routes.sudo import router as sudo_router
 from ansina.api.routes.users import router as users_router
 from ansina.auth import (
+    LoginThrottle,
     OidcLoginService,
     build_authenticators,
     build_oidc_login_service,
@@ -111,6 +114,11 @@ def create_app(
     # built unconditionally, always available at `app.state.sudo` for both
     # `BearerAuthMiddleware` (grant resolution) and `routes/sudo.py` (issuance).
     sudo = build_sudo_service(db, resolved_settings)
+    # Issue #50: same "no boot-time failure mode, built unconditionally" shape as
+    # `sudo` above — always available at `app.state.login_throttle` for
+    # `routes/login.py`. No `build_*` factory (see `LoginThrottle`'s own docstring):
+    # there's nothing to assemble beyond `db` + settings.
+    login_throttle = LoginThrottle(db, resolved_settings.security.login)
     # Issue #28: built here, not left to `BearerAuthMiddleware`'s own default, since
     # the chain now needs `resolved_settings` (the coalesced `last_used_at` write's
     # resolution) — the same "construct once, pass in" shape `sudo` above already
@@ -225,14 +233,27 @@ def create_app(
     app.state.tick_loop = tick_loop
     app.state.brain = brain
     app.state.sudo = sudo
+    app.state.login_throttle = login_throttle
     app.state.oidc = oidc
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
-    # goes first (innermost) and RequestIdMiddleware last (outermost) so a rejected
-    # request still gets a request id bound in context — a 401's `problem+json` body
-    # carries a real `request_id`, the response still echoes `X-Request-ID`, and the
-    # "request completed" access-log line still fires for it.
+    # goes first (innermost) and RequestIdMiddleware second (outermost of the two) so a
+    # rejected request still gets a request id bound in context — a 401's
+    # `problem+json` body carries a real `request_id`, the response still echoes
+    # `X-Request-ID`, and the "request completed" access-log line still fires for it.
+    #
+    # Issue #51 adds a third, registered last so it runs outermost of all three:
+    # CORSMiddleware (`api/cors.py`, a no-op — nothing added — when
+    # `[security.cors] enabled = false`, the default). A CORS preflight `OPTIONS`
+    # carries no `Authorization` header by definition, so any inner ordering would let
+    # BearerAuthMiddleware 401 it — the browser would surface that as an opaque,
+    # undiagnosable CORS failure rather than a real 401. The one cost of running
+    # outermost: a preflight short-circuits above RequestIdMiddleware too, so it gets
+    # no echoed `X-Request-ID` and no "request completed" access-log line — a
+    # deliberate consequence, not a defect, since every *real* request (the
+    # browser's actual GET/POST/etc. that follows a preflight) still flows through
+    # both.
     app.add_middleware(
         BearerAuthMiddleware,
         enabled=resolved_settings.security.enabled,
@@ -241,6 +262,7 @@ def create_app(
         sudo=sudo,
     )
     app.add_middleware(RequestIdMiddleware)
+    add_cors_middleware(app, resolved_settings)
 
     app.add_exception_handler(AnsinaError, ansina_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
@@ -251,6 +273,7 @@ def create_app(
     app.include_router(heart_router)
     app.include_router(openapi_router)
     app.include_router(oidc_router)
+    app.include_router(login_router)
     app.include_router(sudo_router)
     app.include_router(users_router)
     app.include_router(groups_router)

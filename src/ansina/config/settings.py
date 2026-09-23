@@ -186,12 +186,25 @@ class BrainSettings(BaseModel):
 
 
 class PasswordHashSettings(BaseModel):
-    """Tunable argon2id work factors for `ansina.auth.hashing`, consumed by issue #24.
+    """Everything about passwords: argon2id work factors (issue #24) plus the
+    acceptability policy `ansina.auth.password_policy.assert_password_acceptable`
+    enforces at every password-setting path (issue #48). One table, kept under its
+    original name — widening it here needed no config-key rename and breaks no
+    existing `ansina.toml`.
 
-    Defaults follow the OWASP-recommended argon2id baseline (m=64 MiB, t=3, p=4) — high
-    enough to make an offline brute-force of a stolen hash expensive, low enough not to
-    dominate a login request. The unit suite overrides these with minimal values (see
-    `tests/unit/auth/conftest.py`) so hashing doesn't dominate test runtime.
+    `time_cost`/`memory_cost_kib`/`parallelism` follow the OWASP-recommended argon2id
+    baseline (m=64 MiB, t=3, p=4) — high enough to make an offline brute-force of a
+    stolen hash expensive, low enough not to dominate a login request. The unit suite
+    overrides these with minimal values (see `tests/unit/auth/conftest.py`) so hashing
+    doesn't dominate test runtime.
+
+    `min_length` defaults to 12 but is bounded `ge=8` — configurable down, but never
+    below NIST SP 800-63B's own stated minimum for a user-chosen secret, the same
+    standard `password_policy`'s module docstring cites for deliberately *not* adding
+    character-class/composition rules. `max_length` (default 1024) is an argon2
+    work-factor DoS ceiling, not a strength rule — it bounds how large an input a
+    caller can force an expensive hash over, nothing more. `reject_common` toggles the
+    bundled common-password list (`auth/data/common_passwords.txt`).
     """
 
     model_config = _MODEL_CONFIG
@@ -199,6 +212,30 @@ class PasswordHashSettings(BaseModel):
     time_cost: int = Field(default=3, ge=1)
     memory_cost_kib: int = Field(default=65536, ge=1)
     parallelism: int = Field(default=4, ge=1)
+
+    min_length: int = Field(default=12, ge=8)
+    max_length: int = Field(default=1024, ge=8)
+    reject_common: bool = True
+
+    @model_validator(mode="after")
+    def _validate_length_bounds(self) -> PasswordHashSettings:
+        """A config where no password could ever be accepted must fail at boot, not
+        surface as every password-setting request mysteriously refusing everything —
+        the same "fail loudly before uvicorn binds a port" reasoning
+        `OidcSettings._validate_enabled_requires_credentials` already applies.
+        """
+        if self.max_length < self.min_length:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "security.password.max_length must be >= "
+                        "security.password.min_length "
+                        f"(got max_length={self.max_length}, "
+                        f"min_length={self.min_length})"
+                    ]
+                )
+            )
+        return self
 
 
 class SudoSettings(BaseModel):
@@ -214,6 +251,31 @@ class SudoSettings(BaseModel):
     max_failed_attempts: int = Field(default=5, ge=1)
     attempt_window_seconds: float = Field(default=300.0, gt=0)
     lockout_seconds: float = Field(default=900.0, gt=0)
+
+
+class LoginSettings(BaseModel):
+    """Login-throttle tuning for `ansina.auth.login_throttle.LoginThrottle`, consumed
+    by issue #49 ahead of `POST /auth/login` (#50). Deliberately separate from
+    `SudoSettings` above — different caller (an anonymous login attempt, not an
+    already-authenticated step-up), different threat model, independently tunable.
+
+    Two independent thresholds, not one: `max_failed_attempts_per_username` catches
+    repeated guesses against one account; `max_failed_attempts_per_ip` (a higher
+    ceiling, since one IP legitimately serves many users) catches a spray across many
+    distinct usernames that never trips any single username bucket.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    max_failed_attempts_per_username: int = Field(default=5, ge=1)
+    max_failed_attempts_per_ip: int = Field(default=20, ge=1)
+    attempt_window_seconds: float = Field(default=900.0, gt=0)
+    lockout_seconds: float = Field(default=900.0, gt=0)
+
+    # How long the `api_token` minted at the end of a successful `POST /auth/login`
+    # (issue #50) stays valid — mirrors `OidcSettings.token_ttl_seconds`'s own
+    # per-feature TTL knob rather than reusing an unrelated one.
+    token_ttl_seconds: float = Field(default=3600.0, gt=0)
 
 
 # AES-256 needs exactly 32 raw bytes; `secrets.token_urlsafe(32)` is the generator this
@@ -388,6 +450,80 @@ class OidcSettings(BaseModel):
         return self
 
 
+class CorsSettings(BaseModel):
+    """Cross-Origin Resource Sharing for browser-hosted third-party clients, consumed
+    by issue #51's `ansina.api.cors`.
+
+    `enabled=False` (the default) means `add_cors_middleware` adds nothing at all — the
+    same "`None`/no-op when off" shape `[heart]`/`[brain]`/`[security.oidc]` already
+    use — so the daemon + `ansina-tui` deployment (which is not a browser and never
+    sends an `Origin` header) is byte-for-byte unchanged. `ansina-tui`'s own `ApiClient`
+    is unaffected either way: a same-origin, non-browser HTTP client never triggers CORS
+    enforcement, which is a browser-side mechanism, not a server-side authorization
+    control — `require(resource)` still gates every route exactly as before.
+
+    No `allow_credentials` field: Ansina authenticates with an `Authorization` header,
+    never a cookie, so there is nothing for a credentialed CORS mode to protect and it
+    would only add CSRF surface for no benefit (`api.cors.add_cors_middleware` always
+    passes `allow_credentials=False`).
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = False
+
+    # Every entry must be an exact `scheme://host[:port]` origin, the same string a
+    # browser sends in its `Origin` header — Starlette compares it exactly. "*" is
+    # refused outright (see `_validate_origins` below): a wildcard origin on a
+    # credential-bearing API is never the right answer. A trailing slash is stripped
+    # (not refused) since it's the same copy-paste footgun
+    # `OidcSettings._strip_trailing_slash` already normalizes for `issuer` — a browser's
+    # own `Origin` header never carries one, so a configured value that still had one
+    # would otherwise silently match nothing, an opaque browser-side failure invisible
+    # to Ansina's own logs.
+    allowed_origins: tuple[str, ...] = ()
+
+    # `Access-Control-Max-Age` — how long a browser may cache a preflight's answer
+    # before repeating it. Starlette's own default (600s) is echoed here explicitly so
+    # it's a documented, tunable Ansina setting rather than an implicit library default.
+    max_age_seconds: int = Field(default=600, ge=0)
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _validate_origins(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if "*" in value:
+            raise ValueError(
+                'security.cors.allowed_origins must not contain "*" — every Ansina '
+                "route but the health probes and the login routes is authenticated, "
+                "and a wildcard origin on a credential-bearing API is never correct; "
+                "list each allowed origin explicitly"
+            )
+        return tuple(origin.rstrip("/") for origin in value)
+
+    @model_validator(mode="after")
+    def _validate_enabled_requires_origins(self) -> CorsSettings:
+        """`enabled=True` with no `allowed_origins` would add real middleware that
+        allows nothing — a silent no-op indistinguishable from a misconfiguration, the
+        same "fail loudly, don't discover this on the first browser request" reasoning
+        `OidcSettings._validate_enabled_requires_credentials` already applies. Raised
+        directly (not `ValueError`) since this is a model-level check with no single
+        field `loc` — the same pattern that check and `Settings._refuse_unsafe_bind`
+        both use.
+        """
+        if self.enabled and not self.allowed_origins:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "security.cors.allowed_origins: required (non-empty) when "
+                        "security.cors.enabled = true — set "
+                        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS to a JSON array of "
+                        "allowed origins, or leave security.cors.enabled = false"
+                    ]
+                )
+            )
+        return self
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -437,8 +573,10 @@ class SecuritySettings(BaseModel):
     bootstrap_admin_enabled: bool = True
     password: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
     sudo: SudoSettings = Field(default_factory=SudoSettings)
+    login: LoginSettings = Field(default_factory=LoginSettings)
     encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
     oidc: OidcSettings = Field(default_factory=OidcSettings)
+    cors: CorsSettings = Field(default_factory=CorsSettings)
 
     # Issue #28: how long a token's `last_used_at` may go stale before the next
     # successful authentication updates it — coalesced rather than written on every

@@ -43,8 +43,19 @@ if TYPE_CHECKING:
 # Both routes are 503 when `[security.oidc] enabled = false`
 # (`api.routes.oidc._disabled_response`), and neither declares a `require(...)` — see
 # `api.routes.oidc`'s module docstring for the full reasoning.
+#
+# Issue #50 adds a third: `/auth/login` (exchange a local username + password for an
+# api_token) is the same "can't hold a bearer token before you've logged in" case —
+# see `api.routes.login`'s module docstring, including why this makes it Ansina's
+# first unauthenticated, brute-forceable route beyond the two health probes.
 PUBLIC_PATHS = frozenset(
-    {"/healthz", "/readyz", "/auth/oidc/login", "/auth/oidc/callback"}
+    {
+        "/healthz",
+        "/readyz",
+        "/auth/oidc/login",
+        "/auth/oidc/callback",
+        "/auth/login",
+    }
 )
 
 _HEADER_NAME = b"authorization"

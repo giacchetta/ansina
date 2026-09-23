@@ -118,6 +118,55 @@ def test_create_user_with_password_can_authenticate_with_it(
     )
 
 
+def test_create_user_with_weak_password_is_400_and_creates_no_user(
+    authed_app: FastAPI, authed_client: TestClient, authed_token: str
+) -> None:
+    """Issue #48: policy is checked *before* the `users` row is inserted — a weak
+    password must not leave an orphan user behind.
+    """
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+
+    response = authed_client.post(
+        "/auth/users",
+        headers=admin_headers,
+        json={"username": "gina", "password": "short1"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
+    assert UserRepository(authed_app.state.db).get_by_username("gina") is None
+
+
+def test_create_user_with_password_containing_username_is_400(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+
+    response = authed_client.post(
+        "/auth/users",
+        headers=admin_headers,
+        json={"username": "hank", "password": "hank is the password"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
+
+
+def test_create_user_with_common_password_is_400(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+
+    response = authed_client.post(
+        "/auth/users",
+        headers=admin_headers,
+        json={"username": "iris", "password": "motherfucker"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
+
+
 def test_create_user_duplicate_username_is_409(
     authed_client: TestClient, authed_token: str
 ) -> None:
@@ -374,6 +423,78 @@ def test_set_password_for_unknown_user_is_404(
     )
 
     assert response.status_code == 404
+
+
+def test_set_password_too_short_is_400(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+    created = authed_client.post(
+        "/auth/users", headers=admin_headers, json={"username": "kyle"}
+    ).json()
+
+    response = authed_client.put(
+        f"/auth/users/{created['id']}/password",
+        headers=admin_headers,
+        json={"password": "short1"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
+
+
+def test_set_password_containing_username_is_400(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+    created = authed_client.post(
+        "/auth/users", headers=admin_headers, json={"username": "lenny"}
+    ).json()
+
+    response = authed_client.put(
+        f"/auth/users/{created['id']}/password",
+        headers=admin_headers,
+        json={"password": "lenny is the password"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
+
+
+def test_set_password_on_common_list_is_400(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+    created = authed_client.post(
+        "/auth/users", headers=admin_headers, json={"username": "moe"}
+    ).json()
+
+    response = authed_client.put(
+        f"/auth/users/{created['id']}/password",
+        headers=admin_headers,
+        json={"password": "motherfucker"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
+
+
+def test_set_password_too_long_is_400(
+    authed_client: TestClient, authed_token: str
+) -> None:
+    admin_headers = {"Authorization": f"Bearer {authed_token}"}
+    created = authed_client.post(
+        "/auth/users", headers=admin_headers, json={"username": "nora"}
+    ).json()
+
+    response = authed_client.put(
+        f"/auth/users/{created['id']}/password",
+        headers=admin_headers,
+        json={"password": "x" * 1025},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "ansina.auth.weak_password"
 
 
 # --- POST /auth/users/{id}/tokens -----------------------------------------------------

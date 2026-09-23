@@ -55,8 +55,10 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/auth/me/tokens",
         "/auth/me/tokens/{token_id}",
         "/auth/me/totp",
+        "/auth/me/password",
         "/auth/oidc/login",
         "/auth/oidc/callback",
+        "/auth/login",
     }
 
 

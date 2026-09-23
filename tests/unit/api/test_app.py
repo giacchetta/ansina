@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.middleware.cors import CORSMiddleware
 
 from ansina.api.app import create_app
+from ansina.api.auth import BearerAuthMiddleware
+from ansina.api.middleware import RequestIdMiddleware
 from ansina.auth.clock import iso, utc_now
 from ansina.auth.encryption import EncryptionKeyMissingError
 from ansina.auth.models import RoleSlug
@@ -355,7 +358,7 @@ def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
             .execute("SELECT version FROM schema_version")
             .fetchall()
         )
-        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
     # Outside the `with` block, lifespan shutdown has run — the database is closed.
     with pytest.raises(StorageError, match="after close"):
@@ -484,3 +487,146 @@ def test_lifespan_with_admin_username_and_api_token_creates_both_admins(
         )
         assert found is not None
         assert found.id == configured_admin.id
+
+
+# --- issue #51: CORS ----------------------------------------------------------
+
+
+def test_cors_disabled_by_default_leaves_middleware_stack_unchanged(
+    app: FastAPI,
+) -> None:
+    """`enabled = false` (the default) adds no middleware at all — the daemon +
+    `ansina-tui` deployment is byte-for-byte unchanged (issue #51 AC).
+    `user_middleware[0]` is outermost (Starlette's `add_middleware` inserts at the
+    front of the list — see `api/app.py`'s own ordering comment).
+    """
+    # `Middleware.cls` is typed as the structural `_MiddlewareFactory` protocol, which
+    # declares no `__name__` — `getattr` mirrors Starlette's own `Middleware.__repr__`
+    # for the identical reason.
+    assert [getattr(m.cls, "__name__", None) for m in app.user_middleware] == [
+        RequestIdMiddleware.__name__,
+        BearerAuthMiddleware.__name__,
+    ]
+
+
+def test_cors_enabled_registers_outermost(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__ENABLED", "false")
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["https://dash.example"]'
+    )
+
+    app = create_app(load_settings())
+
+    assert [getattr(m.cls, "__name__", None) for m in app.user_middleware] == [
+        CORSMiddleware.__name__,
+        RequestIdMiddleware.__name__,
+        BearerAuthMiddleware.__name__,
+    ]
+
+
+@pytest.fixture
+def cors_app(
+    clean_env: None,
+    tmp_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authed_token: str,
+    authed_admin_username: str,
+) -> FastAPI:
+    """Auth enforced (the configured admin, issue #28) *and* CORS enabled against
+    `https://dash.example` — the combination issue #51's own ACs need: a real
+    non-public route to preflight against, plus CORS actually wired.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__ADMIN_USERNAME", authed_admin_username)
+    monkeypatch.setenv("ANSINA_SECURITY__API_TOKEN", authed_token)
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["https://dash.example"]'
+    )
+    return create_app(load_settings())
+
+
+def test_cors_preflight_on_a_public_route_never_reaches_bearer_auth(
+    cors_app: FastAPI,
+) -> None:
+    """AC: a preflight `OPTIONS /auth/login` from an allowed origin returns 200
+    with the expected headers, and never reaches `BearerAuthMiddleware` (no 401).
+    """
+    with TestClient(cors_app) as client:
+        response = client.options(
+            "/auth/login",
+            headers={
+                "Origin": "https://dash.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://dash.example"
+    allow_methods = response.headers["access-control-allow-methods"]
+    assert "POST" in allow_methods
+    allow_headers = response.headers["access-control-allow-headers"].lower()
+    assert "authorization" in allow_headers
+    assert "x-sudo-token" in allow_headers
+
+
+def test_cors_preflight_on_a_protected_route_never_401s(cors_app: FastAPI) -> None:
+    """The stronger ordering proof: `/auth/login` is itself in `PUBLIC_PATHS`, so a
+    preflight there could never have 401'd regardless of middleware order and
+    proves nothing on its own. A preflight against a *non-public*, auth-gated route
+    (`/auth/me`) with no bearer token must still answer 200, not 401 — proof CORS
+    genuinely runs outermost, ahead of `BearerAuthMiddleware`.
+    """
+    with TestClient(cors_app) as client:
+        response = client.options(
+            "/auth/me",
+            headers={
+                "Origin": "https://dash.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://dash.example"
+
+
+def test_cors_disallowed_origin_gets_no_allow_origin_header(
+    cors_app: FastAPI,
+) -> None:
+    with TestClient(cors_app) as client:
+        response = client.options(
+            "/auth/me",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_real_request_exposes_request_id_and_retry_after(
+    cors_app: FastAPI, authed_token: str
+) -> None:
+    """A real (non-preflight) request from an allowed origin carries
+    `Access-Control-Expose-Headers` naming `X-Request-ID`/`Retry-After` (AC), and
+    still gets a real `X-Request-ID` echoed — proof the request also flows through
+    `RequestIdMiddleware`, inside CORS in the stack.
+    """
+    with TestClient(cors_app) as client:
+        response = client.get(
+            "/version",
+            headers={
+                "Origin": "https://dash.example",
+                "Authorization": f"Bearer {authed_token}",
+            },
+        )
+
+    assert response.status_code == 200
+    expose = response.headers["access-control-expose-headers"]
+    assert "X-Request-ID" in expose
+    assert "Retry-After" in expose
+    assert "x-request-id" in response.headers
