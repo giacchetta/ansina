@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ansina.auth.hashing import (
     Argon2Params,
+    dummy_password_hash,
     hash_password,
     hash_token,
     new_token_salt,
@@ -96,3 +97,37 @@ def test_verify_token_hash_rejects_a_wrong_token() -> None:
     stored = hash_token("a-real-token", salt)
 
     assert verify_token_hash("a-wrong-token", salt, stored) is False
+
+
+# --- dummy_password_hash: issue #50's timing-equalization primitive ----------------
+
+
+def test_dummy_password_hash_is_a_real_phc_string(cheap_argon2: Argon2Params) -> None:
+    stored = dummy_password_hash(cheap_argon2)
+
+    assert stored.startswith("$argon2id$")
+
+
+def test_dummy_password_hash_never_verifies_against_any_submitted_password(
+    cheap_argon2: Argon2Params,
+) -> None:
+    stored = dummy_password_hash(cheap_argon2)
+
+    assert verify_password("hunter2", stored, cheap_argon2) is False
+    assert verify_password("", stored, cheap_argon2) is False
+
+
+def test_dummy_password_hash_is_cached_per_params(cheap_argon2: Argon2Params) -> None:
+    """Same `params` -> the identical hash string, not a fresh one each call — the
+    whole point is to avoid paying a second argon2 hash generation per request.
+    """
+    assert dummy_password_hash(cheap_argon2) == dummy_password_hash(cheap_argon2)
+
+
+def test_dummy_password_hash_differs_across_params() -> None:
+    """A different `Argon2Params` gets its own cache entry — a dummy generated under
+    one work factor wouldn't equalize a verify run under another.
+    """
+    other = Argon2Params(time_cost=2, memory_cost_kib=16, parallelism=1)
+
+    assert dummy_password_hash(Argon2Params(1, 8, 1)) != dummy_password_hash(other)

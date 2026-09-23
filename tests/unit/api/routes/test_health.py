@@ -58,6 +58,7 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/auth/me/password",
         "/auth/oidc/login",
         "/auth/oidc/callback",
+        "/auth/login",
     }
 
 

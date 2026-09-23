@@ -61,6 +61,21 @@ def test_oidc_paths_reachable_without_token(
     assert response.status_code != 401
 
 
+def test_login_path_reachable_without_token(authed_client: TestClient) -> None:
+    """Issue #50: the third non-health-probe `PUBLIC_PATHS` entry. An empty `POST`
+    fails FastAPI's own body validation (422 — no `username`/`password`) rather than
+    being intercepted by `BearerAuthMiddleware` (401) — proof enough that the request
+    passed the middleware with no token at all, the same "route itself answers
+    something other than 401" shape `test_oidc_paths_reachable_without_token` above
+    already relies on for a route that refuses for its own (503) reason once past it.
+    Route-level behavior (credentials, throttling, the one 401 shape) is covered in
+    `tests/unit/api/routes/test_login.py`.
+    """
+    response = authed_client.post("/auth/login")
+
+    assert response.status_code != 401
+
+
 @pytest.mark.parametrize("path", ["/version", "/openapi.json"])
 def test_protected_paths_require_token(path: str, authed_client: TestClient) -> None:
     response = authed_client.get(path)

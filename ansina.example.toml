@@ -196,6 +196,11 @@ max_failed_attempts_per_ip = 20
 attempt_window_seconds = 900.0
 lockout_seconds = 900.0
 
+# How long the api_token minted at the end of a successful POST /auth/login stays
+# valid -- mirrors [security.oidc]'s own token_ttl_seconds below, a separate knob per
+# feature rather than one shared setting.
+token_ttl_seconds = 3600.0
+
 [security.encryption]
 # AES-GCM key for TOTP secrets at rest (issue #41, "ansina.auth.encryption"). Unset by
 # default -- nothing needs it until a user enrolls TOTP via POST /auth/me/totp, but

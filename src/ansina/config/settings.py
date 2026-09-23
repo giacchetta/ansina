@@ -272,6 +272,11 @@ class LoginSettings(BaseModel):
     attempt_window_seconds: float = Field(default=900.0, gt=0)
     lockout_seconds: float = Field(default=900.0, gt=0)
 
+    # How long the `api_token` minted at the end of a successful `POST /auth/login`
+    # (issue #50) stays valid — mirrors `OidcSettings.token_ttl_seconds`'s own
+    # per-feature TTL knob rather than reusing an unrelated one.
+    token_ttl_seconds: float = Field(default=3600.0, gt=0)
+
 
 # AES-256 needs exactly 32 raw bytes; `secrets.token_urlsafe(32)` is the generator this
 # validator's own error message recommends, so the shape it produces (unpadded

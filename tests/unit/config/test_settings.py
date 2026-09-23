@@ -45,6 +45,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.security.login.max_failed_attempts_per_ip == 20
     assert settings.security.login.attempt_window_seconds == 900.0
     assert settings.security.login.lockout_seconds == 900.0
+    assert settings.security.login.token_ttl_seconds == 3600.0
     assert settings.security.encryption.key is None
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"

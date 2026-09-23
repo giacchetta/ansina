@@ -53,6 +53,8 @@ _E2E_TOKEN = "e2e-test-token-0123456789abcdefghij"
 _E2E_READ_TOKEN = "e2e-read-role-token-0123456789abcd"
 _E2E_MAINTAIN_TOKEN = "e2e-maintain-role-token-0123456789ab"
 _E2E_MAINTAIN_PASSWORD = "correct horse battery staple e2e"
+_E2E_LOGIN_USERNAME = "e2e-password-login"
+_E2E_LOGIN_PASSWORD = "correct horse battery staple login e2e"
 # Cheap, test-only argon2id work factors (matches `tests/unit/auth/conftest.py`'s
 # `cheap_argon2` fixture) — the running server's own configured params never matter
 # for *verifying* this hash: argon2-cffi parses them back out of the PHC-format
@@ -422,6 +424,7 @@ def test_openapi_schema(server: str) -> None:
         "/auth/me/password",
         "/auth/oidc/login",
         "/auth/oidc/callback",
+        "/auth/login",
     }
 
 
@@ -519,6 +522,34 @@ def _seed_read_role_user(db_path: Path) -> None:
             "INSERT INTO credentials (id, user_id, type, hash, salt) "
             "VALUES (?, ?, 'api_token', ?, ?)",
             (uuid.uuid4().hex, user_id, token_hash, salt),
+        )
+        conn.commit()
+
+
+def _seed_login_password_user(db_path: Path) -> None:
+    """Seed a `Read`-role local user (`_E2E_LOGIN_USERNAME`) holding only a password
+    credential — no `api_token` at all — directly into the running server's own
+    SQLite file, the same technique `_seed_read_role_user` already establishes.
+    Issue #50's own headline flow: this is the shape of user that has no way in
+    *except* `POST /auth/login`.
+    """
+    password_hash = hash_password(_E2E_LOGIN_PASSWORD, _E2E_CHEAP_ARGON2)
+    with sqlite3.connect(db_path) as conn:
+        user_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO users (id, username) VALUES (?, ?)",
+            (user_id, _E2E_LOGIN_USERNAME),
+        )
+        (role_id,) = conn.execute("SELECT id FROM roles WHERE slug = 'read'").fetchone()
+        conn.execute(
+            "INSERT INTO role_assignments (id, subject_type, subject_id, role_id) "
+            "VALUES (?, 'user', ?, ?)",
+            (uuid.uuid4().hex, user_id, role_id),
+        )
+        conn.execute(
+            "INSERT INTO credentials (id, user_id, type, hash, salt) "
+            "VALUES (?, ?, 'password', ?, NULL)",
+            (uuid.uuid4().hex, user_id, password_hash),
         )
         conn.commit()
 
@@ -1099,6 +1130,58 @@ def test_self_service_token_round_trip(authed_server: str) -> None:
     assert "hash" not in minted_entry
     assert "salt" not in minted_entry
 
+    revoked = httpx.delete(
+        f"{authed_server}/auth/me/tokens/{token_id}",
+        headers={"Authorization": f"Bearer {new_token}"},
+    )
+    assert revoked.status_code == 204
+
+    rejected = httpx.get(
+        f"{authed_server}/auth/me", headers={"Authorization": f"Bearer {new_token}"}
+    )
+    assert rejected.status_code == 401
+    assert rejected.json()["code"] == "ansina.unauthorized"
+
+
+def test_password_login_round_trip(authed_server: str, tmp_path: Path) -> None:
+    """Issue #50's headline flow, black-box end to end: a local, password-only user
+    (no `api_token` credential at all) exchanges username + password for one via
+    `POST /auth/login`, authenticates a real request with it, then logs out the
+    deliberate way (#28's `DELETE /auth/me/tokens/{id}` — #50 ships no
+    `POST /auth/logout`) and confirms the token stops authenticating. A trailing
+    wrong-password call proves the one 401 shape end to end, against the real
+    argon2id path this test's `authed_server` runs with (not the cheap unit-test
+    work factors — `_E2E_CHEAP_ARGON2` only controls how the *seeded* hash was
+    produced, not what the running server verifies against).
+    """
+    _seed_login_password_user(tmp_path / "ansina.db")
+
+    minted = httpx.post(
+        f"{authed_server}/auth/login",
+        json={"username": _E2E_LOGIN_USERNAME, "password": _E2E_LOGIN_PASSWORD},
+    )
+    assert minted.status_code == 201
+    body = minted.json()
+    assert body["label"] == "password login"
+    assert body["expires_at"] is not None
+    new_token = body["token"]
+    token_id = body["id"]
+
+    authed = httpx.get(
+        f"{authed_server}/auth/me", headers={"Authorization": f"Bearer {new_token}"}
+    )
+    assert authed.status_code == 200
+    assert authed.json()["username"] == _E2E_LOGIN_USERNAME
+
+    wrong_password = httpx.post(
+        f"{authed_server}/auth/login",
+        json={"username": _E2E_LOGIN_USERNAME, "password": "not-the-password"},
+    )
+    assert wrong_password.status_code == 401
+    assert wrong_password.json()["code"] == "ansina.unauthorized"
+
+    # The deliberate #50 logout path — no POST /auth/logout ships; the login
+    # response's own `id` is what a client revokes.
     revoked = httpx.delete(
         f"{authed_server}/auth/me/tokens/{token_id}",
         headers={"Authorization": f"Bearer {new_token}"},

@@ -82,6 +82,15 @@ class LoginThrottle:
         self._settings = settings
         self._clock = clock
 
+    @property
+    def clock(self) -> Clock:
+        """The injected clock this throttle checks attempts against — `api.routes
+        .login` (#50) mints the resulting `api_token` with this same clock, rather
+        than a second, independently-resolved `utc_now()`, mirroring
+        `OidcLoginService.clock`'s exact reasoning.
+        """
+        return self._clock
+
     def check(self, username: str, ip: str) -> None:
         """Raises `LoginThrottledError` if either bucket for `(username, ip)` is
         currently locked out — checked before a password is ever verified.

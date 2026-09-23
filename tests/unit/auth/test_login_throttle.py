@@ -45,6 +45,16 @@ def _throttle(
     return LoginThrottle(db, settings, clock=clock), clock
 
 
+def test_clock_property_returns_the_injected_clock(db: Database) -> None:
+    """`api.routes.login` (#50) mints the resulting token with this exact clock,
+    rather than a second, independently-resolved `utc_now()` — the same seam
+    `OidcLoginService.clock` already exposes.
+    """
+    throttle, clock = _throttle(db)
+
+    assert throttle.clock is clock
+
+
 def test_check_allows_a_fresh_username_and_ip(db: Database) -> None:
     throttle, _clock = _throttle(db)
 
