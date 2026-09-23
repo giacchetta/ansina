@@ -316,6 +316,24 @@ def authed_server(tmp_path: Path) -> Iterator[str]:
         yield srv.base_url
 
 
+@pytest.fixture
+def cors_server(tmp_path: Path) -> Iterator[str]:
+    """Auth enforced (configured admin, issue #28) *and* CORS enabled (issue #51)
+    against `https://dash.example` — proves the preflight-bypasses-auth ordering
+    under a real `uvicorn` ASGI server, not just `TestClient`.
+    """
+    with _launch_server(
+        tmp_path,
+        env={
+            "ANSINA_SECURITY__ADMIN_USERNAME": _E2E_ADMIN_USERNAME,
+            "ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN,
+            "ANSINA_SECURITY__CORS__ENABLED": "true",
+            "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS": '["https://dash.example"]',
+        },
+    ) as srv:
+        yield srv.base_url
+
+
 _E2E_OIDC_CLIENT_ID = "e2e-oidc-client"
 _E2E_OIDC_CLIENT_SECRET = "e2e-oidc-client-secret-value"
 
@@ -1193,6 +1211,37 @@ def test_password_login_round_trip(authed_server: str, tmp_path: Path) -> None:
     )
     assert rejected.status_code == 401
     assert rejected.json()["code"] == "ansina.unauthorized"
+
+
+def test_cors_preflight_bypasses_auth(cors_server: str) -> None:
+    """Issue #51's headline flow, black-box end to end against a real `uvicorn`
+    process: a CORS preflight `OPTIONS` on a non-public, auth-gated route
+    (`/auth/me`) from an allowed origin, carrying no bearer token at all, answers
+    200 with the expected CORS headers — proof `CORSMiddleware` genuinely runs
+    outermost, ahead of `BearerAuthMiddleware`, under the real ASGI stack rather
+    than `TestClient`'s in-process one.
+    """
+    response = httpx.options(
+        f"{cors_server}/auth/me",
+        headers={
+            "Origin": "https://dash.example",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://dash.example"
+    allow_headers = response.headers["access-control-allow-headers"].lower()
+    assert "authorization" in allow_headers
+    assert "x-sudo-token" in allow_headers
+
+    # A real, unauthenticated request past the preflight still 401s ordinarily —
+    # CORS only ever skips the browser-side block, never Ansina's own enforcement.
+    unauthed = httpx.get(
+        f"{cors_server}/auth/me", headers={"Origin": "https://dash.example"}
+    )
+    assert unauthed.status_code == 401
 
 
 def test_bootstrap_and_configured_admin_are_fully_independent(

@@ -260,3 +260,28 @@ http_timeout_seconds = 10.0
 # startup error. Required together with issuer/client_id/redirect_uri when
 # enabled = true:
 #   ANSINA_SECURITY__OIDC__CLIENT_SECRET=...
+
+[security.cors]
+# Cross-Origin Resource Sharing (issue #51), for a browser-hosted third-party
+# dashboard on another origin -- without this, a browser cannot call Ansina's REST
+# API at all, and the failure is reported by the browser, never by Ansina, so it's
+# invisible in the daemon's own logs. false (the default) adds no CORS middleware
+# at all -- the daemon + ansina-tui deployment (which is not a browser and never
+# sends an Origin header) is byte-for-byte unchanged.
+enabled = false
+
+# Every entry must be an exact "scheme://host[:port]" origin, the same string a
+# browser sends in its Origin header -- compared exactly, so list each one that
+# needs access. A trailing slash is stripped automatically (the same footgun
+# [security.oidc] issuer strips one for). "*" is refused outright, even with
+# enabled = false: every Ansina route but the health probes and the login routes
+# is authenticated, and a wildcard origin on a credential-bearing API is never the
+# right answer. Required (non-empty) when enabled = true.
+# allowed_origins = ["https://dashboard.example.com"]
+
+# How long a browser may cache a preflight's answer before repeating it.
+max_age_seconds = 600
+
+# No allow_credentials setting exists: Ansina authenticates with an Authorization
+# header, never a cookie, so there is nothing for a credentialed CORS mode to
+# protect -- it would only add CSRF surface for no benefit.

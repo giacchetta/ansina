@@ -450,6 +450,80 @@ class OidcSettings(BaseModel):
         return self
 
 
+class CorsSettings(BaseModel):
+    """Cross-Origin Resource Sharing for browser-hosted third-party clients, consumed
+    by issue #51's `ansina.api.cors`.
+
+    `enabled=False` (the default) means `add_cors_middleware` adds nothing at all — the
+    same "`None`/no-op when off" shape `[heart]`/`[brain]`/`[security.oidc]` already
+    use — so the daemon + `ansina-tui` deployment (which is not a browser and never
+    sends an `Origin` header) is byte-for-byte unchanged. `ansina-tui`'s own `ApiClient`
+    is unaffected either way: a same-origin, non-browser HTTP client never triggers CORS
+    enforcement, which is a browser-side mechanism, not a server-side authorization
+    control — `require(resource)` still gates every route exactly as before.
+
+    No `allow_credentials` field: Ansina authenticates with an `Authorization` header,
+    never a cookie, so there is nothing for a credentialed CORS mode to protect and it
+    would only add CSRF surface for no benefit (`api.cors.add_cors_middleware` always
+    passes `allow_credentials=False`).
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = False
+
+    # Every entry must be an exact `scheme://host[:port]` origin, the same string a
+    # browser sends in its `Origin` header — Starlette compares it exactly. "*" is
+    # refused outright (see `_validate_origins` below): a wildcard origin on a
+    # credential-bearing API is never the right answer. A trailing slash is stripped
+    # (not refused) since it's the same copy-paste footgun
+    # `OidcSettings._strip_trailing_slash` already normalizes for `issuer` — a browser's
+    # own `Origin` header never carries one, so a configured value that still had one
+    # would otherwise silently match nothing, an opaque browser-side failure invisible
+    # to Ansina's own logs.
+    allowed_origins: tuple[str, ...] = ()
+
+    # `Access-Control-Max-Age` — how long a browser may cache a preflight's answer
+    # before repeating it. Starlette's own default (600s) is echoed here explicitly so
+    # it's a documented, tunable Ansina setting rather than an implicit library default.
+    max_age_seconds: int = Field(default=600, ge=0)
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _validate_origins(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if "*" in value:
+            raise ValueError(
+                'security.cors.allowed_origins must not contain "*" — every Ansina '
+                "route but the health probes and the login routes is authenticated, "
+                "and a wildcard origin on a credential-bearing API is never correct; "
+                "list each allowed origin explicitly"
+            )
+        return tuple(origin.rstrip("/") for origin in value)
+
+    @model_validator(mode="after")
+    def _validate_enabled_requires_origins(self) -> CorsSettings:
+        """`enabled=True` with no `allowed_origins` would add real middleware that
+        allows nothing — a silent no-op indistinguishable from a misconfiguration, the
+        same "fail loudly, don't discover this on the first browser request" reasoning
+        `OidcSettings._validate_enabled_requires_credentials` already applies. Raised
+        directly (not `ValueError`) since this is a model-level check with no single
+        field `loc` — the same pattern that check and `Settings._refuse_unsafe_bind`
+        both use.
+        """
+        if self.enabled and not self.allowed_origins:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "security.cors.allowed_origins: required (non-empty) when "
+                        "security.cors.enabled = true — set "
+                        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS to a JSON array of "
+                        "allowed origins, or leave security.cors.enabled = false"
+                    ]
+                )
+            )
+        return self
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -502,6 +576,7 @@ class SecuritySettings(BaseModel):
     login: LoginSettings = Field(default_factory=LoginSettings)
     encryption: EncryptionSettings = Field(default_factory=EncryptionSettings)
     oidc: OidcSettings = Field(default_factory=OidcSettings)
+    cors: CorsSettings = Field(default_factory=CorsSettings)
 
     # Issue #28: how long a token's `last_used_at` may go stale before the next
     # successful authentication updates it — coalesced rather than written on every

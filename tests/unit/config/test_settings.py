@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from ansina.config import ConfigError, load_settings
 from ansina.config.settings import (
+    CorsSettings,
     EncryptionSettings,
     OidcSettings,
     SecuritySettings,
@@ -902,3 +903,98 @@ def test_oidc_settings_disabled_accepts_a_none_client_secret_directly() -> None:
 
     assert settings.enabled is False
     assert settings.client_secret is None
+
+
+# --- issue #51: [security.cors] --------------------------------------------------
+
+
+def test_cors_disabled_by_default(clean_env: None, tmp_cwd: Path) -> None:
+    settings = load_settings()
+
+    assert settings.security.cors.enabled is False
+    assert settings.security.cors.allowed_origins == ()
+    assert settings.security.cors.max_age_seconds == 600
+
+
+def test_cors_enabled_with_origins_loads_fine(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS",
+        '["https://dash.example", "https://other.example"]',
+    )
+
+    settings = load_settings()
+
+    assert settings.security.cors.enabled is True
+    assert settings.security.cors.allowed_origins == (
+        "https://dash.example",
+        "https://other.example",
+    )
+
+
+def test_cors_allowed_origins_trailing_slash_is_stripped(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same copy-paste footgun `OidcSettings._strip_trailing_slash` already
+    normalizes for `issuer` — a browser's own `Origin` header never carries a
+    trailing slash, so a configured value that still had one would otherwise
+    silently match nothing.
+    """
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["https://dash.example/"]'
+    )
+
+    settings = load_settings()
+
+    assert settings.security.cors.allowed_origins == ("https://dash.example",)
+
+
+def test_cors_wildcard_origin_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["*"]')
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.cors.allowed_origins" in str(exc_info.value)
+
+
+def test_cors_wildcard_origin_rejected_even_when_disabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "*" is refused outright — regardless of `enabled` — per the issue's own AC."""
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "false")
+    monkeypatch.setenv(
+        "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS", '["https://dash.example", "*"]'
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.cors.allowed_origins" in str(exc_info.value)
+
+
+def test_cors_enabled_with_empty_origins_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SECURITY__CORS__ENABLED", "true")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "security.cors.allowed_origins" in str(exc_info.value)
+    assert "ANSINA_SECURITY__CORS__ALLOWED_ORIGINS" in str(exc_info.value)
+
+
+def test_cors_settings_disabled_accepts_empty_origins_directly() -> None:
+    """`_validate_enabled_requires_origins`'s early return for `enabled=False` —
+    `CorsSettings` can be constructed directly with every field left at its default.
+    """
+    settings = CorsSettings()
+
+    assert settings.enabled is False
+    assert settings.allowed_origins == ()

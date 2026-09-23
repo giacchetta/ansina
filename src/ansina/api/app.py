@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ansina import __version__
 from ansina.api.auth import BearerAuthMiddleware
+from ansina.api.cors import add_cors_middleware
 from ansina.api.exception_handlers import (
     ansina_error_handler,
     http_exception_handler,
@@ -237,10 +238,22 @@ def create_app(
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
-    # goes first (innermost) and RequestIdMiddleware last (outermost) so a rejected
-    # request still gets a request id bound in context — a 401's `problem+json` body
-    # carries a real `request_id`, the response still echoes `X-Request-ID`, and the
-    # "request completed" access-log line still fires for it.
+    # goes first (innermost) and RequestIdMiddleware second (outermost of the two) so a
+    # rejected request still gets a request id bound in context — a 401's
+    # `problem+json` body carries a real `request_id`, the response still echoes
+    # `X-Request-ID`, and the "request completed" access-log line still fires for it.
+    #
+    # Issue #51 adds a third, registered last so it runs outermost of all three:
+    # CORSMiddleware (`api/cors.py`, a no-op — nothing added — when
+    # `[security.cors] enabled = false`, the default). A CORS preflight `OPTIONS`
+    # carries no `Authorization` header by definition, so any inner ordering would let
+    # BearerAuthMiddleware 401 it — the browser would surface that as an opaque,
+    # undiagnosable CORS failure rather than a real 401. The one cost of running
+    # outermost: a preflight short-circuits above RequestIdMiddleware too, so it gets
+    # no echoed `X-Request-ID` and no "request completed" access-log line — a
+    # deliberate consequence, not a defect, since every *real* request (the
+    # browser's actual GET/POST/etc. that follows a preflight) still flows through
+    # both.
     app.add_middleware(
         BearerAuthMiddleware,
         enabled=resolved_settings.security.enabled,
@@ -249,6 +262,7 @@ def create_app(
         sudo=sudo,
     )
     app.add_middleware(RequestIdMiddleware)
+    add_cors_middleware(app, resolved_settings)
 
     app.add_exception_handler(AnsinaError, ansina_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
