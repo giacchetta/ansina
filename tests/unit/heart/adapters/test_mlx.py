@@ -18,10 +18,35 @@ class _FakeTokenizer:
 
 
 class _FakeChatTokenizer(_FakeTokenizer):
-    """A tokenizer that *does* expose a chat template — unlike `_FakeTokenizer`,
-    whose absence of `apply_chat_template` is itself what
-    `test_generate_calls_mlx_lm_generate_and_returns_its_result` already covers (the
-    getattr-`None` fallback branch).
+    """A tokenizer that *does* expose a chat template accepting arbitrary extra
+    kwargs (the real `transformers`/`mlx_lm` shape, forwarded into the Jinja render
+    context) — unlike `_FakeTokenizer`, whose absence of `apply_chat_template` is
+    itself what `test_generate_calls_mlx_lm_generate_and_returns_its_result` already
+    covers (the getattr-`None` fallback branch).
+    """
+
+    def __init__(self) -> None:
+        self.last_kwargs: dict[str, Any] = {}
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tokenize: bool,
+        add_generation_prompt: bool,
+        **kwargs: Any,
+    ) -> str:
+        assert tokenize is False
+        assert add_generation_prompt is True
+        assert messages == [{"role": "user", "content": messages[0]["content"]}]
+        self.last_kwargs = kwargs
+        return f"<chat>{messages[0]['content']}</chat>"
+
+
+class _FakeLegacyChatTokenizer(_FakeTokenizer):
+    """A tokenizer whose `apply_chat_template` doesn't forward arbitrary keyword
+    arguments at all — the rarer shape `_render_prompt`'s `TypeError` fallback
+    exists for.
     """
 
     def apply_chat_template(
@@ -31,9 +56,6 @@ class _FakeChatTokenizer(_FakeTokenizer):
         tokenize: bool,
         add_generation_prompt: bool,
     ) -> str:
-        assert tokenize is False
-        assert add_generation_prompt is True
-        assert messages == [{"role": "user", "content": messages[0]["content"]}]
         return f"<chat>{messages[0]['content']}</chat>"
 
 
@@ -141,8 +163,10 @@ def test_unload_tolerates_missing_mlx_core(
 def test_generate_applies_the_tokenizers_chat_template_by_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    tokenizer = _FakeChatTokenizer()
+
     def _loader(model_path: Path) -> tuple[object, object]:
-        return object(), _FakeChatTokenizer()
+        return object(), tokenizer
 
     runtime = MlxHeartRuntime(
         tmp_path, context_tokens=100, max_output_tokens=10, loader=_loader
@@ -159,6 +183,7 @@ def test_generate_applies_the_tokenizers_chat_template_by_default(
     runtime.generate("hi", max_tokens=5)
 
     assert calls[0]["prompt"] == "<chat>hi</chat>"
+    assert tokenizer.last_kwargs == {"enable_thinking": False}
 
 
 def test_generate_skips_the_chat_template_when_disabled(
@@ -186,6 +211,35 @@ def test_generate_skips_the_chat_template_when_disabled(
     runtime.generate("hi", max_tokens=5)
 
     assert calls[0]["prompt"] == "hi"
+
+
+def test_generate_falls_back_when_the_tokenizer_rejects_enable_thinking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The rarer shape: a tokenizer whose `apply_chat_template` doesn't accept
+    `enable_thinking` (or any extra kwarg) at all raises `TypeError` on the first
+    attempt, and `_render_prompt` retries without it rather than failing the whole
+    `generate()` call.
+    """
+
+    def _loader(model_path: Path) -> tuple[object, object]:
+        return object(), _FakeLegacyChatTokenizer()
+
+    runtime = MlxHeartRuntime(
+        tmp_path, context_tokens=100, max_output_tokens=10, loader=_loader
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _fake_generate(model: object, tokenizer: object, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "idle"
+
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(generate=_fake_generate))
+    runtime.load()
+
+    runtime.generate("hi", max_tokens=5)
+
+    assert calls[0]["prompt"] == "<chat>hi</chat>"
 
 
 def test_default_loader_calls_mlx_lm_load(

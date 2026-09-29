@@ -78,3 +78,36 @@ def test_try_parse_decision_never_logs(
 
 def test_parse_decision_delegates_to_try_parse_decision() -> None:
     assert parse_decision("act") == try_parse_decision("act")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Thinking Process:\n1. blah\n</think>\n\nidle", TickDecision.IDLE),
+        ("some reasoning here</think>act", TickDecision.ACT),
+        ("word1</think>word2</think>escalate", TickDecision.ESCALATE),
+    ],
+)
+def test_try_parse_decision_uses_the_text_after_the_last_think_close_tag(
+    raw: str, expected: TickDecision
+) -> None:
+    assert try_parse_decision(raw) == expected
+
+
+def test_try_parse_decision_ignores_a_decision_word_mentioned_inside_the_thinking() -> (
+    None
+):
+    """The exact issue #53 finding: a wandering chain-of-thought can mention one of
+    the three real words ahead of the model's actual final answer — the word after
+    `</think>` must win, not whichever one appears first in the whole reply.
+    """
+    raw = "I could say act here, but actually idle fits better.\n</think>\nidle"
+
+    assert try_parse_decision(raw) == TickDecision.IDLE
+
+
+def test_try_parse_decision_is_unaffected_when_no_think_tag_is_present() -> None:
+    """A non-reasoning model's reply (or the pre-#53 raw-prompt path) never contains
+    `</think>` — `rsplit` with no match must leave the string untouched.
+    """
+    assert try_parse_decision("act") == TickDecision.ACT

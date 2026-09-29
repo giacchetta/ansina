@@ -80,6 +80,21 @@ class MlxHeartRuntime(BaseHeartRuntime):
         False`, the escape hatch for a future base/non-instruct model) falls back to
         the raw prompt unchanged — the pre-#53 behavior.
 
+        Also passes `enable_thinking=False` (the Qwen3-family template's own kwarg to
+        pre-close the `<think>` block rather than leave it open for the model to
+        reason into) — a second, equally measured finding from that same first
+        chat-templated run: with reasoning left on, 18/24 fixtures never reached a
+        final answer within `max_output_tokens` at all, and every run that did still
+        blew the p95-latency gate. A tick that reasons for multiple seconds before a
+        3-way classification defeats the Heart's whole "fast, narrow, autonomic"
+        design (blueprint §3), regardless of which model produces it — this is a
+        latency/budget problem, not just a parsing one. Passed unconditionally: a
+        template that has no concept of `enable_thinking` simply never references it
+        in its own Jinja logic, so the kwarg is inert rather than erroring — verified
+        directly against the Qwen3.5 tokenizer actually on the bench ladder. `TypeError`
+        is still caught, for the rarer case of a tokenizer whose `apply_chat_template`
+        doesn't forward arbitrary keyword arguments to the template context at all.
+
         Deliberately not reflected in `_token_count`: the template adds a small,
         roughly constant per-call overhead (a handful of special tokens), not
         proportional to snapshot content, so `heart.tick.snapshot.build_prompt`'s
@@ -92,11 +107,16 @@ class MlxHeartRuntime(BaseHeartRuntime):
         render = getattr(self._tokenizer, "apply_chat_template", None)
         if render is None:
             return prompt
-        rendered: str = render(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            rendered: str = render(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            rendered = render(messages, tokenize=False, add_generation_prompt=True)
         return rendered
 
     def _generate(self, prompt: str, max_tokens: int) -> str:

@@ -29,8 +29,18 @@ def try_parse_decision(raw: str) -> TickDecision | None:
     tell a *correct* `idle` apart from a *fallback* `idle` (`parse_decision` collapses
     that distinction by design, which is exactly why the loop should keep using it and
     the bench should not).
+
+    Strips everything up to and including the last `</think>` first (issue #53's
+    first chat-templated bench run, measured: a reasoning-tuned model's decision word
+    lands *after* its own closing think tag, and the plain first-word rule below would
+    otherwise match a word from the reasoning trace itself — "Thinking" is never a
+    `TickDecision`, but a wandering CoT can easily contain one of the three real words
+    ahead of the model's actual final answer). A reply with no `</think>` at all
+    (every non-reasoning model, and the pre-#53 raw-prompt path) is completely
+    unaffected — `rsplit` with no match returns the original string unchanged.
     """
-    normalized = raw.strip().lower()
+    after_thinking = raw.rsplit("</think>", 1)[-1]
+    normalized = after_thinking.strip().lower()
     first_word = normalized.split(maxsplit=1)[0] if normalized else ""
     first_word = first_word.strip(".,:;!?\"'")
     try:
