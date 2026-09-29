@@ -64,6 +64,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override [heart] max_output_tokens for this run only.",
     )
+    parser.add_argument(
+        "--no-chat-template",
+        action="store_true",
+        help=(
+            "Disable [heart] apply_chat_template for this run only — the pre-#53 "
+            "raw-prompt behavior, kept to reproduce the earliest bench report."
+        ),
+    )
     return parser
 
 
@@ -84,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         heart_overrides["model_repo"] = args.model_repo
     if args.max_output_tokens is not None:
         heart_overrides["max_output_tokens"] = args.max_output_tokens
+    if args.no_chat_template:
+        heart_overrides["apply_chat_template"] = False
     if heart_overrides:
         settings = settings.model_copy(
             update={"heart": settings.heart.model_copy(update=heart_overrides)}
@@ -118,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             template=template,
             prompt_variant=args.prompt_variant,
             model_repo=settings.heart.model_repo,
+            chat_template=settings.heart.apply_chat_template,
         )
     finally:
         runtime.unload()
@@ -127,7 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     date = report.generated_at[:10]
     model_slug = settings.heart.model_repo.rsplit("/", 1)[-1]
-    stem = f"{date}-{model_slug}-{args.prompt_variant}"
+    template_suffix = "" if settings.heart.apply_chat_template else "-notemplate"
+    stem = f"{date}-{model_slug}-{args.prompt_variant}{template_suffix}"
     (args.out_dir / f"{stem}.md").write_text(report_to_markdown(report, gate=gate))
     (args.out_dir / f"{stem}.json").write_text(report_to_json(report, gate=gate))
 

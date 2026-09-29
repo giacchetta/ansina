@@ -17,6 +17,26 @@ class _FakeTokenizer:
         return list(range(len(text)))
 
 
+class _FakeChatTokenizer(_FakeTokenizer):
+    """A tokenizer that *does* expose a chat template — unlike `_FakeTokenizer`,
+    whose absence of `apply_chat_template` is itself what
+    `test_generate_calls_mlx_lm_generate_and_returns_its_result` already covers (the
+    getattr-`None` fallback branch).
+    """
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tokenize: bool,
+        add_generation_prompt: bool,
+    ) -> str:
+        assert tokenize is False
+        assert add_generation_prompt is True
+        assert messages == [{"role": "user", "content": messages[0]["content"]}]
+        return f"<chat>{messages[0]['content']}</chat>"
+
+
 def _fake_loader(model_path: Path) -> tuple[object, object]:
     return object(), _FakeTokenizer()
 
@@ -116,6 +136,56 @@ def test_unload_tolerates_missing_mlx_core(
     runtime.unload()  # must not raise
 
     assert runtime.is_healthy() is False
+
+
+def test_generate_applies_the_tokenizers_chat_template_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _loader(model_path: Path) -> tuple[object, object]:
+        return object(), _FakeChatTokenizer()
+
+    runtime = MlxHeartRuntime(
+        tmp_path, context_tokens=100, max_output_tokens=10, loader=_loader
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _fake_generate(model: object, tokenizer: object, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "idle"
+
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(generate=_fake_generate))
+    runtime.load()
+
+    runtime.generate("hi", max_tokens=5)
+
+    assert calls[0]["prompt"] == "<chat>hi</chat>"
+
+
+def test_generate_skips_the_chat_template_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _loader(model_path: Path) -> tuple[object, object]:
+        return object(), _FakeChatTokenizer()
+
+    runtime = MlxHeartRuntime(
+        tmp_path,
+        context_tokens=100,
+        max_output_tokens=10,
+        loader=_loader,
+        apply_chat_template=False,
+    )
+    calls: list[dict[str, Any]] = []
+
+    def _fake_generate(model: object, tokenizer: object, **kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "idle"
+
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(generate=_fake_generate))
+    runtime.load()
+
+    runtime.generate("hi", max_tokens=5)
+
+    assert calls[0]["prompt"] == "hi"
 
 
 def test_default_loader_calls_mlx_lm_load(

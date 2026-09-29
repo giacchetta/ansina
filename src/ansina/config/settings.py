@@ -141,6 +141,14 @@ class HeartSettings(BaseModel):
     # allowed to assume.
     context_tokens: int = Field(default=8192, ge=256, le=8192)
     max_output_tokens: int = Field(default=512, ge=1)
+    # Default `True` (issue #53): every model on the bench ladder is chat/instruct-
+    # tuned, and a raw (untemplated) prompt measurably makes one continue the prompt
+    # as free text instead of answering it — see `docs/heart/bench/`'s first (no-
+    # template) report, 100% parse-fallback. `MlxHeartRuntime` applies the loaded
+    # tokenizer's own chat template when this is `True` and the tokenizer exposes
+    # one; `False` is the pre-#53 raw-prompt behavior, kept as an escape hatch for a
+    # future base (non-instruct) model.
+    apply_chat_template: bool = True
     tick: TickSettings = Field(default_factory=TickSettings)
 
     @field_validator("model_path", "cache_dir")

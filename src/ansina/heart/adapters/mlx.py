@@ -51,12 +51,14 @@ class MlxHeartRuntime(BaseHeartRuntime):
         context_tokens: int,
         max_output_tokens: int,
         loader: Loader = _default_loader,
+        apply_chat_template: bool = True,
     ) -> None:
         super().__init__(
             context_tokens=context_tokens, max_output_tokens=max_output_tokens
         )
         self._model_path = model_path
         self._loader = loader
+        self._apply_chat_template = apply_chat_template
         self._model: Any = None
         self._tokenizer: Any = None
 
@@ -68,6 +70,35 @@ class MlxHeartRuntime(BaseHeartRuntime):
                 f"mlx failed to load model at {str(self._model_path)!r}: {exc}"
             ) from exc
 
+    def _render_prompt(self, prompt: str) -> str:
+        """Wraps `prompt` as a single user turn through the loaded tokenizer's own
+        chat template (issue #53) — every model on the bench ladder is chat/
+        instruct-tuned, and a raw, untemplated prompt measurably makes one continue
+        the prompt as free text rather than answer it (100% parse-fallback on the
+        first real bench run, `docs/heart/bench/`'s earliest report). A tokenizer
+        with no `apply_chat_template` (or `HeartSettings.apply_chat_template =
+        False`, the escape hatch for a future base/non-instruct model) falls back to
+        the raw prompt unchanged — the pre-#53 behavior.
+
+        Deliberately not reflected in `_token_count`: the template adds a small,
+        roughly constant per-call overhead (a handful of special tokens), not
+        proportional to snapshot content, so `heart.tick.snapshot.build_prompt`'s
+        per-item budgeting (which calls `token_count` on raw item text, not a
+        templated turn) stays a close, if slightly conservative-in-the-other-
+        direction, proxy for what the model actually consumes.
+        """
+        if not self._apply_chat_template:
+            return prompt
+        render = getattr(self._tokenizer, "apply_chat_template", None)
+        if render is None:
+            return prompt
+        rendered: str = render(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        return rendered
+
     def _generate(self, prompt: str, max_tokens: int) -> str:
         from mlx_lm import generate
 
@@ -75,7 +106,7 @@ class MlxHeartRuntime(BaseHeartRuntime):
             result: str = generate(
                 self._model,
                 self._tokenizer,
-                prompt=prompt,
+                prompt=self._render_prompt(prompt),
                 max_tokens=max_tokens,
                 verbose=False,
             )

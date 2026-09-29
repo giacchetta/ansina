@@ -231,6 +231,29 @@ def test_main_passes_settings_through_unchanged_with_no_overrides(
     assert captured[0] is loaded_settings
 
 
+def test_main_applies_no_chat_template_override(
+    loaded_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _FakeRuntime(replies=["idle", "act", "escalate"])
+    captured = _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    heart_main.main(
+        [
+            "--fixtures",
+            str(_fixtures_file(tmp_path)),
+            "--out-dir",
+            str(out_dir),
+            "--no-chat-template",
+        ]
+    )
+
+    assert captured[0].heart.apply_chat_template is False
+    assert captured[0] is not loaded_settings
+    md_files = list(out_dir.glob("*-notemplate.md"))
+    assert len(md_files) == 1
+
+
 def test_default_out_dir_and_prompt_variant() -> None:
     args = heart_main._build_parser().parse_args([])
 
@@ -239,6 +262,7 @@ def test_default_out_dir_and_prompt_variant() -> None:
     assert args.model_repo is None
     assert args.fixtures is None
     assert args.max_output_tokens is None
+    assert args.no_chat_template is False
 
 
 def test_prompt_variant_rejects_an_unknown_name() -> None:

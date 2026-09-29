@@ -85,4 +85,5 @@ def build_heart_runtime(
         resolved.path,
         context_tokens=heart_settings.context_tokens,
         max_output_tokens=heart_settings.max_output_tokens,
+        apply_chat_template=heart_settings.apply_chat_template,
     )

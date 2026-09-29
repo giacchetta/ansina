@@ -55,6 +55,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.cache_dir == Path.home() / ".cache" / "ansina" / "models"
     assert settings.heart.context_tokens == 8192
     assert settings.heart.max_output_tokens == 512
+    assert settings.heart.apply_chat_template is True
     assert settings.heart.tick.enabled is True
     assert settings.heart.tick.interval_seconds == 30.0
     assert settings.heart.tick.jitter_seconds == 3.0

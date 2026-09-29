@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -126,3 +127,28 @@ def test_resolved_model_is_passed_to_the_mlx_adapter(
 
     assert isinstance(runtime, MlxHeartRuntime)
     assert runtime.context_tokens == 4096
+
+
+def test_apply_chat_template_setting_is_passed_to_the_mlx_adapter(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #53: `[heart] apply_chat_template` must reach the constructed adapter,
+    not just live unused on `HeartSettings`.
+    """
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_HEART__APPLY_CHAT_TEMPLATE", "false")
+    settings = load_settings()
+    _mock_darwin_arm64_with_mlx(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def _spy_mlx_heart_runtime(*args: Any, **kwargs: Any) -> MlxHeartRuntime:
+        captured.update(kwargs)
+        return MlxHeartRuntime(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "ansina.heart.selection.MlxHeartRuntime", _spy_mlx_heart_runtime
+    )
+
+    build_heart_runtime(settings, resolver=_resolver)
+
+    assert captured["apply_chat_template"] is False

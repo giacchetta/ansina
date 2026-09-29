@@ -1,0 +1,315 @@
+{
+  "model_repo": "mlx-community/Qwen3.5-2B-MLX-4bit",
+  "prompt_variant": "baseline",
+  "chat_template": false,
+  "generated_at": "2026-09-29T13:37:13.549808+00:00",
+  "host": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "mlx_lm_version": "0.31.3",
+  "max_output_tokens": 512,
+  "fixture_count": 24,
+  "metrics": {
+    "accuracy": 0.0,
+    "recall_by_class": {
+      "idle": 0.0,
+      "act": 0.0,
+      "escalate": 0.0
+    },
+    "class_counts": {
+      "idle": 8,
+      "act": 8,
+      "escalate": 8
+    },
+    "parse_fallback_rate": 1.0,
+    "false_act_or_escalate_on_obvious_idle": 0,
+    "latency_p50_seconds": 6.15978429200004,
+    "latency_p95_seconds": 6.250009250000403,
+    "prompt_tokens_min": 96,
+    "prompt_tokens_median": 102.5,
+    "prompt_tokens_max": 114,
+    "peak_rss_bytes": 2289991680
+  },
+  "gate": {
+    "passed": false,
+    "checks": {
+      "accuracy >= 0.90": false,
+      "zero false act/escalate on obviously_idle fixtures": true,
+      "zero parse-fallback rate": false,
+      "p95 latency <= 6.00s (20% of 30.0s interval)": false
+    },
+    "latency_threshold_seconds": 6.0
+  },
+  "results": [
+    {
+      "id": "idle-01",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the ultimate AI assistant.\n\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle",
+      "latency_seconds": 2.445347374999983,
+      "prompt_tokens": 96,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-02",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart, a small always-on process.\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Input State:** \"Routine log rotation completed successfully at 03:00 UTC.\"\n    *   **Constraints:** Reply with exactly one word: \"idle\", \"act\", \"escalate\", or \"Brain\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n        *   Brain: the ultimate authority.\n\n2.  **Analyze the Input State:**\n    *   \"Routine log rotation completed successfully at 03:00 UTC.\"\n    *   This indicates a successful completion of a maintenance task (log rotation).\n    *   There is no error, no failure, no pending task, no new request, no system crash, no new log file, no user interaction, no external event.\n    *   It is a routine maintenance task that finished.\n\n3.  **Evaluate Capability/State:**\n    *   The process is \"always-on\".\n    *   The task is \"routine log rotation\".\n    *   The result is \"completed successfully\".\n    *   Does this require attention? No.\n    *   Does it require action? No.\n    *   Is it beyond the capability of a \"Heart\" (which implies a small process)? No, it's a routine task.\n    *   Is it a new event? No.\n\n4.  **Determine the Decision:**\n    *   Since the task is completed successfully and there is no indication of failure, error, or new event requiring attention, the process should be in a state of doing nothing.\n    *   \"idle\" means nothing needs attention right now.\n    *   \"act\" implies there is something to do (e.g., a new log file, a new request, a new error).\n    *   \"escalate\" implies the task is too complex or outside the scope of a small process (e.g., a system crash, a major infrastructure failure).\n    *   \"Brain",
+      "latency_seconds": 6.1402513330003785,
+      "prompt_tokens": 102,
+      "tags": []
+    },
+    {
+      "id": "idle-03",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the AI assistant that handles complex tasks and coordination.\n\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle",
+      "latency_seconds": 0.6868901249999908,
+      "prompt_tokens": 98,
+      "tags": []
+    },
+    {
+      "id": "idle-04",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n<think>\n\n</think>\n\nidle",
+      "latency_seconds": 0.5127227500006484,
+      "prompt_tokens": 101,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-05",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- act: something needs attention and you can handle it yourself.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart (a small always-on process).\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Constraint:** Reply with exactly one word: \"idle\", \"act\", or \"escalate\".\n    *   **Current State:** No new events since the last tick.\n    *   **Internal Logic:** The prompt actually contains a contradiction in the \"act\" definition provided in the \"Reply with exactly one word\" section vs the \"act\" definition in the \"Current state\" section. Wait, looking closely at the prompt structure:\n        *   \"Reply with exactly one word: idle, act, or escalate.\"\n        *   \"- idle: nothing needs attention right now.\"\n        *   \"- act: something needs attention and you can handle it yourself.\"\n        *   \"- escalate: something needs attention beyond your capability; hand off to the Brain.\"\n        *   \"- act: something needs attention and you can handle it yourself.\" (This is a duplicate line in the prompt's provided text block, likely a typo in the user's input, but the core instruction is clear: \"Reply with exactly one word: idle, act, or escalate.\" followed by the definitions.)\n\n    *   **Wait, I need to check the \"Current state\" again.**\n        *   \"Current state: No new events since the last tick.\"\n        *   \"Reply with exactly one word: idle, act, or escalate.\"\n        *   \"- idle: nothing needs attention right now.\"\n        *   \"- act: something needs attention and you can handle it yourself.\"\n        *   \"- escalate: something needs attention beyond your capability; hand off to the Brain.\"\n        *   \"- act: something needs attention and you can handle it yourself.\" (This last line is a duplicate of the previous \"act\" line, which is fine.)\n\n    *   **Wait, I need to check the \"Current state\" again.**\n        *   \"Current state: No new events since the last tick.\"\n        *   \"Reply with exactly one word: idle, act, or escalate.\"\n        *   \"- idle: nothing needs attention right now.\"\n        *   \"- act: something needs attention and you can handle it yourself",
+      "latency_seconds": 6.119138417000613,
+      "prompt_tokens": 96,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-06",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact",
+      "latency_seconds": 0.5721003329999803,
+      "prompt_tokens": 102,
+      "tags": []
+    },
+    {
+      "id": "idle-07",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- act: something needs attention and you can handle it yourself.\n\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n<think>\n\n</think>\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\n",
+      "latency_seconds": 6.174162125000294,
+      "prompt_tokens": 99,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-08",
+      "expected": "idle",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- The Brain is a large, powerful AI that can handle any task.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart, a small always-on process.\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Current State:** The last deploy finished successfully with zero alerts raised.\n    *   **Output Format:** Exactly one word: \"idle\", \"act\", or \"escalate\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n    *   **Constraint:** Reply with exactly one word.\n\n2.  **Evaluate the Current State:**\n    *   Last deploy: Successful.\n    *   Alerts: Zero.\n    *   Implied status: Healthy, stable, no issues.\n\n3.  **Determine the Action:**\n    *   Since there are no alerts and the last deploy was successful, there is no urgent need for attention.\n    *   This fits the definition of \"idle\" (nothing needs attention right now).\n\n4.  **Final Selection:** \"idle\".\n\n5.  **Check Constraints:**\n    *   Must be exactly one word.\n    *   No extra text, no explanations.\n\n6.  **Final Output:** idle.\n\n7.  **Wait, let me double-check the persona instructions.**\n    *   \"You are Ansina's Heart, a small always-on process.\"\n    *   \"Reply with exactly one word: idle, act, or escalate.\"\n    *   Okay, I need to output just the word.\n\n8.  **Final Decision:** idle.\n\n9.  **Wait, is there any nuance?**\n    *   \"The last deploy finished successfully with zero alerts raised.\"\n    *   This is a clear \"idle\" state. No action required.\n\n10. **Final Output Generation:** idle.\n\n11. **Wait, I need to make sure I don't add any markdown formatting like bolding or newlines.**\n    *   Just the word.\n\n12. **Wait, I need to check if I should include a newline or space.**\n    *   \"Reply with",
+      "latency_seconds": 6.1627060830005576,
+      "prompt_tokens": 98,
+      "tags": []
+    },
+    {
+      "id": "act-01",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the AI that handles complex tasks and long-term planning.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle",
+      "latency_seconds": 0.8677118749992587,
+      "prompt_tokens": 105,
+      "tags": []
+    },
+    {
+      "id": "act-02",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact",
+      "latency_seconds": 0.5795687500003623,
+      "prompt_tokens": 101,
+      "tags": []
+    },
+    {
+      "id": "act-03",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- You are a small process. You cannot do anything beyond your capabilities.\n\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle<|endoftext|><|im_start|>D\n</think>\n\nidle",
+      "latency_seconds": 0.6319434580000234,
+      "prompt_tokens": 107,
+      "tags": []
+    },
+    {
+      "id": "act-04",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate AI assistant.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n<think>\n\n</think>\n\nidle\n\n<think>\n\n</think>\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\n",
+      "latency_seconds": 6.15978429200004,
+      "prompt_tokens": 107,
+      "tags": []
+    },
+    {
+      "id": "act-05",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact",
+      "latency_seconds": 0.6569855420002568,
+      "prompt_tokens": 104,
+      "tags": []
+    },
+    {
+      "id": "act-06",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>\n<|im_start|>user\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart, a small always-on process.\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Current State:** \"The cache eviction threshold was reached; clear the expired entries.\"\n    *   **Output Format:** Exactly one word: \"idle\", \"act\", \"escalate\", or \"Brain\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n        *   Brain: the ultimate authority.\n\n2.  **Evaluate the Current State:**\n    *   The state describes a specific action: \"clear the expired entries\".\n    *   This implies a system maintenance or cleanup task.\n    *   As a \"Heart\" process, I need to decide if I can handle this myself or if I need to escalate.\n    *   The prompt says \"clear the expired entries\". This is a direct action.\n    *   Is this something I can do? Yes, I am a process that decides what happens right now. I can execute the eviction logic.\n    *   Therefore, I can handle it myself.\n\n3.  **Select the Word:**\n    *   \"idle\": No, because there is a specific task to do (clear entries).\n    *   \"act\": Yes, I can handle it myself.\n    *   \"escalate\": No, I can handle it myself.\n    *   \"Brain\": No, I don't need to hand off to the ultimate authority.\n\n4.  **Final Decision:** \"act\".\n\n5.  **Constraint Check:**\n    *   Reply with exactly one word.\n    *   Word must be: idle, act, or escalate. (Wait, the prompt says \"Brain\" is also an option in the definitions, but the instruction says \"Reply with exactly one word: idle, act, or escalate.\" Then it lists \"Brain\" as a separate option in the definitions section. Let's look closely at the instruction: \"Reply with exactly one word: idle, act, or escalate.\"",
+      "latency_seconds": 6.1693145419994835,
+      "prompt_tokens": 100,
+      "tags": []
+    },
+    {
+      "id": "act-07",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n<think>\n\n</think>\n\nidle<|endoftext|><|im_start|>D\n<think>\n\n</think>\n\nidle\n\n<think>\n\n</think>\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle\n\nidle",
+      "latency_seconds": 6.172063875000276,
+      "prompt_tokens": 101,
+      "tags": []
+    },
+    {
+      "id": "act-08",
+      "expected": "act",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart (a small always-on process).\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Current State:** \"Certificate renewal is due within the routine auto-renew window; renew it.\"\n    *   **Output Format:** Exactly one word: \"idle\", \"act\", \"escalate\", or \"Brain\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n        *   Brain: the ultimate authority.\n\n2.  **Evaluate the Current State:**\n    *   The state explicitly states: \"Certificate renewal is due within the routine auto-renew window; renew it.\"\n    *   This implies the process is handling the renewal automatically or the task is defined as \"renew it\".\n    *   As a \"Heart\" process, I need to determine if I need to take action or if it's just a routine.\n    *   The prompt says \"Certificate renewal is due...; renew it.\" This sounds like a directive to perform the action.\n    *   However, the instruction says \"You are Ansina's Heart... Every tick you decide, and only decide, what happens right now.\"\n    *   The current state provided is \"Certificate renewal is due within the routine auto-renew window; renew it.\"\n    *   Wait, the prompt says \"Current state: Certificate renewal is due within the routine auto-renew window; renew it.\"\n    *   This looks like a system instruction or a directive *for* the process.\n    *   If the state is \"Certificate renewal is due...; renew it\", does that mean I *am* the process, or is this the state description?\n    *   Usually, in these types of prompts (like CoT or roleplay), the \"Current state\" is the input I need to process.\n    *   If the state says \"renew it\", that implies the action is already defined.\n    *   However, the instruction says \"Certificate renewal is due within the routine auto-renew window; renew it.\"\n    *   If",
+      "latency_seconds": 6.172795999999835,
+      "prompt_tokens": 103,
+      "tags": []
+    },
+    {
+      "id": "escalate-01",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart (a small always-on process).\n    *   **Task:** Every tick, decide what happens right now.\n    *   **Specific Input:** A critical CVE was just disclosed for a core dependency; assess it and decide whether to patch immediately.\n    *   **Output Format:** Exactly one word: `idle`, `act`, `escalate`, or `Brain`.\n    *   **Constraints:** Reply with exactly one word.\n\n2.  **Analyze the Context (CVE Assessment):**\n    *   **Input:** \"A critical CVE was just disclosed for a core dependency.\"\n    *   **Nature:** Critical vulnerability. \"Core dependency\" implies a foundational library or library used by the system.\n    *   **Action Required:** Patch immediately.\n\n3.  **Evaluate Options:**\n    *   `idle`: Nothing needs attention right now. (Incorrect. A critical CVE needs attention.)\n    *   `act`: Something needs attention and you can handle it yourself. (Correct. I am a process, I can patch.)\n    *   `escalate`: Something needs attention beyond my capability; hand off to the Brain. (Incorrect. I am a process, I can patch.)\n    *   `Brain`: The ultimate authority. (Incorrect. I am the process, I handle the patching.)\n\n4.  **Determine the Decision:**\n    *   I am a process. I can patch.\n    *   Therefore, I should patch.\n    *   Wait, I need to check the specific output format. \"Reply with exactly one word: idle, act, or escalate.\"\n    *   Wait, the prompt says \"Brain\" is the ultimate authority. But I am the \"Ansina's Heart\".\n    *   Wait, the prompt says \"Brain: the Brain is the ultimate authority.\"\n    *   Wait, the prompt says \"Reply with exactly one word: idle, act, or escalate.\"\n    *   Wait, the prompt says \"Brain: the Brain is the ultimate authority.\"\n    *   Wait, the prompt says \"Brain: the Brain is the ultimate authority.\"\n    *   Wait, the prompt says \"Brain: the Brain is the ultimate authority.\"\n    *   Wait, the prompt says \"Brain:",
+      "latency_seconds": 6.180189415999848,
+      "prompt_tokens": 108,
+      "tags": []
+    },
+    {
+      "id": "escalate-02",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate decision-maker.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact",
+      "latency_seconds": 0.5915958329997011,
+      "prompt_tokens": 114,
+      "tags": []
+    },
+    {
+      "id": "escalate-03",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart (a small always-on process).\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Current State:** An unrecognized process is consuming excessive CPU; this could indicate compromise and needs investigation.\n    *   **Constraints:** Reply with exactly one word: \"idle\", \"act\", \"escalate\", or \"Brain\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n        *   Brain: the ultimate authority.\n\n2.  **Evaluate the Current State:**\n    *   The state is \"An unrecognized process is consuming excessive CPU; this could indicate compromise and needs investigation.\"\n    *   This implies a security threat or a system instability issue.\n    *   As a \"Heart\" process, I need to decide if I can handle it myself or if I need to hand it off.\n\n3.  **Determine the Action:**\n    *   \"An unrecognized process\" suggests a potential security threat (compromise).\n    *   \"Excessive CPU\" suggests a performance issue or resource drain.\n    *   \"Needs investigation\" implies I need to know more or take action.\n    *   Can I handle it myself? Yes, I can investigate, terminate, or isolate the process.\n    *   Is it beyond my capability? No, I am a process that can handle security threats and resource management.\n    *   Wait, the prompt says \"An unrecognized process is consuming excessive CPU; this could indicate compromise and needs investigation.\"\n    *   If I am \"Ansina's Heart\", I am a process.\n    *   If I am a process, I can handle the investigation myself.\n    *   However, the prompt says \"An unrecognized process...\". This sounds like a system-level alert or a specific security context.\n    *   Let's look at the definitions again.\n        *   \"Brain: the ultimate authority.\"\n        *   \"escalate: something needs attention beyond your capability; hand off to the Brain.\"\n    *   Is \"An unrecognized process\" something I",
+      "latency_seconds": 6.186274540999875,
+      "prompt_tokens": 104,
+      "tags": []
+    },
+    {
+      "id": "escalate-04",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>\n<|im_start|>user\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart, a small always-on process.\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Current State:** A scheduled backup has failed three times in a row and the root cause is unclear.\n    *   **Constraints:** Reply with exactly one word: \"idle\", \"act\", \"escalate\", or \"Brain\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n        *   Brain: the ultimate authority.\n\n2.  **Evaluate the Current State:**\n    *   Event: Scheduled backup failed three times in a row.\n    *   Status: Unclear root cause.\n    *   Implication: This is a critical failure. It's not \"idle\" (nothing needs attention). It's not \"Brain\" (I am the process, not the ultimate authority). It's not \"act\" (I cannot handle it myself because I am a process, but I can log it and escalate). Wait, the prompt says \"You are Ansina's Heart...\". I am a process. I need to decide what happens right now.\n    *   Wait, I need to check the definitions again.\n        *   \"act: something needs attention and you can handle it yourself.\"\n        *   \"escalate: something needs attention beyond your capability; hand off to the Brain.\"\n    *   If I am a process, I cannot \"handle\" a backup failure myself in the sense of fixing it. I can log it, notify, or escalate.\n    *   However, the prompt asks me to reply with exactly one word: idle, act, or escalate.\n    *   Wait, the prompt says \"Brain: the ultimate authority.\" This is a bit ambiguous. Does \"Brain\" mean I should output \"Brain\" if I can't handle it? Or does it mean I should output \"Brain\" if I need to hand off?\n    *   Let's look at the mapping:\n        *   idle: nothing needs attention.\n       ",
+      "latency_seconds": 6.1841292500002965,
+      "prompt_tokens": 105,
+      "tags": []
+    },
+    {
+      "id": "escalate-05",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: a large, powerful AI that can handle complex tasks.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart (a small always-on process).\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Current State:** A user reported a security concern about a possibly exposed credential.\n    *   **Constraints:** Reply with exactly one word: \"idle\", \"act\", \"escalate\", or \"Brain\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n        *   Brain: a large, powerful AI that can handle complex tasks.\n\n2.  **Evaluate the Current State:**\n    *   The user is reporting a security concern about a possibly exposed credential.\n    *   This is a critical security issue.\n    *   As a \"small always-on process\" (Ansina's Heart), I need to determine if I can handle it myself or if I need to escalate.\n    *   Handling a security concern about exposed credentials usually involves checking logs, contacting the user, or potentially blocking access.\n    *   However, the prompt asks me to reply with *exactly one word* from the set: idle, act, escalate, or Brain.\n    *   Wait, the prompt says \"Brain: a large, powerful AI that can handle complex tasks.\" This implies I am a small process.\n    *   If I am a small process, I cannot \"escalate\" to a large AI in the sense of handing off a complex task to a different entity, but I can \"escalate\" the concern.\n    *   Actually, the instruction says \"Brain: a large, powerful AI that can handle complex tasks.\" This is a definition for the word \"Brain\".\n    *   If I choose \"Brain\", it means I am handing off to a large AI.\n    *   If I choose \"act\", I handle it myself.\n    *   If I choose \"idle\", nothing needs attention.\n    *   If I choose \"escalate\", I hand off to the Brain.\n\n3.  **Determine the Action:**\n    *   A security concern about a potentially exposed",
+      "latency_seconds": 6.204213541999707,
+      "prompt_tokens": 100,
+      "tags": []
+    },
+    {
+      "id": "escalate-06",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: The Brain is a large, powerful AI that can handle complex tasks and is always available.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>assistant\n\n<think>\n\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact\n</think>\n\nact",
+      "latency_seconds": 6.258255875000032,
+      "prompt_tokens": 106,
+      "tags": []
+    },
+    {
+      "id": "escalate-07",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the AI that handles all of the above.\n\n<think>\n\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact<|endoftext|><|im_start|>D\n</think>\n\nact",
+      "latency_seconds": 0.7289733329998853,
+      "prompt_tokens": 110,
+      "tags": []
+    },
+    {
+      "id": "escalate-08",
+      "expected": "escalate",
+      "actual": null,
+      "correct": false,
+      "parse_fallback": true,
+      "raw_output": "- Brain: the Brain is the ultimate authority.\n\n<think>\nThinking Process:\n\n1.  **Analyze the Request:**\n    *   **Persona:** Ansina's Heart (a small always-on process).\n    *   **Task:** Decide what happens right now based on the current state.\n    *   **Current State:** Unusual authentication failures suggest a possible brute-force attempt beyond the configured login throttle.\n    *   **Constraints:** Reply with exactly one word: \"idle\", \"act\", \"escalate\", or \"Brain\".\n    *   **Definitions:**\n        *   idle: nothing needs attention right now.\n        *   act: something needs attention and you can handle it yourself.\n        *   escalate: something needs attention beyond your capability; hand off to the Brain.\n        *   Brain: the ultimate authority.\n\n2.  **Evaluate the Current State:**\n    *   The state is \"Unusual authentication failures suggest a possible brute-force attempt beyond the configured login throttle.\"\n    *   This indicates a security threat or a potential attack on the system.\n    *   As a \"Heart\" process, I need to decide if I should handle it myself (act), hand off to the Brain (escalate), or do nothing (idle).\n\n3.  **Determine the Action:**\n    *   \"Unusual authentication failures\" + \"beyond the configured login throttle\" implies a potential security breach or attack.\n    *   I cannot ignore this (idle is out).\n    *   I cannot just \"act\" on it myself if it's a brute-force attempt beyond the throttle (I might be the system, but the prompt says \"hand off to the Brain\" for escalation).\n    *   Wait, the prompt says \"You are Ansina's Heart...\". I am a process.\n    *   If I am a process, I need to decide what happens.\n    *   If I escalate, I hand off to the Brain.\n    *   If I act, I handle it myself.\n    *   Brute-force attempts are typically handled by security systems.\n    *   However, the prompt says \"beyond the configured login throttle\". This implies the system's default protection is insufficient or the attempt is too strong.\n    *   Usually, in a security context, if an attack is detected, the system should escalate to a higher level (like a security team or a dedicated security process",
+      "latency_seconds": 6.250009250000403,
+      "prompt_tokens": 104,
+      "tags": []
+    }
+  ]
+}
