@@ -51,7 +51,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"
     assert settings.heart.model_path is None
-    assert settings.heart.model_repo == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    assert settings.heart.model_repo == "mlx-community/gemma-4-e2b-it-4bit"
     assert settings.heart.cache_dir == Path.home() / ".cache" / "ansina" / "models"
     assert settings.heart.context_tokens == 8192
     assert settings.heart.max_output_tokens == 512

@@ -38,8 +38,10 @@ runtime = "auto"
 # model_path = "/path/to/a/local/mlx/model"
 
 # Hugging Face repo id, fetched into cache_dir on first use and reused after —
-# ignored when model_path is set.
-model_repo = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+# ignored when model_path is set. The default is the smallest model on issue
+# #53's bench ladder that clears the accuracy/latency gate (95.8% accuracy) —
+# see docs/heart/bench/ for the full reports.
+model_repo = "mlx-community/gemma-4-e2b-it-4bit"
 
 # Download-once model cache. Same "~" expansion / relative-path-resolves-to-CWD
 # behavior as [database] path above.

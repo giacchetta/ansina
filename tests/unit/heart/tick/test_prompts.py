@@ -8,9 +8,14 @@ from ansina.heart.tick.prompts import (
 )
 
 
-def test_default_variant_is_baseline() -> None:
-    assert DEFAULT_PROMPT_VARIANT == "baseline"
-    assert DEFAULT_TEMPLATE is PROMPT_VARIANTS["baseline"]
+def test_default_variant_is_strict() -> None:
+    """Issue #53's bench winner (75% vs. baseline's 62.5% and fewshot's 50% on the
+    smallest ladder rung) — the variant actually used by the gate-clearing
+    `HeartSettings.model_repo` default, so a caller taking neither explicitly gets
+    the validated combination, not an untested one.
+    """
+    assert DEFAULT_PROMPT_VARIANT == "strict"
+    assert DEFAULT_TEMPLATE is PROMPT_VARIANTS["strict"]
 
 
 def test_every_variant_has_exactly_one_state_placeholder() -> None:
@@ -33,8 +38,11 @@ def test_variants_are_distinct() -> None:
 
 
 def test_baseline_matches_the_pre_issue_53_inline_template() -> None:
-    """`build_prompt`'s default must stay byte-identical to what shipped before this
-    extraction — the concrete proof that every existing caller/test is unaffected.
+    """The "baseline" variant itself (not `DEFAULT_TEMPLATE`, which issue #53's own
+    bench result later repointed to "strict") must stay byte-identical to what
+    `build_prompt` inlined before this extraction — the concrete proof that no
+    existing caller/test depended on wording this module could have silently
+    drifted.
     """
     original = (
         "You are Ansina's Heart, a small always-on process. Every tick you decide, "
@@ -49,4 +57,4 @@ def test_baseline_matches_the_pre_issue_53_inline_template() -> None:
         "- escalate: something needs attention beyond your capability; hand off to "
         "the Brain.\n"
     )
-    assert original == DEFAULT_TEMPLATE
+    assert original == PROMPT_VARIANTS["baseline"]

@@ -134,7 +134,12 @@ class HeartSettings(BaseModel):
     enabled: bool = False
     runtime: Literal["auto", "mlx"] = "auto"
     model_path: Path | None = None
-    model_repo: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    # Issue #53: the smallest model on the bench ladder that clears the gate
+    # (3-way accuracy >= 0.90, 0 false act/escalate on the obviously-idle subset,
+    # 0 parse-fallback rate, p95 latency <= 20% of interval_seconds) — measured
+    # against `heart.tick.prompts.DEFAULT_PROMPT_VARIANT` ("strict"), 95.8%
+    # accuracy, see `docs/heart/bench/`. Superseded the M1-era placeholder default.
+    model_repo: str = "mlx-community/gemma-4-e2b-it-4bit"
     cache_dir: Path = Path("~/.cache/ansina/models")
     # The blueprint's 8k context budget is a hard ceiling, not a target (issue #10) —
     # enforced here so it can never be configured past what the Heart's prompts are

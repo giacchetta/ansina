@@ -1,0 +1,315 @@
+{
+  "model_repo": "mlx-community/gemma-4-e2b-it-4bit",
+  "prompt_variant": "strict",
+  "chat_template": true,
+  "generated_at": "2026-09-29T13:59:42.388920+00:00",
+  "host": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "mlx_lm_version": "0.31.3",
+  "max_output_tokens": 512,
+  "fixture_count": 24,
+  "metrics": {
+    "accuracy": 0.9583333333333334,
+    "recall_by_class": {
+      "idle": 1.0,
+      "act": 0.875,
+      "escalate": 1.0
+    },
+    "class_counts": {
+      "idle": 8,
+      "act": 8,
+      "escalate": 8
+    },
+    "parse_fallback_rate": 0.0,
+    "false_act_or_escalate_on_obvious_idle": 0,
+    "latency_p50_seconds": 0.20155691700165335,
+    "latency_p95_seconds": 0.25964029199894867,
+    "prompt_tokens_min": 88,
+    "prompt_tokens_median": 95.0,
+    "prompt_tokens_max": 106,
+    "peak_rss_bytes": 6357663744
+  },
+  "gate": {
+    "passed": true,
+    "checks": {
+      "accuracy >= 0.90": true,
+      "zero false act/escalate on obviously_idle fixtures": true,
+      "zero parse-fallback rate": true,
+      "p95 latency <= 6.00s (20% of 30.0s interval)": true
+    },
+    "latency_threshold_seconds": 6.0
+  },
+  "results": [
+    {
+      "id": "idle-01",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 1.1480634580002516,
+      "prompt_tokens": 88,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-02",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.19300325000040175,
+      "prompt_tokens": 94,
+      "tags": []
+    },
+    {
+      "id": "idle-03",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.19395533299939416,
+      "prompt_tokens": 90,
+      "tags": []
+    },
+    {
+      "id": "idle-04",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.1972208330007561,
+      "prompt_tokens": 93,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-05",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.18508954199933214,
+      "prompt_tokens": 88,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-06",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.20009070800006157,
+      "prompt_tokens": 95,
+      "tags": []
+    },
+    {
+      "id": "idle-07",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.1946228329998121,
+      "prompt_tokens": 92,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-08",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.1972134579991689,
+      "prompt_tokens": 90,
+      "tags": []
+    },
+    {
+      "id": "act-01",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.25964029199894867,
+      "prompt_tokens": 97,
+      "tags": []
+    },
+    {
+      "id": "act-02",
+      "expected": "act",
+      "actual": "escalate",
+      "correct": false,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.2177337909997732,
+      "prompt_tokens": 93,
+      "tags": []
+    },
+    {
+      "id": "act-03",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.19539533399984066,
+      "prompt_tokens": 100,
+      "tags": []
+    },
+    {
+      "id": "act-04",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.19782775000021502,
+      "prompt_tokens": 98,
+      "tags": []
+    },
+    {
+      "id": "act-05",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.19583145799879276,
+      "prompt_tokens": 97,
+      "tags": []
+    },
+    {
+      "id": "act-06",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.1956436250002298,
+      "prompt_tokens": 92,
+      "tags": []
+    },
+    {
+      "id": "act-07",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20155691700165335,
+      "prompt_tokens": 93,
+      "tags": []
+    },
+    {
+      "id": "act-08",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20074216700049874,
+      "prompt_tokens": 95,
+      "tags": []
+    },
+    {
+      "id": "escalate-01",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21022000000084518,
+      "prompt_tokens": 100,
+      "tags": []
+    },
+    {
+      "id": "escalate-02",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21096579099867085,
+      "prompt_tokens": 106,
+      "tags": []
+    },
+    {
+      "id": "escalate-03",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21059525000055146,
+      "prompt_tokens": 96,
+      "tags": []
+    },
+    {
+      "id": "escalate-04",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21462933300063014,
+      "prompt_tokens": 97,
+      "tags": []
+    },
+    {
+      "id": "escalate-05",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.20997374999933527,
+      "prompt_tokens": 92,
+      "tags": []
+    },
+    {
+      "id": "escalate-06",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.210672582999905,
+      "prompt_tokens": 98,
+      "tags": []
+    },
+    {
+      "id": "escalate-07",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.2131292920003034,
+      "prompt_tokens": 102,
+      "tags": []
+    },
+    {
+      "id": "escalate-08",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21076908400027605,
+      "prompt_tokens": 97,
+      "tags": []
+    }
+  ]
+}

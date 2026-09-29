@@ -80,5 +80,11 @@ PROMPT_VARIANTS: Mapping[str, str] = MappingProxyType(
     }
 )
 
-DEFAULT_PROMPT_VARIANT = "baseline"
+# Issue #53's bench (`docs/heart/bench/`) benched all three variants against the
+# smallest ladder rung and carried the winner up the ladder: "strict" beat
+# "baseline" (75% vs. 62.5% accuracy) and "fewshot" (50%) there, and is the variant
+# actually used by the gate-clearing `HeartSettings.model_repo` default above —
+# "baseline" stays defined (and byte-identical to what shipped before this issue)
+# for future A/B comparisons, it just isn't what ships by default anymore.
+DEFAULT_PROMPT_VARIANT = "strict"
 DEFAULT_TEMPLATE = PROMPT_VARIANTS[DEFAULT_PROMPT_VARIANT]

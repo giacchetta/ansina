@@ -102,7 +102,7 @@ def test_main_happy_path_writes_reports_and_returns_0_on_gate_pass(
     assert len(md_files) == 1
     assert len(json_files) == 1
     assert "model" in md_files[0].name
-    assert "baseline" in md_files[0].name
+    assert "strict" in md_files[0].name
     payload = json.loads(json_files[0].read_text())
     assert payload["gate"]["passed"] is True
     assert "PASS" in capsys.readouterr().out
@@ -258,7 +258,7 @@ def test_default_out_dir_and_prompt_variant() -> None:
     args = heart_main._build_parser().parse_args([])
 
     assert args.out_dir == Path("docs/heart/bench")
-    assert args.prompt_variant == "baseline"
+    assert args.prompt_variant == "strict"
     assert args.model_repo is None
     assert args.fixtures is None
     assert args.max_output_tokens is None
