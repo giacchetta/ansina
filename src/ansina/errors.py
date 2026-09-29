@@ -63,6 +63,12 @@ class HeartError(AnsinaError):
     code: ClassVar[str] = "ansina.heart.error"
 
 
+class FixtureError(HeartError):
+    """A `heart.eval` tick fixture set failed validation. See `ansina.heart.eval`."""
+
+    code: ClassVar[str] = "ansina.heart.fixture_invalid"
+
+
 class BrainError(AnsinaError):
     """The remote Brain provider failed. See `ansina.brain`.
 

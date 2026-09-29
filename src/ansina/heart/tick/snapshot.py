@@ -11,6 +11,9 @@ No `StateSnapshotSource` ships registered here — there is no pending-work, sch
 event domain yet (`storage/` has only `schema_version`). A later issue registers its own
 source the same way milestones register a `Readiness` check (`api/readiness.py`) instead
 of editing this module or the loop.
+
+The prompt template itself lives in `heart.tick.prompts` (issue #53) — extracted so a
+prompt A/B/C bench (`heart.eval`) is a parameter, not an edit here.
 """
 
 from __future__ import annotations
@@ -19,24 +22,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from ansina.heart.tick.prompts import DEFAULT_TEMPLATE, NO_PENDING_STATE
 from ansina.logging import get_logger
 
 logger = get_logger(__name__)
-
-_NO_PENDING_STATE = "(no pending state)"
-
-_PROMPT_TEMPLATE = """\
-You are Ansina's Heart, a small always-on process. Every tick you decide, and only \
-decide, what happens right now.
-
-Current state:
-{state}
-
-Reply with exactly one word: idle, act, or escalate.
-- idle: nothing needs attention right now.
-- act: something needs attention and you can handle it yourself.
-- escalate: something needs attention beyond your capability; hand off to the Brain.
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +91,7 @@ def build_prompt(
     *,
     budget_tokens: int,
     token_count: Callable[[str], int],
+    template: str = DEFAULT_TEMPLATE,
 ) -> TickPrompt:
     """Render `items` into the tick prompt, trimming lowest-priority-first to fit
     `budget_tokens`.
@@ -110,8 +100,13 @@ def build_prompt(
     (derived by the caller) — the same headroom `BaseHeartRuntime.generate` reserves for
     its own refusal, so a prompt built here should never trip
     `HeartContextOverflowError` in practice.
+
+    `template` defaults to `heart.tick.prompts.DEFAULT_TEMPLATE` (the shipped, unchanged
+    framing) — every caller before issue #53 passed nothing, so the default keeps every
+    existing call site and test byte-for-byte unaffected. `heart.eval`'s bench is the
+    first caller to pass a different variant.
     """
-    template_tokens = token_count(_PROMPT_TEMPLATE.format(state=_NO_PENDING_STATE))
+    template_tokens = token_count(template.format(state=NO_PENDING_STATE))
     available = max(0, budget_tokens - template_tokens)
 
     included: list[str] = []
@@ -131,8 +126,8 @@ def build_prompt(
             extra={"items_dropped": dropped, "budget_tokens": budget_tokens},
         )
 
-    state = "\n".join(included) if included else _NO_PENDING_STATE
-    text = _PROMPT_TEMPLATE.format(state=state)
+    state = "\n".join(included) if included else NO_PENDING_STATE
+    text = template.format(state=state)
     return TickPrompt(
         text=text,
         tokens=token_count(text),

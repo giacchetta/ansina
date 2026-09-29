@@ -55,6 +55,15 @@ test-e2e: ## Run only the e2e (black-box subprocess) test suite
 precommit: ## Run pre-commit hooks against all files
 	$(UV) run pre-commit run --all-files
 
+# Mac-only (issue #53): the Heart bench harness against a real MLX model — no MLX
+# adapter is viable on either CI leg, so this never runs there and is deliberately
+# left out of `check`/`check-all` below, the same way `tui-*` is scoped to `tui/`'s
+# own project. `ARGS` passes flags through, e.g.
+# `make heart-bench ARGS='--model-repo mlx-community/Qwen3.5-4B-MLX-4bit'`.
+.PHONY: heart-bench
+heart-bench: ## [Mac only] Bench a real MLX model against the tick fixture set (uv sync --extra mlx required)
+	$(UV) run --extra mlx python -m ansina.heart.eval $(ARGS)
+
 .PHONY: check
 check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs
 

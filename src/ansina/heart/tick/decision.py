@@ -21,6 +21,24 @@ class TickDecision(StrEnum):
     ESCALATE = "escalate"
 
 
+def try_parse_decision(raw: str) -> TickDecision | None:
+    """The first recognizable decision word in `raw`, or `None` if unparseable.
+
+    Pure — no logging, no default. `parse_decision` below is the production wrapper
+    every tick loop call site uses; this is the seam issue #53's bench needs so it can
+    tell a *correct* `idle` apart from a *fallback* `idle` (`parse_decision` collapses
+    that distinction by design, which is exactly why the loop should keep using it and
+    the bench should not).
+    """
+    normalized = raw.strip().lower()
+    first_word = normalized.split(maxsplit=1)[0] if normalized else ""
+    first_word = first_word.strip(".,:;!?\"'")
+    try:
+        return TickDecision(first_word)
+    except ValueError:
+        return None
+
+
 def parse_decision(raw: str) -> TickDecision:
     """The first recognizable decision word in `raw`, defaulting to `IDLE`.
 
@@ -29,14 +47,11 @@ def parse_decision(raw: str) -> TickDecision:
     with a warning so the prompt or the model can be fixed rather than silently
     misread.
     """
-    normalized = raw.strip().lower()
-    first_word = normalized.split(maxsplit=1)[0] if normalized else ""
-    first_word = first_word.strip(".,:;!?\"'")
-    try:
-        return TickDecision(first_word)
-    except ValueError:
+    decision = try_parse_decision(raw)
+    if decision is None:
         logger.warning(
             "heart tick: unparseable decision, defaulting to idle",
             extra={"raw": raw},
         )
         return TickDecision.IDLE
+    return decision
