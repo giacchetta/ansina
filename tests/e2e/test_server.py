@@ -1463,6 +1463,14 @@ def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> 
     "non-zero exit + stderr mentions the heart," not the exact sentence, so this
     stays green on a Mac that *does* have the extra installed — there the failure is
     an absent model instead of an absent backend, per `ansina.heart.selection`.)
+
+    `ANSINA_HEART__MODEL_REPO` is overridden to a repo id that cannot exist (issue
+    #53) — the default `model_repo` is a real, valid Hugging Face repo, and a Mac
+    that has already benched it (`make heart-bench`) will have it fully cached under
+    `[heart] cache_dir`, which would make `resolve_model` succeed and the daemon
+    actually start loading a real multi-GB model instead of failing fast, blowing
+    past `_STARTUP_TIMEOUT_S`. A deliberately-nonexistent repo 404s quickly
+    regardless of what's cached on the host or whether `mlx` is installed at all.
     """
     port = _free_port()
     (tmp_path / "ansina.toml").write_text(
@@ -1476,7 +1484,11 @@ def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> 
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        env={**os.environ, "ANSINA_HEART__ENABLED": "true"},
+        env={
+            **os.environ,
+            "ANSINA_HEART__ENABLED": "true",
+            "ANSINA_HEART__MODEL_REPO": "ansina-test/this-repo-does-not-exist",
+        },
         timeout=_STARTUP_TIMEOUT_S,
     )
 
