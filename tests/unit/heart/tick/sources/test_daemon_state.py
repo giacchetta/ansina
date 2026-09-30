@@ -146,7 +146,26 @@ def test_readiness_item_reports_all_passing_with_the_nominal_priority() -> None:
 
     item = source.collect()[1]
 
-    assert item.text == "All 3 readiness check(s) currently passing."
+    # "database" is excluded from the count (see the next test) — only "heart" and
+    # "startup" remain.
+    assert item.text == "All 2 readiness check(s) currently passing."
+    assert item.priority == 10
+
+
+def test_readiness_item_excludes_the_database_check_even_when_it_is_failing() -> None:
+    """`_database_item` already reports this exact fact directly — including it here
+    too would double-count one root cause as two lines of "something's wrong."
+    """
+    source = DaemonStateSource(
+        _FakeTickStats(),
+        database=_FakeDatabase(),
+        readiness=_FakeReadiness({"database": False, "heart": True}),
+    )
+
+    item = source.collect()[1]
+
+    assert item.text == "All 1 readiness check(s) currently passing."
+    assert "database" not in item.text
     assert item.priority == 10
 
 
@@ -276,6 +295,10 @@ def test_faults_item_recovered_stays_nominal_priority_but_names_the_history() ->
 
 
 def test_faults_item_reports_live_consecutive_failures_at_fault_priority() -> None:
+    """The overrun clause is omitted entirely when overruns are zero — a leading
+    "0 consecutive, 0 total" would otherwise read as reassuring even when this
+    exact failure clause is the live problem (issue #54's own bench finding).
+    """
     source = DaemonStateSource(
         _FakeTickStats(
             failures_total=5, consecutive_failures=2, consecutive_overruns=0
@@ -286,13 +309,14 @@ def test_faults_item_reports_live_consecutive_failures_at_fault_priority() -> No
 
     item = source.collect()[4]
 
-    assert item.text == (
-        "Tick failures: 2 consecutive, 5 total. Consecutive slow (overrun) ticks: 0."
-    )
+    assert item.text == "2 consecutive tick failure(s) (5 total)."
     assert item.priority == 100
 
 
 def test_faults_item_reports_live_consecutive_overruns_at_fault_priority() -> None:
+    """The failures clause is omitted entirely when failures are zero, for the same
+    reason as the previous test.
+    """
     source = DaemonStateSource(
         _FakeTickStats(
             failures_total=0, consecutive_failures=0, consecutive_overruns=3
@@ -304,6 +328,25 @@ def test_faults_item_reports_live_consecutive_overruns_at_fault_priority() -> No
     item = source.collect()[4]
 
     assert item.text == (
-        "Tick failures: 0 consecutive, 0 total. Consecutive slow (overrun) ticks: 3."
+        "3 consecutive tick(s) ran abnormally slow (a possible stuck or overloaded "
+        "backend)."
+    )
+    assert item.priority == 100
+
+
+def test_faults_item_reports_both_failures_and_overruns_when_both_are_live() -> None:
+    source = DaemonStateSource(
+        _FakeTickStats(
+            failures_total=4, consecutive_failures=4, consecutive_overruns=2
+        ),
+        database=_FakeDatabase(),
+        readiness=_FakeReadiness({}),
+    )
+
+    item = source.collect()[4]
+
+    assert item.text == (
+        "4 consecutive tick failure(s) (4 total). 2 consecutive tick(s) ran "
+        "abnormally slow (a possible stuck or overloaded backend)."
     )
     assert item.priority == 100

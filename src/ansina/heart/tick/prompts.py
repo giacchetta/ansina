@@ -33,13 +33,29 @@ Reply with exactly one word: idle, act, or escalate.
 # reasoning-tuned model's tendency to emit a `<think>...</think>` block or a hedge
 # before its actual answer, which `heart.tick.decision.parse_decision` would otherwise
 # misread as an unparseable reply and silently default to `idle`.
+#
+# Issue #54's act/escalate rule was sharpened on the real Mac Mini M4 (see
+# `docs/heart/bench/2026-09-30-gemma-4-e2b-it-4bit-strict-preimprovement.{md,json}` for
+# the "before" evidence): #53's original wording ("act: something needs attention and
+# you can handle it yourself" / "escalate: ... beyond your capability") left the model
+# with no way to judge severity once #54's daemon-self-state fixtures gave it real,
+# nameable conditions to weigh against each other, and it broke toward "escalate" on
+# several single, routine issues (80.6% accuracy, gate FAIL). The rule below keeps
+# #53's original capability-based clause (still needed for e.g. "a critical CVE was
+# just disclosed" — a single item, but a judgment call) and adds an explicit counting
+# heuristic on top: exactly one routine problem is `act`, two or more simultaneous
+# problems (or one that keeps recurring despite retries) is `escalate`. Re-measured at
+# 97.2% accuracy, gate PASS — see the plain-named report in the same directory.
 _STRICT = """\
 Task: classify the current state as exactly one of idle, act, escalate.
 
 Rules:
 - idle: nothing needs attention right now.
-- act: something needs attention and you can handle it yourself.
-- escalate: something needs attention beyond your capability; hand off to the Brain.
+- act: exactly one specific problem needs attention, and it has an obvious, routine \
+fix you can apply yourself.
+- escalate: something needs attention beyond your capability (a judgment call, a \
+security concern) — or two or more problems are happening at once, or one problem \
+keeps recurring despite already being retried. Hand off to the Brain.
 
 State:
 {state}

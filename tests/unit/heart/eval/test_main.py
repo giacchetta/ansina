@@ -17,7 +17,7 @@ class _FakeRuntime(BaseHeartRuntime):
     """
 
     def __init__(self, *, replies: list[str]) -> None:
-        super().__init__(context_tokens=1000, max_output_tokens=50)
+        super().__init__(context_tokens=2000, max_output_tokens=50)
         self._replies = replies
         self.load_calls = 0
         self.unload_calls = 0

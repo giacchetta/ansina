@@ -136,7 +136,17 @@ class DaemonStateSource:
         )
 
     def _readiness_item(self) -> SnapshotItem:
-        checks = self._readiness.snapshot()
+        """Excludes the `"database"` check specifically: `_database_item` below already
+        reports that exact fact (`api/readiness.py` registers `"database"` from the same
+        `Database.is_healthy` this source calls directly) — reporting it twice would
+        double-count one root cause as two lines of "something's wrong," inflating the
+        apparent problem count for a reader (human or Heart) without adding information.
+        """
+        checks = {
+            name: ok
+            for name, ok in self._readiness.snapshot().items()
+            if name != "database"
+        }
         failing = sorted(name for name, ok in checks.items() if not ok)
         if failing:
             return SnapshotItem(
@@ -199,12 +209,21 @@ class DaemonStateSource:
             else:
                 text = "No tick failures or overruns recorded."
             return SnapshotItem(source=self.name, text=text, priority=_PRIORITY_NOMINAL)
+        # Each clause is only present when its own counter is actually live — a
+        # leading "0 consecutive, 0 total" (the pre-issue-#54-followup phrasing) reads
+        # as reassuring even when overruns alone are the live problem, burying the one
+        # thing that actually needs attention behind two zeros.
+        parts: list[str] = []
+        if consecutive_failures:
+            parts.append(
+                f"{consecutive_failures} consecutive tick failure(s) "
+                f"({failures_total} total)."
+            )
+        if consecutive_overruns:
+            parts.append(
+                f"{consecutive_overruns} consecutive tick(s) ran abnormally slow "
+                "(a possible stuck or overloaded backend)."
+            )
         return SnapshotItem(
-            source=self.name,
-            text=(
-                f"Tick failures: {consecutive_failures} consecutive, "
-                f"{failures_total} total. Consecutive slow (overrun) ticks: "
-                f"{consecutive_overruns}."
-            ),
-            priority=_PRIORITY_FAULT,
+            source=self.name, text=" ".join(parts), priority=_PRIORITY_FAULT
         )

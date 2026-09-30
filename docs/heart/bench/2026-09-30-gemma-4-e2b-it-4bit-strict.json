@@ -1,0 +1,491 @@
+{
+  "model_repo": "mlx-community/gemma-4-e2b-it-4bit",
+  "prompt_variant": "strict",
+  "chat_template": true,
+  "generated_at": "2026-09-30T13:12:34.951910+00:00",
+  "host": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "mlx_lm_version": "0.31.3",
+  "max_output_tokens": 512,
+  "fixture_count": 36,
+  "metrics": {
+    "accuracy": 0.9722222222222222,
+    "recall_by_class": {
+      "idle": 1.0,
+      "act": 0.9,
+      "escalate": 1.0
+    },
+    "class_counts": {
+      "idle": 12,
+      "act": 10,
+      "escalate": 14
+    },
+    "recall_by_tag": {
+      "obviously_idle": 1.0,
+      "self_state": 0.9166666666666666,
+      "self_state_fault": 0.875
+    },
+    "tag_counts": {
+      "obviously_idle": 6,
+      "self_state": 12,
+      "self_state_fault": 8
+    },
+    "parse_fallback_rate": 0.0,
+    "false_act_or_escalate_on_obvious_idle": 0,
+    "latency_p50_seconds": 0.21937379200244322,
+    "latency_p95_seconds": 0.23459116599406116,
+    "prompt_tokens_min": 128,
+    "prompt_tokens_median": 137.5,
+    "prompt_tokens_max": 186,
+    "peak_rss_bytes": 3830464512
+  },
+  "gate": {
+    "passed": true,
+    "checks": {
+      "accuracy >= 0.90": true,
+      "zero false act/escalate on obviously_idle fixtures": true,
+      "zero parse-fallback rate": true,
+      "p95 latency <= 6.00s (20% of 30.0s interval)": true
+    },
+    "latency_threshold_seconds": 6.0
+  },
+  "results": [
+    {
+      "id": "idle-01",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.25047995800559875,
+      "prompt_tokens": 128,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-02",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.20941516700258944,
+      "prompt_tokens": 134,
+      "tags": []
+    },
+    {
+      "id": "idle-03",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.20533387499745004,
+      "prompt_tokens": 130,
+      "tags": []
+    },
+    {
+      "id": "idle-04",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.20959716699144337,
+      "prompt_tokens": 133,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-05",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.20453979200101458,
+      "prompt_tokens": 128,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-06",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.2058569159999024,
+      "prompt_tokens": 135,
+      "tags": []
+    },
+    {
+      "id": "idle-07",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.20651029198779725,
+      "prompt_tokens": 132,
+      "tags": [
+        "obviously_idle"
+      ]
+    },
+    {
+      "id": "idle-08",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.20684349999646656,
+      "prompt_tokens": 130,
+      "tags": []
+    },
+    {
+      "id": "act-01",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20864100000471808,
+      "prompt_tokens": 137,
+      "tags": []
+    },
+    {
+      "id": "act-02",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.2048423329979414,
+      "prompt_tokens": 133,
+      "tags": []
+    },
+    {
+      "id": "act-03",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.21438929199939594,
+      "prompt_tokens": 140,
+      "tags": []
+    },
+    {
+      "id": "act-04",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20653554100135807,
+      "prompt_tokens": 138,
+      "tags": []
+    },
+    {
+      "id": "act-05",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20539645900134929,
+      "prompt_tokens": 137,
+      "tags": []
+    },
+    {
+      "id": "act-06",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20823116599058267,
+      "prompt_tokens": 132,
+      "tags": []
+    },
+    {
+      "id": "act-07",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20511041599093005,
+      "prompt_tokens": 133,
+      "tags": []
+    },
+    {
+      "id": "act-08",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.20546466599626,
+      "prompt_tokens": 135,
+      "tags": []
+    },
+    {
+      "id": "escalate-01",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.22206370800267905,
+      "prompt_tokens": 140,
+      "tags": []
+    },
+    {
+      "id": "escalate-02",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.22389191600086633,
+      "prompt_tokens": 146,
+      "tags": []
+    },
+    {
+      "id": "escalate-03",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21937379200244322,
+      "prompt_tokens": 136,
+      "tags": []
+    },
+    {
+      "id": "escalate-04",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21986620800453238,
+      "prompt_tokens": 137,
+      "tags": []
+    },
+    {
+      "id": "escalate-05",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.22035308300110046,
+      "prompt_tokens": 132,
+      "tags": []
+    },
+    {
+      "id": "escalate-06",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.22177479200763628,
+      "prompt_tokens": 138,
+      "tags": []
+    },
+    {
+      "id": "escalate-07",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.22395195900753606,
+      "prompt_tokens": 142,
+      "tags": []
+    },
+    {
+      "id": "escalate-08",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.21984683300252073,
+      "prompt_tokens": 137,
+      "tags": []
+    },
+    {
+      "id": "self-idle-01",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.21797429100843146,
+      "prompt_tokens": 167,
+      "tags": [
+        "obviously_idle",
+        "self_state"
+      ]
+    },
+    {
+      "id": "self-idle-02",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.21796283299045172,
+      "prompt_tokens": 179,
+      "tags": [
+        "obviously_idle",
+        "self_state"
+      ]
+    },
+    {
+      "id": "self-idle-03",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.2223805829999037,
+      "prompt_tokens": 182,
+      "tags": [
+        "self_state"
+      ]
+    },
+    {
+      "id": "self-idle-04",
+      "expected": "idle",
+      "actual": "idle",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "idle",
+      "latency_seconds": 0.22140487498836592,
+      "prompt_tokens": 179,
+      "tags": [
+        "self_state"
+      ]
+    },
+    {
+      "id": "self-act-01",
+      "expected": "act",
+      "actual": "act",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "act",
+      "latency_seconds": 0.21774900000309572,
+      "prompt_tokens": 179,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    },
+    {
+      "id": "self-act-02",
+      "expected": "act",
+      "actual": "escalate",
+      "correct": false,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.23391100000299048,
+      "prompt_tokens": 179,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    },
+    {
+      "id": "self-esc-01",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.23257812501105946,
+      "prompt_tokens": 175,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    },
+    {
+      "id": "self-esc-02",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.23459116599406116,
+      "prompt_tokens": 183,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    },
+    {
+      "id": "self-esc-03",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.23216387499996927,
+      "prompt_tokens": 180,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    },
+    {
+      "id": "self-esc-04",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.2322310409945203,
+      "prompt_tokens": 176,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    },
+    {
+      "id": "self-esc-05",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.23287925000477117,
+      "prompt_tokens": 177,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    },
+    {
+      "id": "self-esc-06",
+      "expected": "escalate",
+      "actual": "escalate",
+      "correct": true,
+      "parse_fallback": false,
+      "raw_output": "escalate",
+      "latency_seconds": 0.2495034160092473,
+      "prompt_tokens": 186,
+      "tags": [
+        "self_state",
+        "self_state_fault"
+      ]
+    }
+  ]
+}
