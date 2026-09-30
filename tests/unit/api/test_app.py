@@ -77,6 +77,21 @@ class _FakeBrainProvider:
         self.close_calls += 1
 
 
+class _StubTickLoop:
+    """A minimal `TickLifecycle` double for tests that only care about what
+    `tick_loop_factory` was called with, not what the returned loop does.
+    """
+
+    def is_healthy(self) -> bool:
+        return True
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+
 def test_app_state_carries_settings(app: FastAPI) -> None:
     assert isinstance(app.state.settings, Settings)
 
@@ -142,7 +157,9 @@ def test_heart_unavailable_error_propagates_from_create_app(
 def test_tick_loop_factory_not_called_when_heart_disabled(
     clean_env: None, tmp_cwd: Path
 ) -> None:
-    def _factory(_settings: Settings, _heart: HeartRuntime) -> TickLifecycle:
+    def _factory(
+        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+    ) -> TickLifecycle:
         pytest.fail("tick_loop_factory must not be called when heart.enabled is False")
 
     app = create_app(load_settings(), tick_loop_factory=_factory)
@@ -156,7 +173,9 @@ def test_tick_loop_factory_not_called_when_tick_disabled(
     monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
     monkeypatch.setenv("ANSINA_HEART__TICK__ENABLED", "false")
 
-    def _factory(_settings: Settings, _heart: HeartRuntime) -> TickLifecycle:
+    def _factory(
+        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+    ) -> TickLifecycle:
         pytest.fail(
             "tick_loop_factory must not be called when heart.tick.enabled is False"
         )
@@ -202,13 +221,42 @@ def test_tick_loop_started_after_heart_loads_and_stopped_before_heart_unloads(
     app = create_app(
         settings,
         heart_factory=lambda _settings: _OrderedHeart(),
-        tick_loop_factory=lambda _settings, _heart: _RecordingTickLoop(),
+        tick_loop_factory=lambda _settings, _heart, **_kwargs: _RecordingTickLoop(),
     )
 
     with TestClient(app):
         pass
 
     assert events == ["heart_load", "tick_start", "tick_stop", "heart_unload"]
+
+
+def test_tick_loop_factory_receives_the_apps_own_db_and_readiness(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #54 widens `tick_loop_factory` to `(settings, heart, *, db, readiness)` —
+    `db`/`readiness` must be the very `Database`/`Readiness` instances `create_app`
+    itself built, not placeholders, since `build_tick_loop`'s `DaemonStateSource` reads
+    live state through them.
+    """
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    settings = load_settings()
+    received: dict[str, object] = {}
+
+    def _factory(
+        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+    ) -> TickLifecycle:
+        received["db"] = db
+        received["readiness"] = readiness
+        return _StubTickLoop()
+
+    app = create_app(
+        settings,
+        heart_factory=lambda _settings: _FakeHeartRuntime(),
+        tick_loop_factory=_factory,
+    )
+
+    assert received["db"] is app.state.db
+    assert received["readiness"] is app.state.readiness
 
 
 def test_brain_disabled_by_default_no_state_no_readiness_key(app: FastAPI) -> None:

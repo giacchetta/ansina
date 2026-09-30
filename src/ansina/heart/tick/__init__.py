@@ -13,6 +13,7 @@ from ansina.heart.tick.loop import (
     TickController,
     TickLifecycle,
     TickLoop,
+    TickLoopFactory,
     TickOutcome,
     build_tick_loop,
 )
@@ -23,8 +24,10 @@ from ansina.heart.tick.snapshot import (
     build_prompt,
     collect_items,
 )
+from ansina.heart.tick.sources import DaemonStateSource
 
 __all__ = [
+    "DaemonStateSource",
     "DecisionHandler",
     "LoggingDecisionHandler",
     "SnapshotItem",
@@ -33,6 +36,7 @@ __all__ = [
     "TickDecision",
     "TickLifecycle",
     "TickLoop",
+    "TickLoopFactory",
     "TickOutcome",
     "TickPrompt",
     "build_prompt",

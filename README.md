@@ -101,7 +101,7 @@ Full per-command detail (flags, `api`'s `-f`/`--input`/`-H` rules, config file l
 | `GET /readyz` | public | — | 200 `ready` with per-check booleans, or 503 `problem+json` if any check fails. |
 | `GET /version` | token | Read | Name + version. |
 | `GET /openapi.json` | token | Read | The OpenAPI contract document — no `/docs`/`/redoc` HTML viewer is served; point any external OpenAPI UI at a fetched copy of this JSON instead. |
-| `GET /heart/tick` | token | Read | Tick loop status: running, paused, tick count, last decision. 503 `problem+json` if the Heart is disabled. |
+| `GET /heart/tick` | token | Read | Tick loop status: running, paused (+ `paused_reason` if the circuit breaker tripped it), tick count, last decision. 503 `problem+json` if the Heart is disabled. |
 | `POST /heart/tick/pause` | token | Write | Kill switch — halts future ticks without a process restart. |
 | `POST /heart/tick/resume` | token | Write | Undoes `/heart/tick/pause`. |
 | `POST /auth/sudo` | token | Maintain | Step up: re-verify your password, get back a short-lived sudo grant token. |
@@ -187,6 +187,8 @@ ANSINA_HEART__ENABLED=true uv run ansina
 On any other host, enabling it fails loudly at boot rather than silently degrading — no fallback ships yet (a portable, non-Apple-Silicon adapter is tracked in a follow-up issue).
 
 Once loaded, the Heart runs an autonomic tick loop (`[heart.tick]`, on by default whenever the Heart is): every `interval_seconds` (plus jitter) it decides idle/act/escalate and logs the decision. `act` and `escalate` are logged only for now — there's nothing to act on yet and no `BrainProvider` (issue #12) to escalate to. `GET /heart/tick` reports its state; `POST /heart/tick/pause` and `/resume` are the kill switch.
+
+Since issue #54, every tick is fed the daemon's own live state (uptime, readiness checks, database health, the last tick's own outcome, and its failure/overrun history) — its first genuine input, rather than an empty snapshot. A circuit breaker in the same issue auto-pauses the loop after `max_consecutive_failures` consecutive tick failures or consecutive overruns (`[heart.tick]`), so a 16 GB Mac Mini running unattended for hours fails safe rather than looping forever on a broken backend; `auto_pause_enabled = false` keeps the counters accruing without ever pausing automatically.
 
 ## 🛠️ Development
 

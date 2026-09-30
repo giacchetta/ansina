@@ -50,6 +50,8 @@ def _report(
         class_counts=MappingProxyType(
             {TickDecision.IDLE: 8, TickDecision.ACT: 8, TickDecision.ESCALATE: 8}
         ),
+        recall_by_tag=MappingProxyType({"obviously_idle": 1.0}),
+        tag_counts=MappingProxyType({"obviously_idle": 1}),
         parse_fallback_rate=parse_fallback_rate,
         false_act_or_escalate_on_obvious_idle=false_act_or_escalate_on_obvious_idle,
         latency_p50_seconds=0.5,
@@ -119,6 +121,8 @@ def test_report_to_json_round_trips_through_json_loads() -> None:
         "act": 1.0,
         "escalate": 1.0,
     }
+    assert payload["metrics"]["recall_by_tag"] == {"obviously_idle": 1.0}
+    assert payload["metrics"]["tag_counts"] == {"obviously_idle": 1}
     assert payload["gate"]["passed"] is True
     assert payload["results"][0]["id"] == "i1"
     assert payload["results"][0]["actual"] == "idle"
@@ -156,6 +160,8 @@ def test_report_to_markdown_shows_pass_and_every_section() -> None:
     assert "## Gate: PASS" in text
     assert "## Metrics" in text
     assert "## Per-class recall" in text
+    assert "## Recall by tag" in text
+    assert "| obviously_idle | 100.00% | 1 |" in text
     assert "## Per-fixture results" in text
     assert "i1" in text
     assert "idle" in text

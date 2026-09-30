@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from ansina.api.readiness import Readiness
 from ansina.config import load_settings
 from ansina.heart.runtime import BaseHeartRuntime
 from ansina.heart.tick.decision import TickDecision
@@ -19,6 +20,7 @@ from ansina.heart.tick.loop import (
     build_tick_loop,
 )
 from ansina.heart.tick.snapshot import TickPrompt
+from ansina.heart.tick.sources.daemon_state import DaemonStateSource
 
 
 class _FakeHeart(BaseHeartRuntime):
@@ -284,6 +286,220 @@ async def test_run_survives_a_raising_tick(
     assert loop.ticks_run == 0
 
 
+# --- circuit breaker (issue #54) -----------------------------------------------------
+
+
+class _FlakyHeart(_FakeHeart):
+    """Fails on demand: raises for the first `fail_times` calls, then succeeds."""
+
+    def __init__(self, *, fail_times: int, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._fail_times = fail_times
+        self._calls = 0
+
+    def _generate(self, prompt: str, max_tokens: int) -> str:
+        self._calls += 1
+        if self._calls <= self._fail_times:
+            raise RuntimeError("backend exploded")
+        return self._reply
+
+
+async def _drive_ticks(loop: TickLoop, times: int) -> None:
+    """Mirrors `run()`'s own per-slot step (call `tick_once()`, and on a raised
+    exception record the failure the same way `run()`'s swallow-and-log handler
+    does) without its real-time scheduling wait — lets these tests exercise the
+    breaker deterministically, with no real sleeping.
+    """
+    for _ in range(times):
+        try:
+            await loop.tick_once()
+        except Exception:
+            loop._record_failure()
+
+
+def test_rejects_non_positive_max_consecutive_failures() -> None:
+    with pytest.raises(ValueError, match="max_consecutive_failures"):
+        TickLoop(
+            _FakeHeart(),
+            interval_seconds=1,
+            max_output_tokens=10,
+            max_consecutive_failures=0,
+        )
+
+
+def test_rejects_non_positive_overrun_ratio() -> None:
+    with pytest.raises(ValueError, match="overrun_ratio"):
+        TickLoop(
+            _FakeHeart(), interval_seconds=1, max_output_tokens=10, overrun_ratio=0
+        )
+
+
+async def test_consecutive_failures_increment_and_reset_on_the_next_success() -> None:
+    heart = _FlakyHeart(fail_times=2)
+    loop = TickLoop(
+        heart, interval_seconds=100, max_output_tokens=10, max_consecutive_failures=5
+    )
+
+    await _drive_ticks(loop, 3)  # fail, fail, succeed
+
+    assert loop.failures_total == 2
+    assert loop.consecutive_failures == 0
+    assert loop.ticks_run == 1
+
+
+async def test_failures_total_is_lifetime_and_survives_a_later_success() -> None:
+    heart = _FlakyHeart(fail_times=1)
+    loop = TickLoop(
+        heart, interval_seconds=100, max_output_tokens=10, max_consecutive_failures=5
+    )
+
+    await _drive_ticks(loop, 4)  # fail, then three successes
+
+    assert loop.failures_total == 1
+    assert loop.consecutive_failures == 0
+
+
+async def test_breaker_trips_after_exactly_max_consecutive_failures() -> None:
+    heart = _FlakyHeart(fail_times=100)
+    loop = TickLoop(
+        heart, interval_seconds=100, max_output_tokens=10, max_consecutive_failures=3
+    )
+
+    await _drive_ticks(loop, 2)
+    paused_before_trip = loop.paused
+    assert paused_before_trip is False
+    reason_before_trip = loop.pause_reason
+    assert reason_before_trip is None
+
+    await _drive_ticks(loop, 1)  # the 3rd consecutive failure trips the breaker
+
+    assert loop.consecutive_failures == 3
+    paused_after_trip = loop.paused
+    assert paused_after_trip is True
+    reason = loop.pause_reason
+    assert reason is not None
+    assert "3 consecutive tick failures" in reason
+    # `heart_tick`'s readiness check means "the background task is alive," which
+    # stays true regardless of pause state — `is_healthy()` never reflects a pause,
+    # only whether `start()` has ever been called on this loop (it hasn't, here).
+    assert loop.is_healthy() is False
+
+
+async def test_breaker_trips_on_consecutive_overruns_independent_of_failures() -> None:
+    """A slow-but-succeeding tick never touches `consecutive_failures` — the overrun
+    gauge trips the breaker on its own. Duration is controlled by a scripted clock
+    (two `self._clock()` reads per `tick_once()` call: start, then duration), never
+    real sleeping.
+    """
+    clock_values = iter([0.0, 30.0, 30.0, 60.0, 60.0, 90.0])
+    loop = TickLoop(
+        _FakeHeart(reply="idle"),
+        interval_seconds=10,
+        max_output_tokens=10,
+        max_consecutive_failures=3,
+        overrun_ratio=0.8,  # threshold: duration >= 8.0
+        clock=lambda: next(clock_values),
+    )
+
+    await _drive_ticks(loop, 2)
+    assert loop.consecutive_overruns == 2
+    paused_before_trip = loop.paused
+    assert paused_before_trip is False
+
+    await _drive_ticks(loop, 1)  # the 3rd consecutive overrun trips the breaker
+
+    assert loop.consecutive_overruns == 3
+    assert loop.consecutive_failures == 0  # an overrun is not a failure
+    paused_after_trip = loop.paused
+    assert paused_after_trip is True
+    reason = loop.pause_reason
+    assert reason is not None
+    assert "3 consecutive tick overruns" in reason
+
+
+async def test_a_fast_tick_resets_consecutive_overruns() -> None:
+    clock_values = iter([0.0, 30.0, 30.0, 30.1])  # tick 1 overruns, tick 2 is fast
+    loop = TickLoop(
+        _FakeHeart(reply="idle"),
+        interval_seconds=10,
+        max_output_tokens=10,
+        overrun_ratio=0.8,
+        clock=lambda: next(clock_values),
+    )
+
+    await _drive_ticks(loop, 2)
+
+    assert loop.consecutive_overruns == 0
+
+
+async def test_auto_pause_disabled_counters_accrue_but_pause_never_fires() -> None:
+    heart = _FlakyHeart(fail_times=100)
+    loop = TickLoop(
+        heart,
+        interval_seconds=100,
+        max_output_tokens=10,
+        max_consecutive_failures=2,
+        auto_pause_enabled=False,
+    )
+
+    await _drive_ticks(loop, 5)
+
+    assert loop.consecutive_failures == 5
+    assert loop.failures_total == 5
+    assert loop.paused is False
+    assert loop.pause_reason is None
+
+
+async def test_resume_clears_pause_reason_and_gauges_and_ticking_resumes() -> None:
+    heart = _FlakyHeart(fail_times=3)
+    loop = TickLoop(
+        heart, interval_seconds=100, max_output_tokens=10, max_consecutive_failures=3
+    )
+
+    await _drive_ticks(loop, 3)  # trips the breaker
+    paused_before_resume = loop.paused
+    assert paused_before_resume is True
+    tripped_reason = loop.pause_reason
+    assert tripped_reason is not None
+
+    loop.resume()
+
+    paused_after_resume = loop.paused
+    assert paused_after_resume is False
+    resumed_reason = loop.pause_reason
+    assert resumed_reason is None
+    assert loop.consecutive_failures == 0
+    assert loop.consecutive_overruns == 0
+
+    await _drive_ticks(loop, 1)  # the 4th call succeeds (fail_times=3)
+
+    assert loop.ticks_run == 1
+
+
+def test_pause_without_a_reason_is_the_manual_operator_kill_switch() -> None:
+    loop = TickLoop(_FakeHeart(), interval_seconds=100, max_output_tokens=10)
+
+    loop.pause()
+
+    assert loop.paused is True
+    assert loop.pause_reason is None
+
+
+def test_add_source_registers_an_additional_snapshot_source() -> None:
+    class _Source:
+        name = "extra"
+
+        def collect(self) -> list[Any]:
+            return []
+
+    loop = TickLoop(_FakeHeart(), interval_seconds=100, max_output_tokens=10)
+    source = _Source()
+
+    loop.add_source(source)
+
+    assert list(loop._sources) == [source]
+
+
 # --- the default decision handler and factory ---------------------------------------
 
 
@@ -294,16 +510,39 @@ def test_logging_decision_handler_conforms_to_the_protocol() -> None:
     handler.handle(TickDecision.IDLE, prompt)  # no-op, must not raise
 
 
+class _FakeDatabase:
+    def is_healthy(self) -> bool:
+        return True
+
+
 def test_build_tick_loop_wires_settings_into_the_loop(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANSINA_HEART__TICK__INTERVAL_SECONDS", "12.5")
     monkeypatch.setenv("ANSINA_HEART__TICK__JITTER_SECONDS", "1.5")
     monkeypatch.setenv("ANSINA_HEART__MAX_OUTPUT_TOKENS", "77")
+    monkeypatch.setenv("ANSINA_HEART__TICK__MAX_CONSECUTIVE_FAILURES", "9")
+    monkeypatch.setenv("ANSINA_HEART__TICK__OVERRUN_RATIO", "0.5")
+    monkeypatch.setenv("ANSINA_HEART__TICK__AUTO_PAUSE_ENABLED", "false")
     settings = load_settings()
     heart = _FakeHeart()
 
-    loop = build_tick_loop(settings, heart)
+    loop = build_tick_loop(settings, heart, db=_FakeDatabase(), readiness=Readiness())
 
     assert loop._interval == 12.5
     assert loop._max_output_tokens == 77
+    assert loop._max_consecutive_failures == 9
+    assert loop._overrun_ratio == 0.5
+    assert loop._auto_pause_enabled is False
+
+
+def test_build_tick_loop_registers_exactly_one_daemon_state_source(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(settings, heart, db=_FakeDatabase(), readiness=Readiness())
+
+    assert len(loop._sources) == 1
+    assert isinstance(loop._sources[0], DaemonStateSource)

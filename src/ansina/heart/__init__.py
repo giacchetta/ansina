@@ -15,7 +15,13 @@ from ansina.heart.runtime import (
     HeartUnavailableError,
 )
 from ansina.heart.selection import build_heart_runtime
-from ansina.heart.tick import TickController, TickLifecycle, TickLoop, build_tick_loop
+from ansina.heart.tick import (
+    TickController,
+    TickLifecycle,
+    TickLoop,
+    TickLoopFactory,
+    build_tick_loop,
+)
 
 __all__ = [
     "HeartContextOverflowError",
@@ -26,6 +32,7 @@ __all__ = [
     "TickController",
     "TickLifecycle",
     "TickLoop",
+    "TickLoopFactory",
     "build_heart_runtime",
     "build_tick_loop",
 ]

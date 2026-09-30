@@ -64,6 +64,7 @@ from ansina.errors import AnsinaError
 from ansina.heart import (
     HeartRuntime,
     TickLifecycle,
+    TickLoopFactory,
     build_heart_runtime,
     build_tick_loop,
 )
@@ -77,9 +78,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     heart_factory: Callable[[Settings], HeartRuntime] = build_heart_runtime,
-    tick_loop_factory: Callable[
-        [Settings, HeartRuntime], TickLifecycle
-    ] = build_tick_loop,
+    tick_loop_factory: TickLoopFactory = build_tick_loop,
     brain_factory: Callable[[Settings], BrainProvider] = build_brain_provider,
     oidc_factory: Callable[
         [Database, Settings], OidcLoginService | None
@@ -93,9 +92,11 @@ def create_app(
     so the unit suite never needs a real model or MLX installed. When
     `settings.heart.enabled` is `False` (the default), it's never called at all — no
     probe runs, and `app.state.heart` is `None`. `tick_loop_factory` (default
-    `ansina.heart.build_tick_loop`, issue #11) follows the same shape, gated by both
-    `heart.enabled` and `heart.tick.enabled` — `app.state.tick_loop` is `None` unless
-    both are true. `brain_factory` (default `ansina.brain.build_brain_provider`, issue
+    `ansina.heart.build_tick_loop`, issue #11, widened to `TickLoopFactory`'s
+    `(settings, heart, *, db, readiness)` shape by issue #54's daemon-state snapshot
+    source) follows the same shape, gated by both `heart.enabled` and
+    `heart.tick.enabled` — `app.state.tick_loop` is `None` unless both are true.
+    `brain_factory` (default `ansina.brain.build_brain_provider`, issue
     #12) follows the same shape again, gated by `brain.enabled` alone — the Brain has
     no dependency on the Heart being enabled. Nothing calls `BrainProvider.stream()`
     yet (the tick loop's `escalate` branch stays log-only until a follow-up issue wires
@@ -140,7 +141,9 @@ def create_app(
 
     tick_loop: TickLifecycle | None = None
     if heart is not None and resolved_settings.heart.tick.enabled:
-        tick_loop = tick_loop_factory(resolved_settings, heart)
+        tick_loop = tick_loop_factory(
+            resolved_settings, heart, db=db, readiness=readiness
+        )
 
     # Same "fail loudly before uvicorn binds a port" shape as `heart` above —
     # `BrainUnavailableError` (issue #12) surfaces here, not on the first `stream()`

@@ -114,6 +114,19 @@ class TickSettings(BaseModel):
     # backpressure guard for that).
     jitter_seconds: float = Field(default=3.0, ge=0)
 
+    # Issue #54's circuit breaker: the loop auto-pauses once `consecutive_failures` OR
+    # `consecutive_overruns` reaches this value — one threshold governs both gauges
+    # deliberately (the issue names exactly these three new keys, no fourth).
+    max_consecutive_failures: int = Field(default=5, ge=1)
+    # A tick counts as an "overrun" once its duration reaches this fraction of
+    # `interval_seconds` — tracked independently of failures (a slow-but-succeeding
+    # tick never touches `consecutive_failures`).
+    overrun_ratio: float = Field(default=0.8, gt=0)
+    # An escape hatch to disable the breaker's *automatic* `pause()` call without
+    # touching either threshold above — the failure/overrun counters still accrue and
+    # stay visible (in the daemon-state snapshot and in logs) either way.
+    auto_pause_enabled: bool = True
+
 
 class HeartSettings(BaseModel):
     """The in-process Heart runtime, consumed by issue #10's `ansina.heart`.

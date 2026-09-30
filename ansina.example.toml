@@ -72,6 +72,21 @@ interval_seconds = 30.0
 # lockstep with anything else on a fixed cadence. 0 disables jitter.
 jitter_seconds = 3.0
 
+# Circuit breaker (issue #54): the loop auto-pauses once EITHER consecutive tick
+# failures OR consecutive tick overruns (see overrun_ratio below) reaches this value
+# — one threshold governs both gauges deliberately. GET /heart/tick's paused_reason
+# names which one tripped.
+max_consecutive_failures = 5
+
+# A tick counts as an "overrun" once its duration reaches this fraction of
+# interval_seconds above — tracked independently of failures, so a slow-but-
+# succeeding tick never counts toward the failure gauge.
+overrun_ratio = 0.8
+
+# false disables only the breaker's *automatic* pause() call — the failure/overrun
+# counters still accrue and stay visible (daemon-state snapshot, logs) either way.
+auto_pause_enabled = true
+
 [brain]
 # The remote Brain provider (issue #12). Off by default: "build_brain_provider" is
 # never called and "app.state.brain" stays "None". Independent of [heart] — the Brain

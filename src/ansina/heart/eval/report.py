@@ -69,6 +69,8 @@ def report_to_json(report: BenchReport, *, gate: GateResult) -> str:
                 d.value: report.recall_by_class[d] for d in TickDecision
             },
             "class_counts": {d.value: report.class_counts[d] for d in TickDecision},
+            "recall_by_tag": dict(report.recall_by_tag),
+            "tag_counts": dict(report.tag_counts),
             "parse_fallback_rate": report.parse_fallback_rate,
             "false_act_or_escalate_on_obvious_idle": (
                 report.false_act_or_escalate_on_obvious_idle
@@ -150,6 +152,19 @@ def report_to_markdown(report: BenchReport, *, gate: GateResult) -> str:
     lines.extend(
         f"| {d.value} | {report.recall_by_class[d]:.2%} | {report.class_counts[d]} |"
         for d in TickDecision
+    )
+    lines.extend(
+        [
+            "",
+            "## Recall by tag",
+            "",
+            "| Tag | Recall | Count |",
+            "|---|---|---|",
+        ]
+    )
+    lines.extend(
+        f"| {tag} | {report.recall_by_tag[tag]:.2%} | {report.tag_counts[tag]} |"
+        for tag in sorted(report.recall_by_tag)
     )
     lines.extend(
         [

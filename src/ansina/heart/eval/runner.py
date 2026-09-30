@@ -101,6 +101,13 @@ class BenchReport:
     accuracy: float
     recall_by_class: Mapping[TickDecision, float]
     class_counts: Mapping[TickDecision, int]
+    # Issue #54: recall scoped to each fixture *tag* seen across the set (e.g.
+    # "obviously_idle", "self_state", "self_state_fault") — not a gate clause, unlike
+    # `recall_by_class` above. This is how the fault-injection AC's "measured rate" is a
+    # reproducible number in the committed report rather than a hand-written note: the
+    # `self_state_fault` row is that rate.
+    recall_by_tag: Mapping[str, float]
+    tag_counts: Mapping[str, int]
     parse_fallback_rate: float
     false_act_or_escalate_on_obvious_idle: int
     latency_p50_seconds: float
@@ -204,6 +211,16 @@ def _build_report(
         for d in TickDecision
     }
 
+    all_tags = sorted({tag for r in results for tag in r.tags})
+    tag_counts = {tag: sum(1 for r in results if tag in r.tags) for tag in all_tags}
+    tag_correct = {
+        tag: sum(1 for r in results if tag in r.tags and r.correct) for tag in all_tags
+    }
+    recall_by_tag = {
+        tag: (tag_correct[tag] / tag_counts[tag] if tag_counts[tag] else 0.0)
+        for tag in all_tags
+    }
+
     fallback_count = sum(1 for r in results if r.parse_fallback)
     false_on_obvious_idle = sum(
         1 for r in results if OBVIOUSLY_IDLE_TAG in r.tags and r.false_act_or_escalate
@@ -224,6 +241,8 @@ def _build_report(
         accuracy=accuracy,
         recall_by_class=MappingProxyType(recall_by_class),
         class_counts=MappingProxyType(class_counts),
+        recall_by_tag=MappingProxyType(recall_by_tag),
+        tag_counts=MappingProxyType(tag_counts),
         parse_fallback_rate=fallback_count / len(results),
         false_act_or_escalate_on_obvious_idle=false_on_obvious_idle,
         latency_p50_seconds=_percentile(latencies, 0.50),

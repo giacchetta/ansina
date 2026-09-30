@@ -86,6 +86,38 @@ def test_run_bench_scores_every_fixture_correct_when_the_model_always_matches() 
     for decision in TickDecision:
         assert report.recall_by_class[decision] == 1.0
         assert report.class_counts[decision] == 1
+    # No fixture above carries a tag, so there's nothing to key a per-tag recall on.
+    assert report.recall_by_tag == {}
+    assert report.tag_counts == {}
+
+
+def test_run_bench_computes_recall_by_tag_independently_of_class() -> None:
+    fixtures = [
+        _fixture("i1", TickDecision.IDLE, tags=frozenset({"self_state"})),
+        _fixture(
+            "a1", TickDecision.ACT, tags=frozenset({"self_state", "self_state_fault"})
+        ),
+        _fixture(
+            "e1",
+            TickDecision.ESCALATE,
+            tags=frozenset({"self_state", "self_state_fault"}),
+        ),
+    ]
+    # The model gets the idle and act fixtures right, but calls the escalate one
+    # "act" instead — wrong, and a miss within both tags that fixture carries.
+    heart = _FakeHeart(replies=["idle", "act", "act"])
+
+    report = run_bench(
+        heart,
+        fixtures,
+        budget_tokens=1000,
+        max_output_tokens=50,
+        model_repo="fake/model",
+    )
+
+    assert report.tag_counts == {"self_state": 3, "self_state_fault": 2}
+    assert report.recall_by_tag["self_state"] == pytest.approx(2 / 3)
+    assert report.recall_by_tag["self_state_fault"] == pytest.approx(1 / 2)
 
 
 def test_run_bench_counts_a_parse_fallback_separately_from_correct_idle() -> None:

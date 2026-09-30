@@ -47,6 +47,10 @@ def _require_tick() -> Depends:
 class TickStatus(BaseModel):
     running: bool
     paused: bool
+    # Issue #54: why the loop is paused, when it is — `None` for a manual
+    # `POST /heart/tick/pause` (honest: no fault triggered it) or when not paused at
+    # all. Set by the circuit breaker when it auto-pauses a failing/overrunning loop.
+    paused_reason: str | None = None
     ticks: int
     last_decision: TickDecision | None = None
     last_tick_at: str | None = None
@@ -87,6 +91,7 @@ async def get_tick_status(request: Request) -> TickStatus | JSONResponse:
     return TickStatus(
         running=tick_loop.is_healthy(),
         paused=tick_loop.paused,
+        paused_reason=tick_loop.pause_reason,
         ticks=tick_loop.ticks_run,
         last_decision=tick_loop.last_decision,
         last_tick_at=tick_loop.last_tick_at,
