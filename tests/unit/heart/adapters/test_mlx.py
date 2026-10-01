@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -100,6 +101,72 @@ def test_unload_drops_model_and_tokenizer(runtime: MlxHeartRuntime) -> None:
     runtime.unload()
 
     assert runtime.is_healthy() is False
+
+
+def test_load_generate_and_token_count_all_run_on_the_same_dedicated_thread(
+    monkeypatch: pytest.MonkeyPatch, runtime: MlxHeartRuntime
+) -> None:
+    """The load-bearing property issue #55's Mac Mini M4 run found broken: MLX's
+    Metal backend binds a model's GPU stream to whichever thread first touched it,
+    so `generate()`/`token_count()` must land on the exact same thread `load()`
+    did — regardless of which thread (here: the main test thread, standing in for
+    the event loop or one of `anyio`'s own worker threads) called into each one.
+    """
+    threads_seen: set[int] = set()
+
+    class _ThreadRecordingTokenizer(_FakeTokenizer):
+        def encode(self, text: str) -> list[int]:
+            threads_seen.add(threading.get_ident())
+            return super().encode(text)
+
+    def _recording_loader(model_path: Path) -> tuple[object, object]:
+        threads_seen.add(threading.get_ident())
+        return object(), _ThreadRecordingTokenizer()
+
+    def _fake_generate(model: object, tokenizer: object, **kwargs: Any) -> str:
+        threads_seen.add(threading.get_ident())
+        return "generated text"
+
+    monkeypatch.setitem(sys.modules, "mlx_lm", SimpleNamespace(generate=_fake_generate))
+    runtime = MlxHeartRuntime(
+        Path("/unused"),
+        context_tokens=100,
+        max_output_tokens=10,
+        loader=_recording_loader,
+    )
+
+    runtime.load()
+    runtime.token_count("hello")
+    runtime.generate("hi", max_tokens=5)
+
+    # Every call above ran on this (the main test) thread's perspective, but all
+    # three must have landed on the *one* dedicated MLX thread underneath —
+    # never the calling thread itself, and never a different thread each time.
+    assert len(threads_seen) == 1
+    assert threading.get_ident() not in threads_seen
+
+
+def test_unload_tears_down_the_dedicated_thread_for_a_later_reload(
+    runtime: MlxHeartRuntime,
+) -> None:
+    """`unload()` must not leave a stale dedicated thread behind — a later
+    `load()` gets a fresh one rather than resuming a thread whose MLX state
+    `unload()` just cleared.
+    """
+    runtime.load()
+    first_executor = runtime._executor
+    assert first_executor is not None
+
+    runtime.unload()
+    executor_after_unload = runtime._executor
+    assert executor_after_unload is None
+    with pytest.raises(RuntimeError):
+        first_executor.submit(lambda: None).result()
+
+    runtime.load()
+    second_executor = runtime._executor
+    assert second_executor is not None
+    assert second_executor is not first_executor
 
 
 def test_generate_calls_mlx_lm_generate_and_returns_its_result(

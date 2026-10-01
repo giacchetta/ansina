@@ -4,19 +4,40 @@ See issue #10. `_default_loader` imports `mlx_lm` inside its own body, never at 
 scope, so this module stays importable without the `ansina[mlx]` extra installed —
 `ansina.heart.selection`'s capability probe is what decides whether `MlxHeartRuntime`
 is ever constructed in the first place.
+
+**Every real MLX call for one instance runs on a single dedicated thread** (issue
+#55's own Mac Mini M4 acceptance run, the first time this adapter's `generate()` was
+ever exercised through `anyio.to_thread.run_sync` rather than called synchronously
+from `heart.eval`'s bench harness or from `load()`'s own direct, unoffloaded call in
+`api/app.py`'s lifespan): MLX's Metal backend binds a model's GPU stream to whichever
+OS thread first touched it, and `anyio.to_thread.run_sync`'s own worker-thread pool
+makes no guarantee that a later `generate()` call lands on that same thread — it
+failed every time with `RuntimeError: There is no Stream(gpu, 1) in current thread.`,
+confirmed live. `_run_on_mlx_thread()` is the fix: a lazily-created, single-worker
+`concurrent.futures.ThreadPoolExecutor` that every one of the four `_*` backend hooks
+below submits its real work to and blocks on — so `load()`/`generate()`/
+`token_count()`/`unload()` always run on the *same* thread for this instance's whole
+lifetime, regardless of which thread (the event loop, an anyio worker, `heart.eval`'s
+main thread) called in. Orthogonal to, and fully compatible with, the caller's own
+`anyio.to_thread.run_sync` offload (`heart/runtime.py`'s module docstring): that is
+what keeps a blocking call off the *event loop*; this is what keeps MLX's own
+thread-local state consistent underneath it.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ansina.errors import HeartError
 from ansina.heart.runtime import BaseHeartRuntime, HeartLoadError
 from ansina.logging import get_logger
 
 logger = get_logger(__name__)
+
+_T = TypeVar("_T")
 
 # `(model_path) -> (model, tokenizer)`. Deliberately `Any`, not `mlx_lm`'s real
 # `nn.Module`/`TokenizerWrapper` types: `mlx.*`/`mlx_lm.*` are under `ignore_missing_
@@ -61,14 +82,29 @@ class MlxHeartRuntime(BaseHeartRuntime):
         self._apply_chat_template = apply_chat_template
         self._model: Any = None
         self._tokenizer: Any = None
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+    def _run_on_mlx_thread(self, fn: Callable[[], _T]) -> _T:
+        """Runs `fn` on this instance's dedicated single worker thread, blocking
+        until it completes — see this module's own docstring for why. Created
+        lazily (first call is always from `_load_backend`) and torn down in
+        `_unload_backend`, so a fresh `load()` after `unload()` gets a fresh thread
+        rather than reusing one whose MLX state was already cleared.
+        """
+        if self._executor is None:
+            self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        return self._executor.submit(fn).result()
 
     def _load_backend(self) -> None:
-        try:
-            self._model, self._tokenizer = self._loader(self._model_path)
-        except Exception as exc:  # mlx's own exception types aren't ours to name
-            raise HeartLoadError(
-                f"mlx failed to load model at {str(self._model_path)!r}: {exc}"
-            ) from exc
+        def _load() -> None:
+            try:
+                self._model, self._tokenizer = self._loader(self._model_path)
+            except Exception as exc:  # mlx's own exception types aren't ours to name
+                raise HeartLoadError(
+                    f"mlx failed to load model at {str(self._model_path)!r}: {exc}"
+                ) from exc
+
+        self._run_on_mlx_thread(_load)
 
     def _render_prompt(self, prompt: str) -> str:
         """Wraps `prompt` as a single user turn through the loaded tokenizer's own
@@ -120,29 +156,44 @@ class MlxHeartRuntime(BaseHeartRuntime):
         return rendered
 
     def _generate(self, prompt: str, max_tokens: int) -> str:
-        from mlx_lm import generate
+        def _run() -> str:
+            from mlx_lm import generate
 
-        try:
-            result: str = generate(
-                self._model,
-                self._tokenizer,
-                prompt=self._render_prompt(prompt),
-                max_tokens=max_tokens,
-                verbose=False,
-            )
-        except Exception as exc:  # mlx's own exception types aren't ours to name
-            raise HeartError(f"mlx failed to generate: {exc}") from exc
-        return result
+            try:
+                result: str = generate(
+                    self._model,
+                    self._tokenizer,
+                    prompt=self._render_prompt(prompt),
+                    max_tokens=max_tokens,
+                    verbose=False,
+                )
+            except Exception as exc:  # mlx's own exception types aren't ours to name
+                raise HeartError(f"mlx failed to generate: {exc}") from exc
+            return result
+
+        return self._run_on_mlx_thread(_run)
 
     def _token_count(self, text: str) -> int:
-        tokens: list[int] = self._tokenizer.encode(text)
-        return len(tokens)
+        def _count() -> int:
+            tokens: list[int] = self._tokenizer.encode(text)
+            return len(tokens)
+
+        return self._run_on_mlx_thread(_count)
 
     def _unload_backend(self) -> None:
-        self._model = None
-        self._tokenizer = None
-        try:
-            import mlx.core as mx
-        except ImportError:
-            return
-        mx.clear_cache()
+        def _unload() -> None:
+            self._model = None
+            self._tokenizer = None
+            try:
+                import mlx.core as mx
+            except ImportError:
+                return
+            mx.clear_cache()
+
+        self._run_on_mlx_thread(_unload)
+        # Torn down, not reused — a later `load()` creates a fresh executor (and so
+        # a fresh dedicated thread) rather than resuming one whose MLX state this
+        # call just cleared.
+        if self._executor is not None:
+            self._executor.shutdown(wait=True)
+            self._executor = None
