@@ -12,6 +12,7 @@ from ansina.api.readiness import Readiness
 from ansina.config import load_settings
 from ansina.heart.runtime import BaseHeartRuntime
 from ansina.heart.tick.decision import TickDecision
+from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.loop import (
     DecisionHandler,
     LoggingDecisionHandler,
@@ -21,6 +22,8 @@ from ansina.heart.tick.loop import (
 )
 from ansina.heart.tick.snapshot import TickPrompt
 from ansina.heart.tick.sources.daemon_state import DaemonStateSource
+from ansina.heart.tick.sources.recent_journal import RecentJournalSource
+from ansina.storage.database import Database
 
 
 class _FakeHeart(BaseHeartRuntime):
@@ -63,10 +66,17 @@ class _FakeHeart(BaseHeartRuntime):
 
 class _RecordingHandler:
     def __init__(self) -> None:
-        self.calls: list[tuple[TickDecision, TickPrompt]] = []
+        self.calls: list[tuple[TickDecision, TickPrompt, int, float]] = []
 
-    def handle(self, decision: TickDecision, prompt: TickPrompt) -> None:
-        self.calls.append((decision, prompt))
+    async def handle(
+        self,
+        decision: TickDecision,
+        prompt: TickPrompt,
+        *,
+        tick_number: int,
+        duration_seconds: float,
+    ) -> None:
+        self.calls.append((decision, prompt, tick_number, duration_seconds))
 
 
 async def _run_briefly(loop: TickLoop, seconds: float) -> None:
@@ -128,9 +138,15 @@ async def test_tick_once_runs_generate_and_records_the_outcome() -> None:
     assert loop.last_tick_at is not None
     assert loop.last_duration_seconds is not None
     assert len(handler.calls) == 1
-    dispatched_decision, dispatched_prompt = handler.calls[0]
+    dispatched_decision, dispatched_prompt, dispatched_tick, dispatched_duration = (
+        handler.calls[0]
+    )
     assert dispatched_decision is TickDecision.ACT
     assert isinstance(dispatched_prompt, TickPrompt)
+    # Dispatched *after* the loop's own bookkeeping (issue #55) — so the handler sees
+    # the exact tick number/duration the "heart tick completed" log line also reports.
+    assert dispatched_tick == loop.ticks_run == 1
+    assert dispatched_duration == outcome.duration_seconds == loop.last_duration_seconds
 
 
 async def test_tick_once_logs_decision_and_duration(
@@ -503,21 +519,22 @@ def test_add_source_registers_an_additional_snapshot_source() -> None:
 # --- the default decision handler and factory ---------------------------------------
 
 
-def test_logging_decision_handler_conforms_to_the_protocol() -> None:
+async def test_logging_decision_handler_conforms_to_the_protocol() -> None:
     handler: DecisionHandler = LoggingDecisionHandler()
     prompt = TickPrompt(text="x", tokens=1, items_included=0, items_dropped=0)
 
-    handler.handle(TickDecision.IDLE, prompt)  # no-op, must not raise
-
-
-class _FakeDatabase:
-    def is_healthy(self) -> bool:
-        return True
+    # no-op, must not raise
+    await handler.handle(TickDecision.IDLE, prompt, tick_number=1, duration_seconds=0.1)
 
 
 def test_build_tick_loop_wires_settings_into_the_loop(
-    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
 ) -> None:
+    """`db` (this directory's `conftest.py`) is a real, migrated `Database` —
+    `build_tick_loop` (issue #55) now constructs a `HeartJournalRepository` eagerly,
+    which needs an actual connection, not just the `is_healthy()` surface a bare
+    `HealthProbe` double would offer.
+    """
     monkeypatch.setenv("ANSINA_HEART__TICK__INTERVAL_SECONDS", "12.5")
     monkeypatch.setenv("ANSINA_HEART__TICK__JITTER_SECONDS", "1.5")
     monkeypatch.setenv("ANSINA_HEART__MAX_OUTPUT_TOKENS", "77")
@@ -527,7 +544,7 @@ def test_build_tick_loop_wires_settings_into_the_loop(
     settings = load_settings()
     heart = _FakeHeart()
 
-    loop = build_tick_loop(settings, heart, db=_FakeDatabase(), readiness=Readiness())
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness())
 
     assert loop._interval == 12.5
     assert loop._max_output_tokens == 77
@@ -536,13 +553,25 @@ def test_build_tick_loop_wires_settings_into_the_loop(
     assert loop._auto_pause_enabled is False
 
 
-def test_build_tick_loop_registers_exactly_one_daemon_state_source(
-    clean_env: None, tmp_cwd: Path
+def test_build_tick_loop_uses_journal_decision_handler_by_default(
+    clean_env: None, tmp_cwd: Path, db: Database
 ) -> None:
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=_FakeDatabase(), readiness=Readiness())
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness())
 
-    assert len(loop._sources) == 1
+    assert isinstance(loop._handler, JournalDecisionHandler)
+
+
+def test_build_tick_loop_registers_the_daemon_state_and_recent_journal_sources(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness())
+
+    assert len(loop._sources) == 2
     assert isinstance(loop._sources[0], DaemonStateSource)
+    assert isinstance(loop._sources[1], RecentJournalSource)

@@ -87,6 +87,20 @@ overrun_ratio = 0.8
 # counters still accrue and stay visible (daemon-state snapshot, logs) either way.
 auto_pause_enabled = true
 
+[heart.journal]
+# A durable, readable trace of what every completed tick decided (issue #55) — one
+# row in the "heart_journal" table per tick, read-only over GET /heart/journal.
+
+# Bounded retention, two independent cutoffs: a row survives only while it is both
+# among the newest max_entries rows AND younger than retention_days.
+max_entries = 2000
+retention_days = 14
+
+# How many of the most recent rows are replayed back into the next tick's own
+# snapshot (RecentJournalSource), giving the Heart short-term memory of its past
+# decisions. 0 disables this without unregistering the source.
+recent_entries = 5
+
 [brain]
 # The remote Brain provider (issue #12). Off by default: "build_brain_provider" is
 # never called and "app.state.brain" stays "None". Independent of [heart] — the Brain

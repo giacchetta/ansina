@@ -84,6 +84,24 @@ remote-heart-tail: ## Tail the current/last remote bench run's log
 remote-heart-attach: ## Attach to the live bench tmux session on the Mac Mini (interactive)
 	scripts/remote-heart.sh attach
 
+# Issue #55's Mac Mini acceptance check: unlike `remote-heart` above (the eval
+# harness), this boots the real daemon with the Heart/tick loop enabled against a
+# scratch database, waits for a few real ticks, fetches `GET /heart/journal`, and
+# verifies every journal row matches what the daemon's own log line reported for
+# that tick. Same committed-script-behind-one-target pattern as `remote-heart`, its
+# own tmux session so the two never collide, and the same `.envrc` host/path.
+.PHONY: remote-heart-journal-smoke
+remote-heart-journal-smoke: ## [Mac Mini] Boot the daemon for real and verify heart_journal against its own log (see .envrc)
+	scripts/heart-journal-smoke.sh run $(ARGS)
+
+.PHONY: remote-heart-journal-smoke-tail
+remote-heart-journal-smoke-tail: ## Tail the current/last journal-smoke run's log
+	scripts/heart-journal-smoke.sh tail
+
+.PHONY: remote-heart-journal-smoke-attach
+remote-heart-journal-smoke-attach: ## Attach to the live journal-smoke tmux session on the Mac Mini (interactive)
+	scripts/heart-journal-smoke.sh attach
+
 .PHONY: check
 check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs
 

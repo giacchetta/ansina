@@ -78,12 +78,20 @@ def collect_items(sources: Sequence[StateSnapshotSource]) -> list[SnapshotItem]:
 
 @dataclass(frozen=True, slots=True)
 class TickPrompt:
-    """The rendered prompt handed to `generate()`, plus what it cost to build."""
+    """The rendered prompt handed to `generate()`, plus what it cost to build.
+
+    `items` (issue #55) is the `SnapshotItem`s that actually survived trimming, in the
+    same highest-priority-first order they were rendered in — `JournalDecisionHandler`
+    derives its code-generated `act`/`escalate` note from this rather than from the
+    model's own raw reply. Defaulted to `()` so every pre-#55 `TickPrompt(...)`
+    construction (e.g. in tests) stays valid.
+    """
 
     text: str
     tokens: int
     items_included: int
     items_dropped: int
+    items: tuple[SnapshotItem, ...] = ()
 
 
 def build_prompt(
@@ -109,7 +117,7 @@ def build_prompt(
     template_tokens = token_count(template.format(state=NO_PENDING_STATE))
     available = max(0, budget_tokens - template_tokens)
 
-    included: list[str] = []
+    included: list[SnapshotItem] = []
     used = 0
     dropped = 0
     for index, item in enumerate(items):
@@ -117,7 +125,7 @@ def build_prompt(
         if used + cost > available:
             dropped = len(items) - index
             break
-        included.append(item.text)
+        included.append(item)
         used += cost
 
     if dropped:
@@ -126,11 +134,12 @@ def build_prompt(
             extra={"items_dropped": dropped, "budget_tokens": budget_tokens},
         )
 
-    state = "\n".join(included) if included else NO_PENDING_STATE
+    state = "\n".join(item.text for item in included) if included else NO_PENDING_STATE
     text = template.format(state=state)
     return TickPrompt(
         text=text,
         tokens=token_count(text),
         items_included=len(included),
         items_dropped=dropped,
+        items=tuple(included),
     )

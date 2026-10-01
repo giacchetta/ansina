@@ -36,6 +36,7 @@ from ansina.api.route_audit import audit_route_coverage
 from ansina.api.routes.groups import router as groups_router
 from ansina.api.routes.health import router as health_router
 from ansina.api.routes.heart import router as heart_router
+from ansina.api.routes.heart_journal import router as heart_journal_router
 from ansina.api.routes.login import router as login_router
 from ansina.api.routes.me import router as me_router
 from ansina.api.routes.oidc import router as oidc_router
@@ -274,6 +275,7 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(heart_router)
+    app.include_router(heart_journal_router)
     app.include_router(openapi_router)
     app.include_router(oidc_router)
     app.include_router(login_router)

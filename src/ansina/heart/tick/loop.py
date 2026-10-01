@@ -20,20 +20,20 @@ from typing import Protocol
 import anyio.to_thread
 
 from ansina.config.settings import Settings
+from ansina.heart.journal import HeartJournalRepository
 from ansina.heart.runtime import HeartRuntime
 from ansina.heart.tick.decision import TickDecision, parse_decision
+from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.snapshot import (
     StateSnapshotSource,
     TickPrompt,
     build_prompt,
     collect_items,
 )
-from ansina.heart.tick.sources.daemon_state import (
-    DaemonStateSource,
-    HealthProbe,
-    ReadinessProbe,
-)
+from ansina.heart.tick.sources.daemon_state import DaemonStateSource, ReadinessProbe
+from ansina.heart.tick.sources.recent_journal import RecentJournalSource
 from ansina.logging import get_logger
+from ansina.storage.database import Database
 
 logger = get_logger(__name__)
 
@@ -42,9 +42,23 @@ Jitter = Callable[[], float]
 
 
 class DecisionHandler(Protocol):
-    """What happens after a tick decides. Structural, like `HeartRuntime`."""
+    """What happens after a tick decides. Structural, like `HeartRuntime`.
 
-    def handle(self, decision: TickDecision, prompt: TickPrompt) -> None: ...
+    `async` as of issue #55 — `JournalDecisionHandler` (the new default) persists a
+    `heart_journal` row through `anyio.to_thread.run_sync`, which only a coroutine can
+    `await`. `tick_number`/`duration_seconds` (keyword-only) are new too: the journal
+    row's own columns demand both, and a handler has no other way to reach either —
+    `prompt` alone was never going to carry a tick's *ordinal* or its wall-clock cost.
+    """
+
+    async def handle(
+        self,
+        decision: TickDecision,
+        prompt: TickPrompt,
+        *,
+        tick_number: int,
+        duration_seconds: float,
+    ) -> None: ...
 
 
 class TickLifecycle(Protocol):
@@ -70,7 +84,13 @@ class TickLoopFactory(Protocol):
     only the keyword-only `db`/`readiness` names do, since only those are ever passed
     by keyword. Issue #54 widened this from a bare `(settings, heart)` call — the
     daemon-state source needs a health probe and a readiness registry, both of which
-    already exist in `create_app` before the tick loop is built.
+    already exist in `create_app` before the tick loop is built. Issue #55 widens `db`
+    again, from the structural `HealthProbe` to a concrete `ansina.storage.Database` —
+    `HeartJournalRepository` needs a real connection, not just an `is_healthy()` probe,
+    and (unlike `ansina.api`, the real cycle `DaemonStateSource`'s own structural
+    `ReadinessProbe` exists to avoid) `ansina.storage` sits strictly below
+    `ansina.heart`, so naming it concretely here is no layering violation —
+    `auth/repositories.py` already imports it exactly this way.
     """
 
     def __call__(
@@ -79,7 +99,7 @@ class TickLoopFactory(Protocol):
         heart: HeartRuntime,
         /,
         *,
-        db: HealthProbe,
+        db: Database,
         readiness: ReadinessProbe,
     ) -> TickLifecycle: ...
 
@@ -107,14 +127,23 @@ class TickController(TickLifecycle, Protocol):
 
 
 class LoggingDecisionHandler:
-    """The shipped default: every decision is logged, nothing is dispatched anywhere.
+    """An available alternative to `JournalDecisionHandler` (the default as of issue
+    #55): every decision is logged, nothing is persisted anywhere. Kept, not deleted —
+    e.g. for a deployment that wants no growing `heart_journal` table at all.
 
     `act` has nothing to act on yet, and `escalate` has no `BrainProvider` to hand off
     to (issue #12) — logging is the only honest behavior until those land. `idle` gets
     no extra log line here; `TickLoop.tick_once` already logs every tick's decision.
     """
 
-    def handle(self, decision: TickDecision, prompt: TickPrompt) -> None:
+    async def handle(
+        self,
+        decision: TickDecision,
+        prompt: TickPrompt,
+        *,
+        tick_number: int,
+        duration_seconds: float,
+    ) -> None:
         if decision is TickDecision.ACT:
             logger.info(
                 "heart tick: act decision (no action handler wired yet)",
@@ -379,7 +408,12 @@ class TickLoop:
         self._in_flight = True
         start = self._clock()
         try:
-            items = collect_items(self._sources)
+            # Offloaded (issue #55): a source may now do a blocking sqlite read
+            # (`RecentJournalSource`), the same reasoning every other blocking DB call
+            # in this codebase is offloaded for.
+            items = await anyio.to_thread.run_sync(
+                functools.partial(collect_items, self._sources)
+            )
             budget_tokens = max(0, self._heart.context_tokens - self._max_output_tokens)
             prompt = build_prompt(
                 items,
@@ -394,7 +428,6 @@ class TickLoop:
                 )
             )
             decision = parse_decision(raw)
-            self._handler.handle(decision, prompt)
             duration = self._clock() - start
             self._ticks_run += 1
             self._last_decision = decision
@@ -411,6 +444,16 @@ class TickLoop:
                     "items_included": prompt.items_included,
                     "items_dropped": prompt.items_dropped,
                 },
+            )
+            # Dispatched *after* the bookkeeping/log line above (issue #55) — not
+            # before, as issue #11 originally shipped it — so a `JournalDecisionHandler`
+            # persists the exact `tick`/`decision`/`duration_seconds` this log line just
+            # reported, never a value read before `_ticks_run`/`duration` were final.
+            await self._handler.handle(
+                decision,
+                prompt,
+                tick_number=self._ticks_run,
+                duration_seconds=duration,
             )
             return TickOutcome(
                 status="ok", decision=decision, duration_seconds=duration
@@ -472,29 +515,52 @@ def build_tick_loop(
     settings: Settings,
     heart: HeartRuntime,
     *,
-    db: HealthProbe,
+    db: Database,
     readiness: ReadinessProbe,
 ) -> TickLoop:
     """The default `tick_loop_factory` for `create_app` — wires a `TickLoop` to
-    `settings.heart.tick`, then registers `DaemonStateSource` (issue #54) as its first
-    real snapshot source — the daemon's own live state (`db`/`readiness`) plus the
-    loop's own tick/failure counters, added via `add_source` since the source needs the
-    loop to already exist. Ships with the default `LoggingDecisionHandler`; see
-    `heart.tick.snapshot`'s module docstring for why nothing else is registered yet.
+    `settings.heart.tick`, then registers two snapshot sources and the default
+    `DecisionHandler`:
+
+    - `DaemonStateSource` (issue #54) — the daemon's own live state (`db`/`readiness`)
+      plus the loop's own tick/failure counters, added via `add_source` since the
+      source needs the loop to already exist.
+    - `RecentJournalSource` (issue #55) — the last `settings.heart.journal
+      .recent_entries` `heart_journal` rows, giving the Heart short-term memory of its
+      own past decisions. Registered even when `recent_entries == 0`; the source
+      itself stays silent in that case (see its own docstring).
+
+    Ships with `JournalDecisionHandler` (issue #55, replacing issue #11's
+    `LoggingDecisionHandler`) as the default, writing one `heart_journal` row per
+    completed tick via the same `HeartJournalRepository` the source above reads from.
 
     `db`/`readiness` widen this signature beyond issue #11's original
     `(settings, heart)` — both already exist in `create_app` before the tick loop is
-    built, so this needs no new construction of its own.
+    built, so this needs no new construction of its own. Issue #55 widens `db` again,
+    from a structural `HealthProbe` to a concrete `Database` — see `TickLoopFactory`'s
+    own docstring for why that's not a layering violation.
     """
     tick_settings = settings.heart.tick
+    journal_settings = settings.heart.journal
+    journal_repository = HeartJournalRepository(db)
     loop = TickLoop(
         heart,
         interval_seconds=tick_settings.interval_seconds,
         jitter_seconds=tick_settings.jitter_seconds,
         max_output_tokens=settings.heart.max_output_tokens,
+        decision_handler=JournalDecisionHandler(
+            journal_repository,
+            max_entries=journal_settings.max_entries,
+            retention_days=journal_settings.retention_days,
+        ),
         max_consecutive_failures=tick_settings.max_consecutive_failures,
         overrun_ratio=tick_settings.overrun_ratio,
         auto_pause_enabled=tick_settings.auto_pause_enabled,
     )
     loop.add_source(DaemonStateSource(loop, database=db, readiness=readiness))
+    loop.add_source(
+        RecentJournalSource(
+            journal_repository, recent_entries=journal_settings.recent_entries
+        )
+    )
     return loop

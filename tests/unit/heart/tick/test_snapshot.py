@@ -81,6 +81,7 @@ def test_build_prompt_includes_items_that_fit() -> None:
     assert "beta" in prompt.text
     assert prompt.items_included == 2
     assert prompt.items_dropped == 0
+    assert prompt.items == (items[0], items[1])
 
 
 def _empty_prompt_tokens() -> int:
@@ -103,6 +104,7 @@ def test_build_prompt_drops_lowest_priority_items_over_budget() -> None:
     assert "y" * 5 not in prompt.text
     assert prompt.items_included == 1
     assert prompt.items_dropped == 1
+    assert prompt.items == (high,)
 
 
 def test_build_prompt_never_exceeds_the_token_budget() -> None:

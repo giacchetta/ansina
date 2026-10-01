@@ -128,6 +128,31 @@ class TickSettings(BaseModel):
     auto_pause_enabled: bool = True
 
 
+class JournalSettings(BaseModel):
+    """The `heart_journal` table's bounded retention and replay size, consumed by
+    issue #55's `ansina.heart.journal`/`ansina.heart.tick.journal_handler`/
+    `ansina.heart.tick.sources.recent_journal`.
+
+    Nested under `[heart]`, mirroring `TickSettings` — the journal only ever exists
+    alongside a loaded Heart, same reasoning.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    # `HeartJournalRepository.append()`'s own sweep keeps the table to at most this
+    # many rows — the newest `max_entries` survive, everything else is deleted.
+    max_entries: int = Field(default=2000, ge=1)
+    # The second, independent sweep bound: a row older than this many days is deleted
+    # regardless of `max_entries` — mirrors `LoginAttemptRepository.delete_expired`'s
+    # own two-cutoffs reasoning (nothing guarantees one bound is tighter than the
+    # other).
+    retention_days: int = Field(default=14, ge=1)
+    # How many of the most recent rows `RecentJournalSource` replays back into the
+    # next tick's snapshot. `0` disables the source's output entirely without
+    # unregistering it.
+    recent_entries: int = Field(default=5, ge=0)
+
+
 class HeartSettings(BaseModel):
     """The in-process Heart runtime, consumed by issue #10's `ansina.heart`.
 
@@ -168,6 +193,7 @@ class HeartSettings(BaseModel):
     # future base (non-instruct) model.
     apply_chat_template: bool = True
     tick: TickSettings = Field(default_factory=TickSettings)
+    journal: JournalSettings = Field(default_factory=JournalSettings)
 
     @field_validator("model_path", "cache_dir")
     @classmethod
