@@ -15,6 +15,13 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Resolved the same way the Makefile resolves `$(UV)`: `uv` is installed to
+# `~/.local/bin`, which (per `memory/mac-mini-heart-bench-host.md`) is not on this
+# session's non-login PATH — `make heart-bench-sync` below works around that because
+# Make expands its own `$(UV)` fallback, but the direct `uv run` call further down
+# needs the same resolution done explicitly.
+UV="$(command -v uv 2>/dev/null || echo "$HOME/.local/bin/uv")"
+
 SCRATCH=/tmp/ansina-heart-journal-smoke
 REPORTS="$SCRATCH/reports"
 PORT="${ANSINA_SMOKE_PORT:-8099}"
@@ -43,7 +50,7 @@ rm -f "$SCRATCH"/ansina.db*
 
     base="http://127.0.0.1:$PORT"
 
-    uv run --extra mlx python -m ansina &
+    "$UV" run --extra mlx python -m ansina &
     daemon_pid=$!
     trap 'kill "$daemon_pid" 2>/dev/null || true' EXIT
 
