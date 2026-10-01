@@ -16,6 +16,8 @@ def _report(
     false_act_or_escalate_on_obvious_idle: int = 0,
     parse_fallback_rate: float = 0.0,
     latency_p95_seconds: float = 1.0,
+    commit: str | None = "abc1234",
+    branch: str | None = "m6-heartbeat",
     results: tuple[FixtureResult, ...] | None = None,
 ) -> BenchReport:
     if results is None:
@@ -36,6 +38,8 @@ def _report(
         chat_template=False,
         generated_at="2026-09-29T00:00:00+00:00",
         host="macOS-26-arm64",
+        commit=commit,
+        branch=branch,
         mlx_lm_version="0.31.3",
         max_output_tokens=50,
         results=results,
@@ -115,6 +119,8 @@ def test_report_to_json_round_trips_through_json_loads() -> None:
 
     assert payload["model_repo"] == "mlx-community/Test-Model-4bit"
     assert payload["prompt_variant"] == "baseline"
+    assert payload["commit"] == "abc1234"
+    assert payload["branch"] == "m6-heartbeat"
     assert payload["metrics"]["accuracy"] == 1.0
     assert payload["metrics"]["recall_by_class"] == {
         "idle": 1.0,
@@ -157,6 +163,8 @@ def test_report_to_markdown_shows_pass_and_every_section() -> None:
     text = report_to_markdown(report, gate=gate)
 
     assert "# Heart bench: mlx-community/Test-Model-4bit / baseline" in text
+    assert "- Commit: abc1234" in text
+    assert "- Branch: m6-heartbeat" in text
     assert "## Gate: PASS" in text
     assert "## Metrics" in text
     assert "## Per-class recall" in text
@@ -197,3 +205,23 @@ def test_report_to_markdown_shows_unknown_mlx_lm_version_when_none() -> None:
     text = report_to_markdown(report, gate=gate)
 
     assert "mlx-lm: unknown" in text
+
+
+def test_report_to_markdown_shows_unknown_commit_and_branch_when_none() -> None:
+    report = _report(commit=None, branch=None)
+    gate = gate_result(report, interval_seconds=30.0)
+
+    text = report_to_markdown(report, gate=gate)
+
+    assert "- Commit: unknown" in text
+    assert "- Branch: unknown" in text
+
+
+def test_report_to_json_renders_commit_and_branch_as_null_when_none() -> None:
+    report = _report(commit=None, branch=None)
+    gate = gate_result(report, interval_seconds=30.0)
+
+    payload = json.loads(report_to_json(report, gate=gate))
+
+    assert payload["commit"] is None
+    assert payload["branch"] is None

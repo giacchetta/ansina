@@ -3,6 +3,12 @@
     "deny": [
       "Bash(git commit *)",
       "Bash(git push *)"
+    ],
+    "allow": [
+      "Bash(make remote-heart)",
+      "Bash(make remote-heart:*)",
+      "Bash(make remote-heart-tail)",
+      "Bash(make remote-heart-tail:*)"
     ]
   }
 }

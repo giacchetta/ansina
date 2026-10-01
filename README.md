@@ -190,6 +190,19 @@ Once loaded, the Heart runs an autonomic tick loop (`[heart.tick]`, on by defaul
 
 Since issue #54, every tick is fed the daemon's own live state (uptime, readiness checks, database health, the last tick's own outcome, and its failure/overrun history) — its first genuine input, rather than an empty snapshot. A circuit breaker in the same issue auto-pauses the loop after `max_consecutive_failures` consecutive tick failures or consecutive overruns (`[heart.tick]`), so a 16 GB Mac Mini running unattended for hours fails safe rather than looping forever on a broken backend; `auto_pause_enabled = false` keeps the counters accruing without ever pausing automatically.
 
+### 🧪 Real-hardware bench
+
+`make heart-bench` only runs where MLX does (Apple Silicon). `make remote-heart` (issue #58) drives one on a remote Mac over ssh/tmux as a single command — host and path read from `.envrc` (gitignored):
+
+```bash
+export ANSINA_REMOTE_HOST=<user@host>
+export ANSINA_REMOTE_PATH=<path to the ansina checkout on that host>
+```
+
+It force-syncs that checkout to your current branch's **pushed** HEAD (push first — an unpushed commit aborts the run, naming `git push` as the fix), runs the bench in a tmux session, and copies the report pair back into `docs/heart/bench/`, auto-suffixing (`-2`, `-3`, …) instead of ever overwriting one. `make remote-heart-tail` tails the live log; `make remote-heart-attach` attaches to the tmux session interactively (`tmux attach -t ansina-bench`, via ssh).
+
+`docs/heart/bench/` is gitignored, not committed — a report's raw per-fixture model output has no size ceiling and auto-suffixing means the corpus only ever grows. Reports land there for local analysis only; a follow-up issue adds an S3-compatible upload so the Mac Mini can produce them continuously for later ML analysis without that living in git history.
+
 ## 🛠️ Development
 
 | Target | Runs |
@@ -201,6 +214,10 @@ Since issue #54, every tick is fed the daemon's own live state (uptime, readines
 | `make precommit` | Pre-commit hooks against all files |
 | `make tui-check` | Everything the `tui` CI job runs (`tui/`: lint, format-check, mypy --strict, tests) |
 | `make check-all` | Both the daemon's `check` and `tui-check` |
+| `make heart-bench` | [Mac only] Bench a real MLX model against the tick fixture set |
+| `make remote-heart` | [Mac Mini] Bench on real hardware over ssh and copy the reports back — see above |
+| `make remote-heart-tail` | Tail the current/last remote bench run's log |
+| `make remote-heart-attach` | Attach to the live remote bench tmux session (interactive) |
 
 ## 📚 Docs
 

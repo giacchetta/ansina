@@ -6,7 +6,7 @@ UV := $(shell command -v uv 2>/dev/null || echo "$(UV_INSTALL_DIR)/uv")
 
 .PHONY: help
 help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: uv
 uv: ## Install uv (Astral installer) if not already on PATH — macOS and Linux
@@ -63,6 +63,26 @@ precommit: ## Run pre-commit hooks against all files
 .PHONY: heart-bench
 heart-bench: ## [Mac only] Bench a real MLX model against the tick fixture set (uv sync --extra mlx required)
 	$(UV) run --extra mlx python -m ansina.heart.eval $(ARGS)
+
+.PHONY: heart-bench-sync
+heart-bench-sync: uv ## [Mac only] Sync dependencies including the mlx extra (used by scripts/remote-heart-run.sh)
+	$(UV) sync --extra mlx
+
+# Issue #58: `make remote-heart` is the agent's entire surface for a real-hardware
+# bench run — every ssh/pipe/detached-spawn command lives inside the two scripts
+# below, never typed ad hoc as an ssh command string. Host/path come from .envrc
+# (gitignored); see README.md's "Real-hardware bench" section.
+.PHONY: remote-heart
+remote-heart: ## [Mac Mini] Bench on real hardware and copy the reports back (see .envrc)
+	scripts/remote-heart.sh run $(ARGS)
+
+.PHONY: remote-heart-tail
+remote-heart-tail: ## Tail the current/last remote bench run's log
+	scripts/remote-heart.sh tail
+
+.PHONY: remote-heart-attach
+remote-heart-attach: ## Attach to the live bench tmux session on the Mac Mini (interactive)
+	scripts/remote-heart.sh attach
 
 .PHONY: check
 check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs

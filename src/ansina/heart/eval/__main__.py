@@ -21,6 +21,7 @@ from pathlib import Path
 from ansina.config import load_settings
 from ansina.errors import AnsinaError
 from ansina.heart.eval.fixtures import load_fixtures
+from ansina.heart.eval.provenance import resolve_provenance
 from ansina.heart.eval.report import gate_result, report_to_json, report_to_markdown
 from ansina.heart.eval.runner import run_bench
 from ansina.heart.selection import build_heart_runtime
@@ -111,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    provenance = resolve_provenance()
+
     logger.info(
         "heart bench: loading model", extra={"model_repo": settings.heart.model_repo}
     )
@@ -129,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             prompt_variant=args.prompt_variant,
             model_repo=settings.heart.model_repo,
             chat_template=settings.heart.apply_chat_template,
+            commit=provenance.commit,
+            branch=provenance.branch,
         )
     finally:
         runtime.unload()

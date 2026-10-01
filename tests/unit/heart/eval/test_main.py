@@ -7,6 +7,7 @@ import pytest
 
 from ansina.config import ConfigError, Settings, load_settings
 from ansina.heart.eval import __main__ as heart_main
+from ansina.heart.eval.provenance import Provenance
 from ansina.heart.runtime import BaseHeartRuntime, HeartUnavailableError
 
 
@@ -252,6 +253,30 @@ def test_main_applies_no_chat_template_override(
     assert captured[0] is not loaded_settings
     md_files = list(out_dir.glob("*-notemplate.md"))
     assert len(md_files) == 1
+
+
+def test_main_writes_resolved_provenance_into_the_report(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _FakeRuntime(replies=["idle", "act", "escalate"])
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    monkeypatch.setattr(
+        heart_main,
+        "resolve_provenance",
+        lambda: Provenance(commit="deadbee-dirty", branch="m6-heartbeat"),
+    )
+    out_dir = tmp_path / "bench"
+
+    heart_main.main(
+        ["--fixtures", str(_fixtures_file(tmp_path)), "--out-dir", str(out_dir)]
+    )
+
+    json_files = list(out_dir.glob("*.json"))
+    payload = json.loads(json_files[0].read_text())
+    assert payload["commit"] == "deadbee-dirty"
+    assert payload["branch"] == "m6-heartbeat"
 
 
 def test_default_out_dir_and_prompt_variant() -> None:

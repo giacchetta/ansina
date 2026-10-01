@@ -94,6 +94,13 @@ class BenchReport:
     chat_template: bool
     generated_at: str
     host: str
+    # Issue #58: the git commit (`-dirty`-suffixed if the worktree had uncommitted
+    # changes) and branch the bench was run against, from
+    # `ansina.heart.eval.provenance.resolve_provenance` — `None`/`None` together
+    # when it couldn't be determined (no `git`, not a checkout). Metadata only,
+    # never a gate input.
+    commit: str | None
+    branch: str | None
     mlx_lm_version: str | None
     max_output_tokens: int
     results: tuple[FixtureResult, ...]
@@ -132,6 +139,8 @@ def run_bench(
     prompt_variant: str = DEFAULT_PROMPT_VARIANT,
     model_repo: str,
     chat_template: bool = False,
+    commit: str | None = None,
+    branch: str | None = None,
     perf_counter: Callable[[], float] = time.perf_counter,
 ) -> BenchReport:
     """Run every fixture in `fixtures` against `runtime` and return the full report.
@@ -141,9 +150,10 @@ def run_bench(
     per issue #53's own metric list, regardless of whatever else the caller does first.
     `chat_template` is pure metadata recorded onto the report — whether the prompt was
     actually wrapped in the tokenizer's chat template happened (or didn't) inside
-    `runtime.generate` itself, this function has no say in it. `perf_counter` is
-    injectable so the unit suite can assert on latency math without real timing
-    variance; it defaults to `time.perf_counter`.
+    `runtime.generate` itself, this function has no say in it. `commit`/`branch`
+    (issue #58) are likewise pure metadata, defaulted to `None` so every pre-#58 caller
+    is unaffected. `perf_counter` is injectable so the unit suite can assert on latency
+    math without real timing variance; it defaults to `time.perf_counter`.
     """
     peak_rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     # `ru_maxrss` is bytes on macOS/BSD and KiB on Linux — a `str`-typed local, not a
@@ -184,6 +194,8 @@ def run_bench(
         prompt_variant=prompt_variant,
         max_output_tokens=max_output_tokens,
         chat_template=chat_template,
+        commit=commit,
+        branch=branch,
         peak_rss_bytes=peak_rss_bytes,
     )
 
@@ -195,6 +207,8 @@ def _build_report(
     prompt_variant: str,
     max_output_tokens: int,
     chat_template: bool,
+    commit: str | None = None,
+    branch: str | None = None,
     peak_rss_bytes: int,
 ) -> BenchReport:
     correct = sum(1 for r in results if r.correct)
@@ -235,6 +249,8 @@ def _build_report(
         chat_template=chat_template,
         generated_at=datetime.now(UTC).isoformat(),
         host=platform.platform(),
+        commit=commit,
+        branch=branch,
         mlx_lm_version=_mlx_lm_version(),
         max_output_tokens=max_output_tokens,
         results=tuple(results),

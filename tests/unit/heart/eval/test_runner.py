@@ -222,6 +222,8 @@ def test_run_bench_records_metadata() -> None:
         model_repo="fake/model",
         prompt_variant="strict",
         chat_template=True,
+        commit="abc1234",
+        branch="m6-heartbeat",
     )
 
     assert report.model_repo == "fake/model"
@@ -229,8 +231,22 @@ def test_run_bench_records_metadata() -> None:
     assert report.chat_template is True
     assert report.max_output_tokens == 42
     assert report.host
+    assert report.commit == "abc1234"
+    assert report.branch == "m6-heartbeat"
     assert report.generated_at
     assert report.peak_rss_bytes > 0
+
+
+def test_run_bench_defaults_commit_and_branch_to_none() -> None:
+    fixtures = [_fixture("i1", TickDecision.IDLE)]
+    heart = _FakeHeart(reply="idle")
+
+    report = run_bench(
+        heart, fixtures, budget_tokens=1000, max_output_tokens=50, model_repo="m"
+    )
+
+    assert report.commit is None
+    assert report.branch is None
 
 
 def test_run_bench_defaults_chat_template_to_false() -> None:
