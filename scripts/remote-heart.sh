@@ -88,6 +88,11 @@ cmd_run() {
     local sync_cmd
     sync_cmd="cd $(squote "$ANSINA_REMOTE_PATH") && git fetch --prune origin"
     sync_cmd+=" && git checkout -B $(squote "$branch") $(squote "origin/$branch")"
+    # `checkout -B` alone only forces the working tree when the branch ref
+    # actually moves — a re-run against an unchanged origin leaves a prior
+    # local edit to a tracked file untouched (verified: reproduced live against
+    # the Mac Mini). `reset --hard` unconditionally forces it regardless.
+    sync_cmd+=" && git reset --hard $(squote "origin/$branch")"
     sync_cmd+=" && git clean -fd"
     remote_sh "$sync_cmd"
 
