@@ -51,13 +51,17 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.enabled is False
     assert settings.heart.runtime == "auto"
     assert settings.heart.model_path is None
-    assert settings.heart.model_repo == "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    assert settings.heart.model_repo == "mlx-community/gemma-4-e2b-it-4bit"
     assert settings.heart.cache_dir == Path.home() / ".cache" / "ansina" / "models"
     assert settings.heart.context_tokens == 8192
     assert settings.heart.max_output_tokens == 512
+    assert settings.heart.apply_chat_template is True
     assert settings.heart.tick.enabled is True
     assert settings.heart.tick.interval_seconds == 30.0
     assert settings.heart.tick.jitter_seconds == 3.0
+    assert settings.heart.journal.max_entries == 2000
+    assert settings.heart.journal.retention_days == 14
+    assert settings.heart.journal.recent_entries == 5
     assert settings.brain.enabled is False
     assert settings.brain.base_url == "https://api.openai.com/v1"
     assert settings.brain.model == "gpt-4o-mini"
@@ -615,6 +619,64 @@ def test_tick_jitter_seconds_rejects_negative(
         load_settings()
 
     assert "heart.tick.jitter_seconds" in str(exc_info.value)
+
+
+def test_journal_settings_via_env(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__JOURNAL__MAX_ENTRIES", "500")
+    monkeypatch.setenv("ANSINA_HEART__JOURNAL__RETENTION_DAYS", "7")
+    monkeypatch.setenv("ANSINA_HEART__JOURNAL__RECENT_ENTRIES", "3")
+
+    settings = load_settings()
+
+    assert settings.heart.journal.max_entries == 500
+    assert settings.heart.journal.retention_days == 7
+    assert settings.heart.journal.recent_entries == 3
+
+
+def test_journal_settings_via_toml(clean_env: None, tmp_cwd: Path) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        "[heart.journal]\nmax_entries = 100\n", encoding="utf-8"
+    )
+
+    settings = load_settings()
+
+    assert settings.heart.journal.max_entries == 100
+    assert settings.heart.journal.retention_days == 14  # untouched, keeps its default
+
+
+def test_journal_max_entries_must_be_positive(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__JOURNAL__MAX_ENTRIES", "0")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.journal.max_entries" in str(exc_info.value)
+
+
+def test_journal_retention_days_must_be_positive(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__JOURNAL__RETENTION_DAYS", "0")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.journal.retention_days" in str(exc_info.value)
+
+
+def test_journal_recent_entries_rejects_negative(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__JOURNAL__RECENT_ENTRIES", "-1")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.journal.recent_entries" in str(exc_info.value)
 
 
 def test_unwrap_model_returns_none_for_a_non_model_annotation() -> None:

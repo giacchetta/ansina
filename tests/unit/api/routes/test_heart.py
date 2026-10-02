@@ -38,6 +38,7 @@ class _FakeTickLoop:
 
     def __init__(self) -> None:
         self._paused = False
+        self._pause_reason: str | None = None
         self._started = False
         self._stopped = False
         self.ticks_run = 3
@@ -49,11 +50,17 @@ class _FakeTickLoop:
     def paused(self) -> bool:
         return self._paused
 
-    def pause(self) -> None:
+    @property
+    def pause_reason(self) -> str | None:
+        return self._pause_reason
+
+    def pause(self, *, reason: str | None = None) -> None:
         self._paused = True
+        self._pause_reason = reason
 
     def resume(self) -> None:
         self._paused = False
+        self._pause_reason = None
 
     def is_healthy(self) -> bool:
         return self._started and not self._stopped
@@ -86,7 +93,7 @@ def heart_enabled_app(
     return create_app(
         settings,
         heart_factory=lambda _settings: _FakeHeartRuntime(),
-        tick_loop_factory=lambda _settings, _heart: fake_tick_loop,
+        tick_loop_factory=lambda _settings, _heart, **_kwargs: fake_tick_loop,
     )
 
 
@@ -149,6 +156,7 @@ def test_get_tick_status_reports_the_loop_state(
     body = response.json()
     assert body["running"] is True  # lifespan already called start()
     assert body["paused"] is False
+    assert body["paused_reason"] is None
     assert body["ticks"] == 3
     assert body["last_decision"] == "idle"
     assert body["last_tick_at"] == "2026-01-01T00:00:00+00:00"
@@ -162,7 +170,11 @@ def test_pause_then_resume_round_trip(
     assert pause_response.status_code == 200
     assert pause_response.json() == {"paused": True}
     assert fake_tick_loop.paused
-    assert heart_enabled_client.get("/heart/tick").json()["paused"] is True
+    status = heart_enabled_client.get("/heart/tick").json()
+    assert status["paused"] is True
+    # A manual pause (this route) carries no reason — only the circuit breaker sets
+    # one.
+    assert status["paused_reason"] is None
 
     resume_response = heart_enabled_client.post("/heart/tick/resume")
     assert resume_response.status_code == 200
@@ -180,7 +192,9 @@ def test_heart_factory_receives_real_heart_runtime(
     settings = load_settings()
     received: list[HeartRuntime] = []
 
-    def _tick_loop_factory(_settings: Settings, heart: HeartRuntime) -> TickLoop:
+    def _tick_loop_factory(
+        _settings: Settings, heart: HeartRuntime, *, db: object, readiness: object
+    ) -> TickLoop:
         received.append(heart)
         return TickLoop(heart, interval_seconds=100, max_output_tokens=10)
 

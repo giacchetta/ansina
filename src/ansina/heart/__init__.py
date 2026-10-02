@@ -7,6 +7,7 @@ cadence to decide idle/act/escalate. `create_app()` (`ansina.api.app`) owns
 construction, load/unload, and tick-loop start/stop, the same way it owns `Database`.
 """
 
+from ansina.heart.journal import HeartJournalRepository, JournalEntry
 from ansina.heart.runtime import (
     HeartContextOverflowError,
     HeartLoadError,
@@ -15,17 +16,26 @@ from ansina.heart.runtime import (
     HeartUnavailableError,
 )
 from ansina.heart.selection import build_heart_runtime
-from ansina.heart.tick import TickController, TickLifecycle, TickLoop, build_tick_loop
+from ansina.heart.tick import (
+    TickController,
+    TickLifecycle,
+    TickLoop,
+    TickLoopFactory,
+    build_tick_loop,
+)
 
 __all__ = [
     "HeartContextOverflowError",
+    "HeartJournalRepository",
     "HeartLoadError",
     "HeartNotLoadedError",
     "HeartRuntime",
     "HeartUnavailableError",
+    "JournalEntry",
     "TickController",
     "TickLifecycle",
     "TickLoop",
+    "TickLoopFactory",
     "build_heart_runtime",
     "build_tick_loop",
 ]

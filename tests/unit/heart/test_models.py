@@ -74,3 +74,24 @@ def test_downloads_via_huggingface_hub_snapshot_download(
 
     assert resolved == ResolvedModel(path=tmp_path / "snapshot", source="repo")
     assert calls == [{"repo_id": "org/some-model", "cache_dir": str(tmp_path)}]
+
+
+def test_snapshot_download_failure_raises_load_error_not_a_bare_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A real `huggingface_hub` failure (nonexistent repo, no network, gated repo,
+    ...) must never escape as a raw third-party exception — issue #53's e2e test
+    (`test_heart_enabled_without_a_viable_runtime_fails_loudly`) hit exactly this on
+    a Mac with the `mlx` extra installed and a real, invalid `model_repo`.
+    """
+    settings = HeartSettings(model_repo="org/does-not-exist", cache_dir=tmp_path)
+
+    class _StubHub:
+        @staticmethod
+        def snapshot_download(*, repo_id: str, cache_dir: str) -> str:
+            raise RuntimeError("404: repository not found")
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", _StubHub())
+
+    with pytest.raises(HeartLoadError, match="org/does-not-exist"):
+        resolve_model(settings)

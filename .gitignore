@@ -10,6 +10,19 @@ ansina.toml
 *.db-wal
 *.db-shm
 
+# Heart bench reports (issue #58 planning): no longer committed — a growing,
+# per-fixture-raw-output report corpus belongs in an object store, not git
+# history. make heart-bench / make remote-heart still write here for local
+# analysis; a follow-up issue adds the S3-compatible upload and migrates the
+# reports already in git history (now untracked, kept on disk) into it.
+docs/heart/bench/
+
+# Heart soak reports (issue #56, same reasoning as docs/heart/bench/ above, pending
+# issue #59's S3-compatible upload): make remote-heart-soak-fetch renders
+# docs/heart/soak/soak-<date>.md here for local analysis only. The trailing slash
+# matters — docs/heart/soak.md (the committed procedure) must stay tracked.
+docs/heart/soak/
+
 # Python — none of these have a leading slash, so they already match at any depth,
 # tui/'s own .venv/.coverage/caches (issue #31) included. tui/uv.lock is committed
 # (matches nothing here) the same way the root uv.lock is.

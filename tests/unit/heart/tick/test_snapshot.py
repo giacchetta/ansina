@@ -81,6 +81,7 @@ def test_build_prompt_includes_items_that_fit() -> None:
     assert "beta" in prompt.text
     assert prompt.items_included == 2
     assert prompt.items_dropped == 0
+    assert prompt.items == (items[0], items[1])
 
 
 def _empty_prompt_tokens() -> int:
@@ -103,6 +104,7 @@ def test_build_prompt_drops_lowest_priority_items_over_budget() -> None:
     assert "y" * 5 not in prompt.text
     assert prompt.items_included == 1
     assert prompt.items_dropped == 1
+    assert prompt.items == (high,)
 
 
 def test_build_prompt_never_exceeds_the_token_budget() -> None:
@@ -145,3 +147,24 @@ def test_build_prompt_never_raises_on_a_non_positive_budget(budget_tokens: int) 
     )
 
     assert prompt.items_included == 0
+
+
+def test_build_prompt_defaults_to_the_shipped_template() -> None:
+    from ansina.heart.tick.prompts import DEFAULT_TEMPLATE
+
+    prompt = build_prompt([], budget_tokens=1000, token_count=_COUNT_CHARS)
+
+    assert prompt.text == DEFAULT_TEMPLATE.format(state="(no pending state)")
+
+
+def test_build_prompt_accepts_an_alternate_template() -> None:
+    custom = "CUSTOM\n{state}\nEND"
+
+    prompt = build_prompt(
+        [SnapshotItem(source="a", text="alpha", priority=0)],
+        budget_tokens=1000,
+        token_count=_COUNT_CHARS,
+        template=custom,
+    )
+
+    assert prompt.text == "CUSTOM\nalpha\nEND"

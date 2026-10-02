@@ -417,6 +417,7 @@ def test_openapi_schema(server: str) -> None:
         "/heart/tick",
         "/heart/tick/pause",
         "/heart/tick/resume",
+        "/heart/journal",
         "/auth/sudo",
         "/auth/sudo/grants",
         "/auth/users",
@@ -490,6 +491,25 @@ def test_authed_heart_tick_requires_token(authed_server: str) -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_authed_heart_journal_requires_token(authed_server: str) -> None:
+    response = httpx.get(f"{authed_server}/heart/journal")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_heart_journal_serves_an_empty_page_with_heart_disabled(server: str) -> None:
+    """Unlike `/heart/tick*` (`test_heart_tick_503_when_heart_disabled` above), this
+    route needs only `app.state.db` — it must keep answering 200 after the Heart is
+    switched off, which is the whole point of a durable trace (issue #55).
+    """
+    response = httpx.get(f"{server}/heart/journal")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"entries": [], "count": 0, "limit": 50, "has_more": False}
 
 
 def test_authed_healthz_reachable_without_token(authed_server: str) -> None:
@@ -1440,9 +1460,9 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         # (issue #38); (6,) = the totp credential type (issue #41); (7,) = role-mapping
         # provenance + the role_mappings unique index (issue #42); (8,) = the in-flight
         # OIDC login state table (issue #43); (9,) = the login-throttle table (issue
-        # #49) — bump this alongside `storage/migrations/` whenever a new migration
-        # lands.
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+        # #49); (10,) = the heart_journal table (issue #55) — bump this alongside
+        # `storage/migrations/` whenever a new migration lands.
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -1452,7 +1472,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # still exactly these rows — nothing re-applied
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:
@@ -1463,6 +1483,14 @@ def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> 
     "non-zero exit + stderr mentions the heart," not the exact sentence, so this
     stays green on a Mac that *does* have the extra installed — there the failure is
     an absent model instead of an absent backend, per `ansina.heart.selection`.)
+
+    `ANSINA_HEART__MODEL_REPO` is overridden to a repo id that cannot exist (issue
+    #53) — the default `model_repo` is a real, valid Hugging Face repo, and a Mac
+    that has already benched it (`make heart-bench`) will have it fully cached under
+    `[heart] cache_dir`, which would make `resolve_model` succeed and the daemon
+    actually start loading a real multi-GB model instead of failing fast, blowing
+    past `_STARTUP_TIMEOUT_S`. A deliberately-nonexistent repo 404s quickly
+    regardless of what's cached on the host or whether `mlx` is installed at all.
     """
     port = _free_port()
     (tmp_path / "ansina.toml").write_text(
@@ -1476,7 +1504,11 @@ def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> 
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        env={**os.environ, "ANSINA_HEART__ENABLED": "true"},
+        env={
+            **os.environ,
+            "ANSINA_HEART__ENABLED": "true",
+            "ANSINA_HEART__MODEL_REPO": "ansina-test/this-repo-does-not-exist",
+        },
         timeout=_STARTUP_TIMEOUT_S,
     )
 

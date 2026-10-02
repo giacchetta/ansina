@@ -7,12 +7,14 @@ same way it owns `HeartRuntime` and `Database`.
 """
 
 from ansina.heart.tick.decision import TickDecision, parse_decision
+from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.loop import (
     DecisionHandler,
     LoggingDecisionHandler,
     TickController,
     TickLifecycle,
     TickLoop,
+    TickLoopFactory,
     TickOutcome,
     build_tick_loop,
 )
@@ -23,16 +25,21 @@ from ansina.heart.tick.snapshot import (
     build_prompt,
     collect_items,
 )
+from ansina.heart.tick.sources import DaemonStateSource, RecentJournalSource
 
 __all__ = [
+    "DaemonStateSource",
     "DecisionHandler",
+    "JournalDecisionHandler",
     "LoggingDecisionHandler",
+    "RecentJournalSource",
     "SnapshotItem",
     "StateSnapshotSource",
     "TickController",
     "TickDecision",
     "TickLifecycle",
     "TickLoop",
+    "TickLoopFactory",
     "TickOutcome",
     "TickPrompt",
     "build_prompt",

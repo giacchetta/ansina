@@ -3,6 +3,24 @@
     "deny": [
       "Bash(git commit *)",
       "Bash(git push *)"
+    ],
+    "allow": [
+      "Bash(make remote-heart)",
+      "Bash(make remote-heart:*)",
+      "Bash(make remote-heart-tail)",
+      "Bash(make remote-heart-tail:*)",
+      "Bash(make remote-heart-soak-start)",
+      "Bash(make remote-heart-soak-start:*)",
+      "Bash(make remote-heart-soak-status)",
+      "Bash(make remote-heart-soak-status:*)",
+      "Bash(make remote-heart-soak-fetch)",
+      "Bash(make remote-heart-soak-fetch:*)",
+      "Bash(make remote-heart-soak-tail)",
+      "Bash(make remote-heart-soak-tail:*)",
+      "Bash(make remote-heart-soak-attach)",
+      "Bash(make remote-heart-soak-attach:*)",
+      "Bash(make remote-heart-soak-stop)",
+      "Bash(make remote-heart-soak-stop:*)"
     ]
   }
 }

@@ -60,6 +60,13 @@ def test_lists_each_resource_with_its_served_verbs_policy_class_and_grantability
 
     assert by_resource["heart.tick"]["policy_class"] == "ordinary"
 
+    # Issue #55: `heart.journal` is a read-only ordinary resource, served by exactly
+    # GET (no POST/DELETE route exists for it) — unlike `heart.tick`, which also
+    # serves POST for its pause/resume routes.
+    assert by_resource["heart.journal"]["verbs"] == ["GET"]
+    assert by_resource["heart.journal"]["policy_class"] == "ordinary"
+    assert by_resource["heart.journal"]["grantable"] is True
+
     # Issue #38 AC: `me.profile` is marked non-grantable — every builtin role already
     # holds every verb there, so offering it in a custom-role picker would
     # communicate an escalation that doesn't exist.

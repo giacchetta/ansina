@@ -46,7 +46,16 @@ def _download_from_hub(repo_id: str, cache_dir: Path) -> Path:
         "resolving heart model",
         extra={"model_repo": repo_id, "cache_dir": str(cache_dir)},
     )
-    return Path(snapshot_download(repo_id=repo_id, cache_dir=str(cache_dir)))
+    try:
+        return Path(snapshot_download(repo_id=repo_id, cache_dir=str(cache_dir)))
+    except Exception as exc:  # huggingface_hub's own exception types aren't ours to
+        # name (a nonexistent repo, no network, a gated/private repo, ...) — this is
+        # the "fail loudly, never a bare traceback" contract issue #10 promises,
+        # exercised for real by tests/e2e/test_server.py's
+        # test_heart_enabled_without_a_viable_runtime_fails_loudly (issue #53).
+        raise HeartLoadError(
+            f"failed to fetch heart.model_repo {repo_id!r} from Hugging Face: {exc}"
+        ) from exc
 
 
 def resolve_model(

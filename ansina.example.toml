@@ -27,6 +27,12 @@ path = "ansina.db"
 # runs, no model loads, and "/readyz" carries no "heart" key at all. Turning this on
 # requires the "mlx" extra ("uv sync --extra mlx") and only runs on Apple Silicon —
 # a portable fallback is tracked in a follow-up issue, not shipped yet.
+#
+# For the M4 deployment target specifically, docs/heart/mac-mini-m4.toml (issue #56)
+# is a complete, copy-to-ansina.toml profile with every [heart]/[heart.tick]/
+# [heart.journal] value written out explicitly and annotated with the bench/soak
+# measurement that validates it -- prefer that file over hand-tuning the values below
+# for a real Mac Mini M4 deployment.
 enabled = false
 
 # "auto" and "mlx" currently behave identically (MLX is the only adapter); "auto"
@@ -38,8 +44,10 @@ runtime = "auto"
 # model_path = "/path/to/a/local/mlx/model"
 
 # Hugging Face repo id, fetched into cache_dir on first use and reused after —
-# ignored when model_path is set.
-model_repo = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+# ignored when model_path is set. The default is the smallest model on issue
+# #53's bench ladder that clears the accuracy/latency gate (95.8% accuracy) —
+# see docs/heart/bench/ for the full reports.
+model_repo = "mlx-community/gemma-4-e2b-it-4bit"
 
 # Download-once model cache. Same "~" expansion / relative-path-resolves-to-CWD
 # behavior as [database] path above.
@@ -49,6 +57,13 @@ cache_dir = "~/.cache/ansina/models"
 # fit inside this budget. 8192 is the maximum accepted here.
 context_tokens = 8192
 max_output_tokens = 512
+
+# Wrap every prompt in the loaded tokenizer's own chat template before generating
+# (issue #53) — every model on the bench ladder is chat/instruct-tuned, and a raw,
+# untemplated prompt measurably makes one continue the prompt as free text instead
+# of answering it. false is the pre-#53 raw-prompt behavior, kept as an escape
+# hatch for a future base (non-instruct) model.
+apply_chat_template = true
 
 [heart.tick]
 # The autonomic tick loop (issue #11): on a fixed cadence, the Heart decides
@@ -62,6 +77,35 @@ interval_seconds = 30.0
 # Uniform random delay added to each wakeup, so a restarted process doesn't tick in
 # lockstep with anything else on a fixed cadence. 0 disables jitter.
 jitter_seconds = 3.0
+
+# Circuit breaker (issue #54): the loop auto-pauses once EITHER consecutive tick
+# failures OR consecutive tick overruns (see overrun_ratio below) reaches this value
+# — one threshold governs both gauges deliberately. GET /heart/tick's paused_reason
+# names which one tripped.
+max_consecutive_failures = 5
+
+# A tick counts as an "overrun" once its duration reaches this fraction of
+# interval_seconds above — tracked independently of failures, so a slow-but-
+# succeeding tick never counts toward the failure gauge.
+overrun_ratio = 0.8
+
+# false disables only the breaker's *automatic* pause() call — the failure/overrun
+# counters still accrue and stay visible (daemon-state snapshot, logs) either way.
+auto_pause_enabled = true
+
+[heart.journal]
+# A durable, readable trace of what every completed tick decided (issue #55) — one
+# row in the "heart_journal" table per tick, read-only over GET /heart/journal.
+
+# Bounded retention, two independent cutoffs: a row survives only while it is both
+# among the newest max_entries rows AND younger than retention_days.
+max_entries = 2000
+retention_days = 14
+
+# How many of the most recent rows are replayed back into the next tick's own
+# snapshot (RecentJournalSource), giving the Heart short-term memory of its past
+# decisions. 0 disables this without unregistering the source.
+recent_entries = 5
 
 [brain]
 # The remote Brain provider (issue #12). Off by default: "build_brain_provider" is

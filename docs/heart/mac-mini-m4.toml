@@ -1,0 +1,73 @@
+# Ansina configuration profile for the M4 deployment target (Mac Mini 2024, Apple M4,
+# 16 GB unified memory) — issue #56. Copy this to `ansina.toml` (gitignored) to run
+# the Heart for real on that hardware; unlike `ansina.example.toml`, every `[heart]`/
+# `[heart.tick]`/`[heart.journal]` value below is explicit rather than inherited from
+# a built-in default, each with an inline comment citing the measurement that
+# validates it — so this file stays correct even if a future change moves one of
+# those built-in defaults without updating this profile to match.
+#
+# This profile only covers the Heart. Everything else (server/database/security/
+# brain) is left at its built-in default — merge this into your own `ansina.toml`, or
+# copy it in full and layer `ANSINA_SECURITY__*`/`ANSINA_BRAIN__*` env vars for
+# auth/Brain on top, the normal config-precedence way (see ansina.example.toml).
+#
+# `[heart] enabled` stays `false` in the repository/CI default throughout — this file
+# is the opt-in, documented way to turn it on for a real deployment, never a default.
+
+[heart]
+enabled = true
+runtime = "auto"
+
+# The smallest model on issue #53's bench ladder that cleared the gate (accuracy >=
+# 0.90, zero false act/escalate on the obviously-idle fixture subset, zero parse-
+# fallback rate, p95 latency <= 20% of interval_seconds below) — 95.8% accuracy on
+# the original 24-fixture set, 97.2% on the widened 36-fixture set after issue #54's
+# severity-heuristic fix. See docs/heart/findings.md for the full ladder (Qwen3.5-2B
+# 75.0%, Qwen3.5-4B 83.3%, both gate FAIL, before this rung). Larger rungs on the
+# ladder (gemma-4-e4b-it-4bit, gemma-4-e4b-it-8bit) were never benched — #53's own
+# "stop at the first rung that clears" rule.
+model_repo = "mlx-community/gemma-4-e2b-it-4bit"
+cache_dir = "~/.cache/ansina/models"
+
+# The blueprint's 8k hard ceiling (unchanged — never configured past what the Heart's
+# prompts are allowed to assume). Measured prompt size on the real ladder: 128-186
+# tokens (min/max, 36 fixtures) — comfortably inside budget even before trimming.
+context_tokens = 8192
+max_output_tokens = 512
+
+# Every model on the ladder is chat/instruct-tuned; a raw, untemplated prompt
+# measured 0% accuracy / 100% parse-fallback (docs/heart/findings.md's "Prompt
+# variant" section) — this must stay true for the Heart to produce a parseable
+# decision at all.
+apply_chat_template = true
+
+[heart.tick]
+enabled = true
+
+# The cadence the bench harness's own latency gate is defined against (p95 <= 20% of
+# this value) and the cadence issue #56's soak measured drift/RSS growth against —
+# changing this invalidates both without a re-run.
+interval_seconds = 30.0
+jitter_seconds = 3.0
+
+# Issue #54's circuit breaker, measured safe on the real Mac Mini M4 soak (issue #56)
+# — see docs/heart/findings.md for whether any trip occurred and, if so, under what
+# condition.
+max_consecutive_failures = 5
+overrun_ratio = 0.8
+auto_pause_enabled = true
+
+[heart.journal]
+# At this interval_seconds, 2000 rows ~= 16.7 hours of continuous-ticking history
+# (2000 * 30s / 3600) before the row-count bound starts pruning — the tighter of the
+# two independent sweep bounds below for any deployment that ticks near-continuously;
+# retention_days only starts governing instead once a deployment ticks far more
+# slowly than this profile's own interval_seconds.
+max_entries = 2000
+retention_days = 14
+recent_entries = 5
+
+# Measured peak RSS on the real ladder: 3.57 GiB (36-fixture bench run) — well inside
+# this host's 16 GB unified memory, with headroom for the daemon, SQLite, and the OS
+# itself. Issue #56's soak is what confirms this stays flat over hours rather than
+# climbing — see docs/heart/findings.md.

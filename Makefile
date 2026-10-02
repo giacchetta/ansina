@@ -6,7 +6,7 @@ UV := $(shell command -v uv 2>/dev/null || echo "$(UV_INSTALL_DIR)/uv")
 
 .PHONY: help
 help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: uv
 uv: ## Install uv (Astral installer) if not already on PATH — macOS and Linux
@@ -54,6 +54,84 @@ test-e2e: ## Run only the e2e (black-box subprocess) test suite
 .PHONY: precommit
 precommit: ## Run pre-commit hooks against all files
 	$(UV) run pre-commit run --all-files
+
+# Mac-only (issue #53): the Heart bench harness against a real MLX model — no MLX
+# adapter is viable on either CI leg, so this never runs there and is deliberately
+# left out of `check`/`check-all` below, the same way `tui-*` is scoped to `tui/`'s
+# own project. `ARGS` passes flags through, e.g.
+# `make heart-bench ARGS='--model-repo mlx-community/Qwen3.5-4B-MLX-4bit'`.
+.PHONY: heart-bench
+heart-bench: ## [Mac only] Bench a real MLX model against the tick fixture set (uv sync --extra mlx required)
+	$(UV) run --extra mlx python -m ansina.heart.eval $(ARGS)
+
+.PHONY: heart-bench-sync
+heart-bench-sync: uv ## [Mac only] Sync dependencies including the mlx extra (used by scripts/remote-heart-run.sh)
+	$(UV) sync --extra mlx
+
+# Issue #58: `make remote-heart` is the agent's entire surface for a real-hardware
+# bench run — every ssh/pipe/detached-spawn command lives inside the two scripts
+# below, never typed ad hoc as an ssh command string. Host/path come from .envrc
+# (gitignored); see README.md's "Real-hardware bench" section.
+.PHONY: remote-heart
+remote-heart: ## [Mac Mini] Bench on real hardware and copy the reports back (see .envrc)
+	scripts/remote-heart.sh run $(ARGS)
+
+.PHONY: remote-heart-tail
+remote-heart-tail: ## Tail the current/last remote bench run's log
+	scripts/remote-heart.sh tail
+
+.PHONY: remote-heart-attach
+remote-heart-attach: ## Attach to the live bench tmux session on the Mac Mini (interactive)
+	scripts/remote-heart.sh attach
+
+# Issue #55's Mac Mini acceptance check: unlike `remote-heart` above (the eval
+# harness), this boots the real daemon with the Heart/tick loop enabled against a
+# scratch database, waits for a few real ticks, fetches `GET /heart/journal`, and
+# verifies every journal row matches what the daemon's own log line reported for
+# that tick. Same committed-script-behind-one-target pattern as `remote-heart`, its
+# own tmux session so the two never collide, and the same `.envrc` host/path.
+.PHONY: remote-heart-journal-smoke
+remote-heart-journal-smoke: ## [Mac Mini] Boot the daemon for real and verify heart_journal against its own log (see .envrc)
+	scripts/heart-journal-smoke.sh run $(ARGS)
+
+.PHONY: remote-heart-journal-smoke-tail
+remote-heart-journal-smoke-tail: ## Tail the current/last journal-smoke run's log
+	scripts/heart-journal-smoke.sh tail
+
+.PHONY: remote-heart-journal-smoke-attach
+remote-heart-journal-smoke-attach: ## Attach to the live journal-smoke tmux session on the Mac Mini (interactive)
+	scripts/heart-journal-smoke.sh attach
+
+# Issue #56's multi-hour heartbeat soak: unlike `remote-heart`/`remote-heart-journal-
+# smoke` above (both short, blocking calls), a soak runs for hours — `start` launches
+# it in its own tmux session (`ansina-soak`, so it never collides with the other two)
+# and returns immediately rather than polling inside `make`; `status`/`fetch` are
+# separate, later invocations that can run from a different local session entirely.
+# Mac-only (no MLX adapter is viable on either CI leg), so — like `heart-bench` and
+# the two targets above — deliberately left out of `check`/`check-all` below.
+.PHONY: remote-heart-soak-start
+remote-heart-soak-start: ## [Mac Mini] Start a multi-hour soak in the background (see .envrc, docs/heart/soak.md)
+	scripts/heart-soak.sh start $(ARGS)
+
+.PHONY: remote-heart-soak-status
+remote-heart-soak-status: ## Is the soak still running, and how far in?
+	scripts/heart-soak.sh status $(ARGS)
+
+.PHONY: remote-heart-soak-fetch
+remote-heart-soak-fetch: ## Once finished: fetch the soak's raw data and render docs/heart/soak/soak-<date>.md
+	scripts/heart-soak.sh fetch $(ARGS)
+
+.PHONY: remote-heart-soak-tail
+remote-heart-soak-tail: ## Tail the live/last soak run's log
+	scripts/heart-soak.sh tail $(ARGS)
+
+.PHONY: remote-heart-soak-attach
+remote-heart-soak-attach: ## Attach to the live soak tmux session on the Mac Mini (interactive)
+	scripts/heart-soak.sh attach
+
+.PHONY: remote-heart-soak-stop
+remote-heart-soak-stop: ## End a running soak early
+	scripts/heart-soak.sh stop
 
 .PHONY: check
 check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs

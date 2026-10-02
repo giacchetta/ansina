@@ -114,6 +114,44 @@ class TickSettings(BaseModel):
     # backpressure guard for that).
     jitter_seconds: float = Field(default=3.0, ge=0)
 
+    # Issue #54's circuit breaker: the loop auto-pauses once `consecutive_failures` OR
+    # `consecutive_overruns` reaches this value — one threshold governs both gauges
+    # deliberately (the issue names exactly these three new keys, no fourth).
+    max_consecutive_failures: int = Field(default=5, ge=1)
+    # A tick counts as an "overrun" once its duration reaches this fraction of
+    # `interval_seconds` — tracked independently of failures (a slow-but-succeeding
+    # tick never touches `consecutive_failures`).
+    overrun_ratio: float = Field(default=0.8, gt=0)
+    # An escape hatch to disable the breaker's *automatic* `pause()` call without
+    # touching either threshold above — the failure/overrun counters still accrue and
+    # stay visible (in the daemon-state snapshot and in logs) either way.
+    auto_pause_enabled: bool = True
+
+
+class JournalSettings(BaseModel):
+    """The `heart_journal` table's bounded retention and replay size, consumed by
+    issue #55's `ansina.heart.journal`/`ansina.heart.tick.journal_handler`/
+    `ansina.heart.tick.sources.recent_journal`.
+
+    Nested under `[heart]`, mirroring `TickSettings` — the journal only ever exists
+    alongside a loaded Heart, same reasoning.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    # `HeartJournalRepository.append()`'s own sweep keeps the table to at most this
+    # many rows — the newest `max_entries` survive, everything else is deleted.
+    max_entries: int = Field(default=2000, ge=1)
+    # The second, independent sweep bound: a row older than this many days is deleted
+    # regardless of `max_entries` — mirrors `LoginAttemptRepository.delete_expired`'s
+    # own two-cutoffs reasoning (nothing guarantees one bound is tighter than the
+    # other).
+    retention_days: int = Field(default=14, ge=1)
+    # How many of the most recent rows `RecentJournalSource` replays back into the
+    # next tick's snapshot. `0` disables the source's output entirely without
+    # unregistering it.
+    recent_entries: int = Field(default=5, ge=0)
+
 
 class HeartSettings(BaseModel):
     """The in-process Heart runtime, consumed by issue #10's `ansina.heart`.
@@ -134,14 +172,28 @@ class HeartSettings(BaseModel):
     enabled: bool = False
     runtime: Literal["auto", "mlx"] = "auto"
     model_path: Path | None = None
-    model_repo: str = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+    # Issue #53: the smallest model on the bench ladder that clears the gate
+    # (3-way accuracy >= 0.90, 0 false act/escalate on the obviously-idle subset,
+    # 0 parse-fallback rate, p95 latency <= 20% of interval_seconds) — measured
+    # against `heart.tick.prompts.DEFAULT_PROMPT_VARIANT` ("strict"), 95.8%
+    # accuracy, see `docs/heart/bench/`. Superseded the M1-era placeholder default.
+    model_repo: str = "mlx-community/gemma-4-e2b-it-4bit"
     cache_dir: Path = Path("~/.cache/ansina/models")
     # The blueprint's 8k context budget is a hard ceiling, not a target (issue #10) —
     # enforced here so it can never be configured past what the Heart's prompts are
     # allowed to assume.
     context_tokens: int = Field(default=8192, ge=256, le=8192)
     max_output_tokens: int = Field(default=512, ge=1)
+    # Default `True` (issue #53): every model on the bench ladder is chat/instruct-
+    # tuned, and a raw (untemplated) prompt measurably makes one continue the prompt
+    # as free text instead of answering it — see `docs/heart/bench/`'s first (no-
+    # template) report, 100% parse-fallback. `MlxHeartRuntime` applies the loaded
+    # tokenizer's own chat template when this is `True` and the tokenizer exposes
+    # one; `False` is the pre-#53 raw-prompt behavior, kept as an escape hatch for a
+    # future base (non-instruct) model.
+    apply_chat_template: bool = True
     tick: TickSettings = Field(default_factory=TickSettings)
+    journal: JournalSettings = Field(default_factory=JournalSettings)
 
     @field_validator("model_path", "cache_dir")
     @classmethod
