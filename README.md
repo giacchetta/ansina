@@ -4,7 +4,7 @@
 
 > A self-owned AI agent: an always-on in-process **Heart** plus a remote **Brain**, exposed over a single internal REST API. No chat channels.
 
-> **Status:** M5 — Password Login & Third-Party API Clients complete (issues #48–#51): password policy + self-service password change, per-username/per-IP login throttling, `POST /auth/login` (a local username + password → a bounded-lifetime `api_token`), and CORS for browser-hosted third-party clients — see the [roadmap](docs/architecture/blueprint.md#4-roadmap). M3 — Custom Roles & Federated Identity (issues #37–#45, #47) landed before it: admin-defined custom roles, the fail-closed sudo gate, TOTP step-up, role-mapping provenance, OAuth 2.0/OIDC federated login (`POST /auth/oidc/login` + `GET /auth/oidc/callback`), and `ansina-tui`'s multi-factor `auth sudo`/`auth totp` commands. M4 (`ansina-tui`, issues #30, #28, #31–#35) ran before M3 despite the number; M2 (RBAC & Access Control) landed before all three.
+> **Status:** M6 — Heartbeat: First Real Beat complete (issues #53–#56, #58): a real MLX model on the real Mac Mini M4 target deciding idle/act/escalate (95.8%→97.2% measured accuracy as the fixture set grew), the daemon's own self-state fed into every tick with a circuit breaker for unattended runs, a durable `heart_journal` trace (`GET /heart/journal`), a repeatable real-hardware bench driver (`make remote-heart`), and a multi-hour soak with its own findings write-up — see [`docs/heart/findings.md`](docs/heart/findings.md) and the [roadmap](docs/architecture/blueprint.md#4-roadmap). `[heart] enabled` stays `false` by default; see [🫀 Heart runtime](#-heart-runtime) below to turn it on. M5 — Password Login & Third-Party API Clients (issues #48–#51) landed before it: password policy + self-service password change, per-username/per-IP login throttling, `POST /auth/login`, and CORS for browser-hosted third-party clients. M3 — Custom Roles & Federated Identity (issues #37–#45, #47) landed before that: admin-defined custom roles, the fail-closed sudo gate, TOTP step-up, role-mapping provenance, OAuth 2.0/OIDC federated login, and `ansina-tui`'s multi-factor `auth sudo`/`auth totp` commands. M4 (`ansina-tui`, issues #30, #28, #31–#35) ran before M3 despite the number; M2 (RBAC & Access Control) landed before all three.
 
 ```mermaid
 flowchart LR
@@ -187,7 +187,9 @@ ANSINA_HEART__ENABLED=true uv run ansina
 
 On any other host, enabling it fails loudly at boot rather than silently degrading — no fallback ships yet (a portable, non-Apple-Silicon adapter is tracked in a follow-up issue).
 
-Once loaded, the Heart runs an autonomic tick loop (`[heart.tick]`, on by default whenever the Heart is): every `interval_seconds` (plus jitter) it decides idle/act/escalate and logs the decision. `act` and `escalate` are logged only for now — there's nothing to act on yet and no `BrainProvider` (issue #12) to escalate to. `GET /heart/tick` reports its state; `POST /heart/tick/pause` and `/resume` are the kill switch.
+For the M4 deployment target specifically, [`docs/heart/mac-mini-m4.toml`](docs/heart/mac-mini-m4.toml) is a complete, copy-to-`ansina.toml` profile with every `[heart]`/`[heart.tick]`/`[heart.journal]` value the real-hardware bench and soak actually validated, each annotated with the measurement behind it — prefer it over hand-tuning the defaults below.
+
+Once loaded, the Heart runs an autonomic tick loop (`[heart.tick]`, on by default whenever the Heart is): every `interval_seconds` (plus jitter) it decides idle/act/escalate and logs the decision. Issue #53 proved this for real on the Mac Mini M4: `mlx-community/gemma-4-e2b-it-4bit` with the `"strict"` prompt variant measures 97.2% decision accuracy (36 fixtures, reproduced across three independent runs) with a 0.00% parse-fallback rate and p95 latency of ~0.24s against interval_seconds' own 6.00s gate — see [`docs/heart/findings.md`](docs/heart/findings.md) for the full model-ladder and prompt-variant evidence. `act` and `escalate` are logged only for now — there's nothing to act on yet and no wiring to `BrainProvider` (issue #12) to escalate to; `findings.md` records the evidence-based verdict on whether that's safe to wire next. `GET /heart/tick` reports its state; `POST /heart/tick/pause` and `/resume` are the kill switch.
 
 Since issue #54, every tick is fed the daemon's own live state (uptime, readiness checks, database health, the last tick's own outcome, and its failure/overrun history) — its first genuine input, rather than an empty snapshot. A circuit breaker in the same issue auto-pauses the loop after `max_consecutive_failures` consecutive tick failures or consecutive overruns (`[heart.tick]`), so a 16 GB Mac Mini running unattended for hours fails safe rather than looping forever on a broken backend; `auto_pause_enabled = false` keeps the counters accruing without ever pausing automatically.
 
@@ -208,6 +210,8 @@ It force-syncs that checkout to your current branch's **pushed** HEAD (push firs
 
 `make remote-heart-journal-smoke` (issue #55) is the same pattern applied to a different check: it boots the real daemon (not the eval harness) on the Mac Mini with the Heart and tick loop enabled against a scratch database, waits for a few real ticks, fetches `GET /heart/journal`, and verifies every row matches the daemon's own `"heart tick completed"` log line for that tick — in its own tmux session (`ansina-journal-smoke`) so it never collides with a bench run. `-tail`/`-attach` variants mirror `remote-heart`'s own. No report is written to `docs/`; the verdict is printed to the terminal for pasting into a PR.
 
+`make remote-heart-soak-start` (issue #56) runs the same checkout on the Mac Mini for hours, not minutes: the real daemon with the Heart and tick loop enabled, sampled every minute (RSS, tick state) for the soak's whole duration — its own tmux session (`ansina-soak`) so it never collides with the other two. Unlike the drivers above, `start` launches the run and returns immediately rather than blocking `make` on it (an 8-hour run can't sit inside one blocking call); `make remote-heart-soak-status`/`-tail`/`-attach` check on it from any later session, and `make remote-heart-soak-fetch` — once it's finished — fetches the raw data and renders `docs/heart/soak/soak-<date>.md`. See [`docs/heart/soak.md`](docs/heart/soak.md) for the full procedure and how to read a rendered report. Like `docs/heart/bench/`, `docs/heart/soak/` is gitignored, not committed, pending issue #59's S3-compatible upload — the numbers that matter are copied into [`docs/heart/findings.md`](docs/heart/findings.md) instead.
+
 ## 🛠️ Development
 
 | Target | Runs |
@@ -223,6 +227,11 @@ It force-syncs that checkout to your current branch's **pushed** HEAD (push firs
 | `make remote-heart` | [Mac Mini] Bench on real hardware over ssh and copy the reports back — see above |
 | `make remote-heart-tail` | Tail the current/last remote bench run's log |
 | `make remote-heart-attach` | Attach to the live remote bench tmux session (interactive) |
+| `make remote-heart-journal-smoke` | [Mac Mini] Boot the real daemon and verify `heart_journal` against its own log |
+| `make remote-heart-soak-start` | [Mac Mini] Start a multi-hour soak in the background — see above |
+| `make remote-heart-soak-status` | Is the soak still running, and how far in? |
+| `make remote-heart-soak-fetch` | Once finished: fetch the raw data and render `docs/heart/soak/soak-<date>.md` |
+| `make remote-heart-soak-tail` / `-attach` / `-stop` | Tail / attach to / end a running soak |
 
 ## 📚 Docs
 

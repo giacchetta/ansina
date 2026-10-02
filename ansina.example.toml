@@ -27,6 +27,12 @@ path = "ansina.db"
 # runs, no model loads, and "/readyz" carries no "heart" key at all. Turning this on
 # requires the "mlx" extra ("uv sync --extra mlx") and only runs on Apple Silicon —
 # a portable fallback is tracked in a follow-up issue, not shipped yet.
+#
+# For the M4 deployment target specifically, docs/heart/mac-mini-m4.toml (issue #56)
+# is a complete, copy-to-ansina.toml profile with every [heart]/[heart.tick]/
+# [heart.journal] value written out explicitly and annotated with the bench/soak
+# measurement that validates it -- prefer that file over hand-tuning the values below
+# for a real Mac Mini M4 deployment.
 enabled = false
 
 # "auto" and "mlx" currently behave identically (MLX is the only adapter); "auto"

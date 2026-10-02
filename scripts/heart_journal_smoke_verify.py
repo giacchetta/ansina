@@ -5,7 +5,9 @@
 
 Not part of the `ansina` package (no pytest/mypy/coverage obligation, same as every
 other `scripts/*.sh` operational tool) — plain stdlib, invoked locally by the bash
-driver after `journal.json`/`run.log` are scp'd back from the Mac Mini.
+driver after `journal.json`/`run.log` are scp'd back from the Mac Mini. Log-line
+parsing itself lives in `scripts/heart_log.py` (issue #56 pulled it out once a second
+script, `heart_soak_report.py`, needed the identical shape).
 
 Usage: python scripts/heart_journal_smoke_verify.py <run.log> <journal.json> [min_ticks]
 """
@@ -15,27 +17,10 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
+
+from heart_log import load_tick_log_lines
 
 _FLOAT_TOLERANCE = 1e-6
-
-
-def _load_tick_log_lines(run_log: Path) -> list[dict[str, Any]]:
-    """Every `"heart tick completed"` JSON log line in `run_log`, parsed. Most lines
-    in the file are plain text (shell echoes, `make` output) rather than JSON — those
-    are silently skipped, not an error.
-    """
-    completed: list[dict[str, Any]] = []
-    for line in run_log.read_text(encoding="utf-8").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        if record.get("message") == "heart tick completed":
-            completed.append(record.get("extra", {}))
-    return completed
 
 
 def main() -> int:
@@ -46,7 +31,7 @@ def main() -> int:
     journal_path = Path(sys.argv[2])
     min_ticks = int(sys.argv[3]) if len(sys.argv) == 4 else 1
 
-    log_entries = _load_tick_log_lines(run_log)
+    log_entries = [record.get("extra", {}) for record in load_tick_log_lines(run_log)]
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
     journal_entries = journal["entries"]
 
