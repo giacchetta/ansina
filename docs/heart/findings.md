@@ -6,10 +6,14 @@ ladder + prompt variants), #54 (daemon self-state + circuit breaker), #55
 milestone's "learn" step and M7's sole input — not a status report, a set of
 evidence-based verdicts.
 
-**Status:** the model/prompt-variant/Backlog #15 sections below are final, drawn from
-the committed bench evidence across #53/#54. The escalate-rate and escalate→Brain
-sections are placeholders pending the soak itself (`docs/heart/soak.md`) — see the
-note at the top of each.
+**Status:** every section below is now final. The model/prompt-variant/Backlog #15
+sections are drawn from the committed bench evidence across #53/#54. The soak,
+escalate-rate, and escalate→Brain sections are drawn from the 8-hour unattended run
+completed on the Mac Mini M4 on 2026-10-02 (issue #60) — the rendered report lives at
+`docs/heart/soak/soak-2026-10-02.md` (gitignored, local to the machine that fetched it,
+per `docs/heart/soak.md`); the raw inputs it was rendered from (`run.log`,
+`samples.jsonl`, `journal.json`) are kept alongside it under
+`docs/heart/soak/2026-10-02-raw/`.
 
 ## Chosen model: `mlx-community/gemma-4-e2b-it-4bit`
 
@@ -108,65 +112,126 @@ already policy-constrained by construction (code-generated, not model-authored),
 there is nothing for constrained decoding to improve on this duty specifically. #15
 stays parked.
 
+## The 8-hour unattended soak (2026-10-02)
+
+Issue #56 built the soak tooling and started the run; issue #60 fetched, rendered, and
+evaluates it. Run envelope (from `docs/heart/soak/soak-2026-10-02.md`/`.json`):
+commit `bc1163c` on branch `m6-heartbeat`, `mlx-community/gemma-4-e2b-it-4bit`,
+prompt variant `strict`, `interval_seconds=30`/`jitter_seconds=3.0`, 8.01 h observed
+(480 samples @ 60s), **960 real ticks**. Per `docs/heart/soak.md`'s own "what this is
+not" note: the harness boots the real daemon with `ANSINA_SECURITY__ENABLED=false`
+against a scratch SQLite database on loopback — a measurement rig, not a deployment
+recipe (`docs/heart/mac-mini-m4.toml` is that).
+
+| Section | Measured | Verdict (per `docs/heart/soak.md`'s own pass/fail criteria) |
+|---|---|---|
+| RSS | first 2.921 → last 2.958 GiB; slope **+1278.4 KiB/hour**; Q1 mean 2.950 vs Q4 mean 2.957 GiB | **PASS** — +1278 KiB/h against a ~2.92 GiB resident baseline extrapolates to ~30 MiB/day; flat, not a climb |
+| Tick duration | overall p50 0.326s / p95 0.334s / max 0.341s; per-hour p95 0.334/0.333/0.332/0.334/0.335/0.333/0.335/0.334s (hours 0–7) | **PASS** — hour 7's p95 (0.334s) is indistinguishable from hour 0's (0.334s); no hour trends slower |
+| Scheduling drift | expected ~31.5s; mean 30.0s, p95 32.0s, max 33.0s | **PASS** — 0 of 959 gaps exceeded 1.5x expected |
+| Circuit breaker | 0 trips, 0 paused samples | **PASS** — stated explicitly: no pause episode occurred during the run |
+| Journal cross-check (re-run at soak scale, issue #60) | 960 `"heart tick completed"` log lines; 500 `GET /heart/journal` rows fetched; 0 mismatches | **PASS** — every fetched row matches its log line exactly (`scripts/heart_journal_smoke_verify.py`, re-run against `docs/heart/soak/2026-10-02-raw/`) |
+
+**Page-cap caveat, restated per #56's own note:** `GET /heart/journal`'s 500-row
+`_MAX_LIMIT` (`api/routes/heart_journal.py`) means the journal-backed cross-check above
+covers only the most recent ~4 hours of this 8-hour run, not all 960 ticks. The full-run
+decision denominator below instead comes directly from the daemon's own `run.log`
+(`"heart tick completed"` lines), which has no such cap.
+
 ## Measured escalate rate and genuine-vs-noise review
 
-**Pending the soak** — see `docs/heart/soak.md` for the procedure. This section is
-filled from the rendered `docs/heart/soak/soak-<date>.md` report's "Decision
-distribution" and "Non-idle journal entries" sections once a multi-hour run
-completes. Placeholder table to fill:
+| Decision | Journal page (500 rows) | % | Full run (`run.log`, 960 ticks) | % | Genuine | Noise |
+|---|---|---|---|---|---|---|
+| idle | 500 | 100.0% | 960 | 100.0% | — | — |
+| act | 0 | 0.0% | 0 | 0.0% | 0 | 0 |
+| escalate | 0 | 0.0% | 0 | 0.0% | 0 | 0 |
 
-| Decision | Count | % | Genuine (manual review) | Noise (manual review) |
-|---|---|---|---|---|
-| idle | — | — | — | — |
-| act | — | — | — | — |
-| escalate | — | — | — | — |
+This section's three open questions, answered:
 
-Open questions this section needs to answer once filled:
-
-- Did any `escalate` fire during a healthy steady state (no injected fault, no
-  observed daemon/database issue)? If so, on what triggering condition (per the
-  journal `note`)?
-- Does the soak's escalate rate roughly match the fixture-measured `self_state_fault`
-  recall (87.5%), or diverge — and if it diverges, in which direction?
-- Were any `escalate` decisions a repeat of the identical condition within the soak
-  window (the "recurring" half of `"strict"`'s counting rule), suggesting a
-  dedup/cooldown gap rather than a correct decision firing repeatedly?
+- **Did any `escalate` fire during a healthy steady state?** No — zero across all 960
+  ticks, both in the fetched journal page and the full `run.log` count. The
+  genuine-vs-noise review is therefore empty by construction: there are no non-idle
+  rows to classify. `docs/heart/soak/soak-2026-10-02.md`'s own "Non-idle journal
+  entries (0)" section agrees.
+- **Does the rate match the fixture-measured `self_state_fault` recall (87.5%)?** The
+  comparison doesn't apply in the direction the question anticipated:
+  `self_state_fault` recall measures behavior on *injected* fault fixtures, and this
+  soak injected none — every tick's `DaemonStateSource` reported a healthy daemon
+  (readiness green, database healthy, zero consecutive failures/overruns) for the
+  entire run, confirmed by zero circuit-breaker trips and exactly one `WARNING` line in
+  1,965 log lines (the expected `security.enabled = false` dev-mode banner logged once
+  at boot). The comparable fixture figure for a healthy run is the `obviously_idle`
+  subset's own gate clause (100% recall, zero false `act`/`escalate`); 960/960 `idle`
+  is consistent with it at roughly 27x the fixture count, with no divergence in the
+  false-positive direction. The true-positive (`self_state_fault`) direction remains
+  untested by this soak — see the verdict's honest limit below.
+- **Any recurring-condition repeats suggesting a dedup gap?** None observable — with
+  zero non-idle decisions there are no repeats to inspect. Recorded as *unmeasured*,
+  not as proven absent.
 
 ## Verdict: wiring `escalate` → `BrainProvider.stream()`
 
-**Pending the soak** — this section's verdict depends directly on the escalate-rate
-review above. Placeholder: **yes / no / not-yet** (circle one once filled), with the
-reasoning that led there. Considerations already in view ahead of the soak's own
-numbers:
+**Yes — safe to wire as-is; no dedup/cooldown rung first.** This is the "yes" branch
+the placeholder itself named for this evidence shape: a healthy multi-hour run with an
+escalate rate at zero, no false escalates, no noisy repeats.
 
-- `BrainProvider.stream()` (issue #12) already exists and is wired into
-  `create_app`'s lifespan independently of the Heart — the *port* is not the open
-  question, whether a tick's `escalate` should call it unconditionally, every time, is.
-- No dedup/cooldown mechanism exists yet (explicitly out of this milestone's scope,
-  per the issue text) — if the soak shows `escalate` firing repeatedly for the
-  identical recurring condition, wiring it straight to the Brain today would mean one
-  real-world fault produces N Brain calls, not one. That would argue for **not-yet**:
-  a dedup/cooldown rung first, then wiring.
-- If the soak's escalate rate over a healthy multi-hour run is at or near zero (no
-  false escalates, no noisy repeats), that argues for **yes**: the signal is clean
-  enough that today's shape (fire on every `escalate` decision) is already safe to
-  wire.
+Reasoning:
+
+- Zero false `escalate` over 960 real ticks / 8.01 h on the actual target hardware, in
+  exactly the healthy steady state the original placeholder's "yes" condition
+  described.
+- A hard upper bound on call volume exists independently of the model's own behavior:
+  `TickLoop` is overlap-guarded (an in-flight flag prevents concurrent ticks) and one
+  tick yields at most one decision, so the 30s cadence caps `BrainProvider.stream()` at
+  ≤120 calls/hour even in a pathological all-`escalate` run. The measured rate here is
+  0.
+- The failure mode a dedup/cooldown rung would most plausibly guard against — a fault
+  recurring tick after tick, each one independently re-escalating — already has a
+  backstop in #54's circuit breaker: `max_consecutive_failures` auto-pauses the loop
+  entirely (`pause_reason` naming the trip), which bounds the worst case regardless of
+  whether a cooldown exists on top.
+- `BrainProvider.stream()` (issue #12) already exists and is wired into `create_app`'s
+  lifespan independently of the Heart — the *port* was never the open question; whether
+  a tick's `escalate` should call it unconditionally, every time, was, and this soak's
+  zero-false-positive result over 8 hours answers that for the signal as currently
+  shaped.
+
+**Honest limit, stated plainly, not hidden:** 960/960 ticks were `idle` — this soak
+exercised only the idle path. The verdict above rests on *zero false positives over 8
+hours*, not on any observed `escalate` behaving well; there is still no real
+`act`/`escalate` ground truth in this corpus. The only evidence that `escalate` fires
+*correctly* when a genuine fault exists remains #54's synthetic 36-fixture
+`self_state_fault` set (87.5% recall, one miss in the safe direction) — a fixture
+snapshot, not a live run. This is also the caveat the corpus-contract/ML-readiness
+work (issue #63) needs for its own assessment. Hand-off for issue #64: wire it, and
+keep dedup/cooldown as a named follow-up to revisit once real non-idle production data
+exists — not a prerequisite to wiring.
 
 ## Open questions for M7
 
-1. (From the escalate-rate review above) Does `escalate` need a dedup/cooldown rung
-   before it can safely reach `BrainProvider.stream()`, or is the current one-shot
-   signal already clean enough?
-2. `GET /heart/tick` does not currently expose the circuit breaker's own counters
+1. **RESOLVED (issue #60).** Does `escalate` need a dedup/cooldown rung before it can
+   safely reach `BrainProvider.stream()`, or is the current one-shot signal already
+   clean enough? **No dedup/cooldown rung needed before wiring** — the 2026-10-02 soak
+   measured a zero escalate rate (0 false positives) over 960 real ticks / 8.01 h, with
+   a hard upper bound on call volume already enforced by the tick cadence and #54's
+   circuit breaker regardless. See "Verdict: wiring `escalate` →
+   `BrainProvider.stream()`" above for the full reasoning and its honest limit (only
+   the idle path was exercised; no real `act`/`escalate` ground truth exists yet).
+2. (New, issue #60) No soak to date has exercised a real `act` or `escalate` decision
+   — all evidence that the decision fires *correctly* under a genuine fault is
+   fixture-based (#54's 36-fixture set), not observed in a live multi-hour run. Once
+   #64 wires `escalate` → `BrainProvider.stream()`, a future soak (or production
+   telemetry, once #61/#62 land) that actually observes non-idle decisions would close
+   this gap and let the genuine-vs-noise review above be re-run against real data.
+3. `GET /heart/tick` does not currently expose the circuit breaker's own counters
    (`failures_total`/`consecutive_failures`/`consecutive_overruns`) — the soak report
    reads them indirectly via `paused`/`paused_reason` plus the daemon's own log.
    Worth a small API addition if an operator ever needs to watch these without log
    access, though nothing in M6 required it.
-3. `RecentJournalSource`'s short-term-memory feed (issue #55) has not yet been
+4. `RecentJournalSource`'s short-term-memory feed (issue #55) has not yet been
    evaluated for whether it measurably changes decision quality one way or the other
    on the Mac Mini — #55's own scope note flagged this as a possible follow-up rather
    than something this milestone re-opens.
-4. The portable, non-Apple-Silicon `HeartRuntime` adapter remains deferred (no
+5. The portable, non-Apple-Silicon `HeartRuntime` adapter remains deferred (no
    non-Apple hardware with a viable GPU was available during M1 or since) — still
    worth flagging as open since M6's whole bench/soak evidence base is MLX-only and
    would need to be re-established for any future adapter.
