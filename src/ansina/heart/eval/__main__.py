@@ -18,12 +18,17 @@ import argparse
 import sys
 from pathlib import Path
 
-from ansina.config import load_settings
+from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
 from ansina.heart.eval.fixtures import load_fixtures
 from ansina.heart.eval.provenance import resolve_provenance
 from ansina.heart.eval.report import gate_result, report_to_json, report_to_markdown
 from ansina.heart.eval.runner import run_bench
+from ansina.heart.eval.storage import (
+    bench_key,
+    build_report_storage,
+    next_available_stem,
+)
 from ansina.heart.selection import build_heart_runtime
 from ansina.heart.tick.prompts import DEFAULT_PROMPT_VARIANT, PROMPT_VARIANTS
 from ansina.logging import configure_logging, get_logger
@@ -74,6 +79,41 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _upload_report_pair(settings: Settings, out_dir: Path, stem: str) -> None:
+    """Issue #59's upload hook. Best-effort: the pair at `stem` is always written
+    locally first (the two `write_text` calls just above this function's one call
+    site, in `main()`) and kept either way — this never deletes or changes what's
+    on disk. Any failure at all — `[telemetry.s3] enabled = false` (the common
+    case, handled as a quiet no-op, not a warning), a missing bucket/bad
+    credentials, an unreachable endpoint, or a real upload error — is logged and
+    swallowed, never raised: this is a bench/gate tool, and a flaky upload must
+    never flip `main()`'s own exit code, the same "fail loudly only for what the
+    caller actually asked for" boundary `heart.models._download_from_hub`'s own
+    broad `except Exception` draws around a third-party failure.
+
+    Lists the bucket first and suffixes (`next_available_stem`) on a same-day,
+    same-model, same-variant collision — the exact local discipline
+    `scripts/remote-heart.sh` already applies to `docs/heart/bench/`, extended to
+    the bucket, so a second run on the same day never silently overwrites the
+    first. Only the *uploaded key* is suffixed; the local files stay named `stem`.
+    """
+    try:
+        storage = build_report_storage(settings.telemetry.s3)
+        if storage is None:
+            return
+        existing = storage.existing_keys("kind=bench/")
+        final_stem = next_available_stem(stem, existing)
+        for suffix in ("md", "json"):
+            storage.upload(
+                out_dir / f"{stem}.{suffix}", bench_key(f"{final_stem}.{suffix}")
+            )
+    except Exception as exc:  # see docstring: best-effort by design, never raises
+        get_logger(__name__).warning(
+            "heart bench: report upload failed",
+            extra={"stem": stem, "error": str(exc)},
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -147,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     stem = f"{date}-{model_slug}-{args.prompt_variant}{template_suffix}"
     (args.out_dir / f"{stem}.md").write_text(report_to_markdown(report, gate=gate))
     (args.out_dir / f"{stem}.json").write_text(report_to_json(report, gate=gate))
+
+    _upload_report_pair(settings, args.out_dir, stem)
 
     logger.info(
         "heart bench: complete",

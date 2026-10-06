@@ -176,7 +176,9 @@ class HeartSettings(BaseModel):
     # (3-way accuracy >= 0.90, 0 false act/escalate on the obviously-idle subset,
     # 0 parse-fallback rate, p95 latency <= 20% of interval_seconds) — measured
     # against `heart.tick.prompts.DEFAULT_PROMPT_VARIANT` ("strict"), 95.8%
-    # accuracy, see `docs/heart/bench/`. Superseded the M1-era placeholder default.
+    # accuracy, see `docs/heart/bench/` (published to the report bucket once
+    # `make heart-bench-publish` has run, issue #59). Superseded the M1-era
+    # placeholder default.
     model_repo: str = "mlx-community/gemma-4-e2b-it-4bit"
     cache_dir: Path = Path("~/.cache/ansina/models")
     # The blueprint's 8k context budget is a hard ceiling, not a target (issue #10) —
@@ -186,11 +188,12 @@ class HeartSettings(BaseModel):
     max_output_tokens: int = Field(default=512, ge=1)
     # Default `True` (issue #53): every model on the bench ladder is chat/instruct-
     # tuned, and a raw (untemplated) prompt measurably makes one continue the prompt
-    # as free text instead of answering it — see `docs/heart/bench/`'s first (no-
-    # template) report, 100% parse-fallback. `MlxHeartRuntime` applies the loaded
-    # tokenizer's own chat template when this is `True` and the tokenizer exposes
-    # one; `False` is the pre-#53 raw-prompt behavior, kept as an escape hatch for a
-    # future base (non-instruct) model.
+    # as free text instead of answering it — see the first (no-template) report,
+    # `2026-09-29-Qwen3.5-2B-MLX-4bit-baseline-notemplate.{md,json}` (bucket key
+    # `kind=bench/dt=2026-09-29/...`, issue #59), 100% parse-fallback.
+    # `MlxHeartRuntime` applies the loaded tokenizer's own chat template when this
+    # is `True` and the tokenizer exposes one; `False` is the pre-#53 raw-prompt
+    # behavior, kept as an escape hatch for a future base (non-instruct) model.
     apply_chat_template: bool = True
     tick: TickSettings = Field(default_factory=TickSettings)
     journal: JournalSettings = Field(default_factory=JournalSettings)
@@ -576,6 +579,62 @@ class CorsSettings(BaseModel):
         return self
 
 
+class S3Settings(BaseModel):
+    """S3-compatible object store for the Heart bench/soak report corpus, consumed by
+    issue #59's `ansina.heart.eval.storage`. Also the one config surface issue #61's
+    telemetry producer and issue #62's Vector-sidecar supervision are expected to
+    read from, so it lives at `[telemetry.s3]`, not nested under `[heart]`.
+
+    `enabled=False` (the default) means `build_report_storage` returns `None` and
+    nothing in `heart/eval/__main__.py`/`heart/eval/publish.py` attempts a network
+    call — same shape as `[heart]`/`[brain]`/`[security.oidc]`/`[security.cors]`.
+
+    Deliberately **no** `model_validator` refusing `enabled=True` with an incomplete
+    config, unlike `OidcSettings`/`CorsSettings` above: issue #59's own AC requires a
+    missing bucket or bad credentials to degrade to a *logged* failure at upload time,
+    never a boot-time `ConfigError` that would make `make heart-bench`'s own gate
+    verdict unreachable. `build_report_storage` is what validates coherence instead.
+
+    "S3-compatible," not "AWS" — `endpoint_url` lets Cloudflare R2 (the M7 lab/
+    acceptance target), MinIO, Backblaze B2, Wasabi, or GCP Cloud Storage's S3/XML
+    interop stand in for AWS S3 itself, the same way `[brain] base_url` already lets
+    any OpenAI-compatible endpoint stand in for OpenAI. Empty string means "use
+    boto3's own default AWS endpoint resolution."
+
+    `access_key_id`/`secret_access_key` are env-only `SecretStr`s, the same hard
+    "secret in `ansina.toml` is a startup error" rule every other Ansina secret
+    follows (enforced generically by `_AnsinaTomlSource`/`_walk_secret_paths`, no new
+    code needed here). Ansina does not fall back to boto3's ambient credential chain
+    (environment/shared-config/instance-profile) — both fields are required together
+    once `enabled=True`, the same "nothing calls `os.getenv` directly" discipline
+    every other subsystem in this codebase follows.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = False
+    bucket: str = ""
+    endpoint_url: str = ""
+    # Cloudflare R2 requires exactly this value; a real AWS deployment overrides it
+    # with a genuine region name.
+    region: str = "auto"
+    key_prefix: str = ""
+    access_key_id: SecretStr | None = None
+    secret_access_key: SecretStr | None = None
+
+
+class TelemetrySettings(BaseModel):
+    """Umbrella for `[telemetry.*]` — currently just the object store. A separate
+    top-level table from `[security]`/`[heart]` since issue #61/#62's own telemetry
+    config (producer sampling, the Vector sidecar) will land as siblings under this
+    same table, not under either of those.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    s3: S3Settings = Field(default_factory=S3Settings)
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -854,6 +913,7 @@ class Settings(BaseSettings):
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     heart: HeartSettings = Field(default_factory=HeartSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:

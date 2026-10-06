@@ -206,11 +206,32 @@ export ANSINA_REMOTE_PATH=<path to the ansina checkout on that host>
 
 It force-syncs that checkout to your current branch's **pushed** HEAD (push first — an unpushed commit aborts the run, naming `git push` as the fix), runs the bench in a tmux session, and copies the report pair back into `docs/heart/bench/`, auto-suffixing (`-2`, `-3`, …) instead of ever overwriting one. `make remote-heart-tail` tails the live log; `make remote-heart-attach` attaches to the tmux session interactively (`tmux attach -t ansina-bench`, via ssh).
 
-`docs/heart/bench/` is gitignored, not committed — a report's raw per-fixture model output has no size ceiling and auto-suffixing means the corpus only ever grows. Reports land there for local analysis only; a follow-up issue adds an S3-compatible upload so the Mac Mini can produce them continuously for later ML analysis without that living in git history.
+`docs/heart/bench/` is gitignored, not committed — a report's raw per-fixture model output has no size ceiling and auto-suffixing means the corpus only ever grows. Reports land there for local analysis regardless; issue #59 adds an S3-compatible upload on top so the Mac Mini can produce them continuously for later ML analysis without that living in git history — see "📦 Report bucket" below.
 
 `make remote-heart-journal-smoke` (issue #55) is the same pattern applied to a different check: it boots the real daemon (not the eval harness) on the Mac Mini with the Heart and tick loop enabled against a scratch database, waits for a few real ticks, fetches `GET /heart/journal`, and verifies every row matches the daemon's own `"heart tick completed"` log line for that tick — in its own tmux session (`ansina-journal-smoke`) so it never collides with a bench run. `-tail`/`-attach` variants mirror `remote-heart`'s own. No report is written to `docs/`; the verdict is printed to the terminal for pasting into a PR.
 
-`make remote-heart-soak-start` (issue #56) runs the same checkout on the Mac Mini for hours, not minutes: the real daemon with the Heart and tick loop enabled, sampled every minute (RSS, tick state) for the soak's whole duration — its own tmux session (`ansina-soak`) so it never collides with the other two. Unlike the drivers above, `start` launches the run and returns immediately rather than blocking `make` on it (an 8-hour run can't sit inside one blocking call); `make remote-heart-soak-status`/`-tail`/`-attach` check on it from any later session, and `make remote-heart-soak-fetch` — once it's finished — fetches the raw data and renders `docs/heart/soak/soak-<date>.md`. See [`docs/heart/soak.md`](docs/heart/soak.md) for the full procedure and how to read a rendered report. Like `docs/heart/bench/`, `docs/heart/soak/` is gitignored, not committed, pending issue #59's S3-compatible upload — the numbers that matter are copied into [`docs/heart/findings.md`](docs/heart/findings.md) instead.
+`make remote-heart-soak-start` (issue #56) runs the same checkout on the Mac Mini for hours, not minutes: the real daemon with the Heart and tick loop enabled, sampled every minute (RSS, tick state) for the soak's whole duration — its own tmux session (`ansina-soak`) so it never collides with the other two. Unlike the drivers above, `start` launches the run and returns immediately rather than blocking `make` on it (an 8-hour run can't sit inside one blocking call); `make remote-heart-soak-status`/`-tail`/`-attach` check on it from any later session, and `make remote-heart-soak-fetch` — once it's finished — fetches the raw data and renders `docs/heart/soak/soak-<date>.md`. See [`docs/heart/soak.md`](docs/heart/soak.md) for the full procedure and how to read a rendered report. Like `docs/heart/bench/`, `docs/heart/soak/` is gitignored, not committed — the numbers that matter are copied into [`docs/heart/findings.md`](docs/heart/findings.md) instead.
+
+### 📦 Report bucket
+
+Issue #59 adds an S3-compatible upload for the bench/soak corpus above — a bucket, not git, is the destination for `docs/heart/bench/`'s and `docs/heart/soak/`'s ever-growing files. `[telemetry.s3] enabled = false` (the default) touches nothing: no client is built, `make heart-bench`/`make remote-heart` behave exactly as before. To turn it on, add the bucket/region/endpoint to `ansina.toml` and the two credentials to `.envrc` (never `ansina.toml` — every Ansina secret is env-only):
+
+```toml
+# ansina.toml
+[telemetry.s3]
+enabled = true
+bucket = "ansina-heart-corpus"
+endpoint_url = "https://<account-id>.r2.cloudflarestorage.com"  # Cloudflare R2 — verified; any S3-compatible endpoint works
+region = "auto"
+```
+
+```bash
+# .envrc (gitignored)
+export ANSINA_TELEMETRY__S3__ACCESS_KEY_ID=<access key id>
+export ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY=<secret access key>
+```
+
+With that in place, `make heart-bench`/`make remote-heart` upload the report pair they just wrote (auto-suffixing the *key* on a same-day collision, mirroring the local never-overwrite discipline above) — a missing bucket, bad credentials, or an unreachable endpoint degrades to a logged warning, never a changed bench exit code. `make heart-bench-publish` is the separate, one-shot backlog migration: it walks `docs/heart/bench/` and `docs/heart/soak/` and uploads whichever files aren't already in the bucket, keyed deterministically (`kind=bench/dt=<date>/<file>`, `kind=soak/dt=<date>/<run_id>/<file>`), so running it again is a verified no-op. `python -m ansina.heart.eval.publish --dry-run` resolves and prints every key with no bucket configured at all, to check the walk before ever touching the network.
 
 ## 🛠️ Development
 
@@ -232,6 +253,7 @@ It force-syncs that checkout to your current branch's **pushed** HEAD (push firs
 | `make remote-heart-soak-status` | Is the soak still running, and how far in? |
 | `make remote-heart-soak-fetch` | Once finished: fetch the raw data and render `docs/heart/soak/soak-<date>.md` |
 | `make remote-heart-soak-tail` / `-attach` / `-stop` | Tail / attach to / end a running soak |
+| `make heart-bench-publish` | Upload every local bench/soak report not already in the report bucket — see "📦 Report bucket" above |
 
 ## 📚 Docs
 

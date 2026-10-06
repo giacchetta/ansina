@@ -133,6 +133,15 @@ remote-heart-soak-attach: ## Attach to the live soak tmux session on the Mac Min
 remote-heart-soak-stop: ## End a running soak early
 	scripts/heart-soak.sh stop
 
+# Issue #59: uploads every local bench/soak report not already in the configured
+# [telemetry.s3] bucket -- running it once is the backlog migration. Not Mac-only
+# (unlike heart-bench/remote-heart, it just mirrors whatever local files exist, no
+# MLX adapter needed) but, like those, performs real network writes, so it's
+# deliberately left out of check/check-all below.
+.PHONY: heart-bench-publish
+heart-bench-publish: ## Upload every local bench/soak report not already in the report bucket (see [telemetry.s3])
+	$(UV) run --extra s3 python -m ansina.heart.eval.publish $(ARGS)
+
 .PHONY: check
 check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs
 

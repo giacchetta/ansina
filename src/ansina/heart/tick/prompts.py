@@ -34,18 +34,23 @@ Reply with exactly one word: idle, act, or escalate.
 # before its actual answer, which `heart.tick.decision.parse_decision` would otherwise
 # misread as an unparseable reply and silently default to `idle`.
 #
-# Issue #54's act/escalate rule was sharpened on the real Mac Mini M4 (see
-# `docs/heart/bench/2026-09-30-gemma-4-e2b-it-4bit-strict-preimprovement.{md,json}` for
-# the "before" evidence): #53's original wording ("act: something needs attention and
-# you can handle it yourself" / "escalate: ... beyond your capability") left the model
-# with no way to judge severity once #54's daemon-self-state fixtures gave it real,
-# nameable conditions to weigh against each other, and it broke toward "escalate" on
-# several single, routine issues (80.6% accuracy, gate FAIL). The rule below keeps
-# #53's original capability-based clause (still needed for e.g. "a critical CVE was
-# just disclosed" — a single item, but a judgment call) and adds an explicit counting
+# Issue #54's act/escalate rule was sharpened on the real Mac Mini M4 (see the
+# "before" evidence — `kind=bench/dt=2026-09-30/2026-09-30-gemma-4-e2b-it-4bit-
+# strict-preimprovement.{md,json}` in the report bucket, issue #59; `docs/heart/
+# bench/` is gitignored, so that bucket key, not a local path, is the resolvable
+# reference once `make heart-bench-publish` has run): #53's original wording
+# ("act: something needs attention and you can handle it yourself" / "escalate:
+# ... beyond your capability") left the model with no way to judge severity once
+# #54's daemon-self-state fixtures gave it real, nameable conditions to weigh
+# against each other, and it broke toward "escalate" on several single, routine
+# issues (80.6% accuracy, gate FAIL). The rule below keeps #53's original
+# capability-based clause (still needed for e.g. "a critical CVE was just
+# disclosed" — a single item, but a judgment call) and adds an explicit counting
 # heuristic on top: exactly one routine problem is `act`, two or more simultaneous
-# problems (or one that keeps recurring despite retries) is `escalate`. Re-measured at
-# 97.2% accuracy, gate PASS — see the plain-named report in the same directory.
+# problems (or one that keeps recurring despite retries) is `escalate`. Re-measured
+# at 97.2% accuracy, gate PASS — see the plain-named report at the same bucket key
+# (no `-preimprovement` suffix), or `docs/heart/findings.md` for the numbers either
+# way.
 _STRICT = """\
 Task: classify the current state as exactly one of idle, act, escalate.
 
@@ -96,7 +101,9 @@ PROMPT_VARIANTS: Mapping[str, str] = MappingProxyType(
     }
 )
 
-# Issue #53's bench (`docs/heart/bench/`) benched all three variants against the
+# Issue #53's bench (`docs/heart/bench/`, published to the report bucket as of
+# issue #59 — see that issue's own `heart/eval/` AGENTS.md entry) benched all
+# three variants against the
 # smallest ladder rung and carried the winner up the ladder: "strict" beat
 # "baseline" (75% vs. 62.5% accuracy) and "fewshot" (50%) there, and is the variant
 # actually used by the gate-clearing `HeartSettings.model_repo` default above —

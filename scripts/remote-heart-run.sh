@@ -13,6 +13,16 @@ cd "$(dirname "$0")/.."
 
 mkdir -p /tmp/ansina-heart-bench/reports
 
+# `tmux new-session -d` spawns through the tmux *server*'s own environment, not the
+# `ssh`/`zsh -lc` client env `remote-heart.sh` ran in — so issue #59's
+# ANSINA_TELEMETRY__S3__* credentials would otherwise never reach this process even
+# though the local .envrc has them. .envrc is gitignored and survives
+# remote-heart.sh's own `git clean -fd` (see .gitignore), so sourcing it here (if
+# present on this host) is the one place that gap closes — not a "no env tampering"
+# violation (.agents/guardrails/forbidden-actions.md): this reads a file the human
+# already placed on this host, never writes or edits one.
+[ -f .envrc ] && . ./.envrc
+
 {
     git log -1 --format='benching %h (%s)'
     make heart-bench-sync

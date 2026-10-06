@@ -120,8 +120,11 @@ can't, and deferring a real finding back into a vague TODO defeats that purpose.
 `docs/heart/soak/` is gitignored, not committed — the same decision #58 made for
 `docs/heart/bench/`, for the same reason: a soak's raw `samples.jsonl` plus `run.log`
 can run to hundreds of KiB to low MiB per run, and a corpus that only ever grows
-belongs in an object store, not git history. **Issue #59** (S3-compatible upload,
-currently blocked on #58 and parked in the Backlog milestone) is the intended
-destination; until it lands, `make remote-heart-soak-fetch` writes here for local
-analysis only, and the numbers that matter are copied into
-`docs/heart/findings.md` (committed) and the PR that lands this work.
+belongs in an object store, not git history. **Issue #59** gives it exactly that: set
+`[telemetry.s3]` in `ansina.toml` (bucket/endpoint/region) plus the two
+`ANSINA_TELEMETRY__S3__*` credentials in `.envrc`, then run `make heart-bench-publish`
+to upload every soak artifact set here (and every bench report in `docs/heart/bench/`)
+not already in the bucket — a verified no-op on a second run. With `[telemetry.s3]`
+left disabled (the default), `make remote-heart-soak-fetch` writes here for local
+analysis only, and the numbers that matter are copied into `docs/heart/findings.md`
+(committed) and the PR that lands this work either way.

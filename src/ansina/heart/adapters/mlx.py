@@ -111,9 +111,10 @@ class MlxHeartRuntime(BaseHeartRuntime):
         chat template (issue #53) — every model on the bench ladder is chat/
         instruct-tuned, and a raw, untemplated prompt measurably makes one continue
         the prompt as free text rather than answer it (100% parse-fallback on the
-        first real bench run, `docs/heart/bench/`'s earliest report). A tokenizer
-        with no `apply_chat_template` (or `HeartSettings.apply_chat_template =
-        False`, the escape hatch for a future base/non-instruct model) falls back to
+        first real bench run, `docs/heart/bench/`'s earliest report — published to
+        the report bucket as of issue #59, `kind=bench/dt=2026-09-29/...`). A
+        tokenizer with no `apply_chat_template` (or `HeartSettings.apply_chat_template
+        = False`, the escape hatch for a future base/non-instruct model) falls back to
         the raw prompt unchanged — the pre-#53 behavior.
 
         Also passes `enable_thinking=False` (the Qwen3-family template's own kwarg to

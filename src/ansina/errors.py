@@ -84,3 +84,13 @@ class AuthError(AnsinaError):
     """The RBAC identity/permission layer rejected an operation. See `ansina.auth`."""
 
     code: ClassVar[str] = "ansina.auth.error"
+
+
+class TelemetryError(AnsinaError):
+    """A telemetry/object-store operation failed. See `ansina.heart.eval.storage`
+    (issue #59) — shared here, not kept local to that module, since issue #61's
+    telemetry producer and issue #62's Vector-sidecar supervision are expected to
+    raise against the same `[telemetry]` config surface.
+    """
+
+    code: ClassVar[str] = "ansina.telemetry.error"

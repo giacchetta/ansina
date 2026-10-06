@@ -329,3 +329,41 @@ max_age_seconds = 600
 # No allow_credentials setting exists: Ansina authenticates with an Authorization
 # header, never a cookie, so there is nothing for a credentialed CORS mode to
 # protect -- it would only add CSRF surface for no benefit.
+
+[telemetry.s3]
+# S3-compatible object store for the Heart bench/soak report corpus (issue #59) --
+# the destination `make heart-bench`/`make remote-heart`/`make heart-bench-publish`
+# upload reports to, instead of (or in addition to) the gitignored
+# docs/heart/bench/ and docs/heart/soak/ directories. false (the default) means
+# none of make heart-bench/make remote-heart's own behavior changes at all -- no
+# client is built, no network call is attempted.
+enabled = false
+
+# The bucket name. Required when enabled = true -- a missing/invalid value
+# degrades to a logged upload failure at bench time, never a boot-time error and
+# never a changed bench exit code (the gate verdict is what matters to a
+# CI-adjacent caller; the upload itself is best-effort).
+bucket = ""
+
+# "S3-compatible," not "AWS": point this at any S3-compatible endpoint --
+# Cloudflare R2 (the verified M7 target), MinIO, Backblaze B2, Wasabi, or GCP
+# Cloud Storage's S3/XML interop (verify, don't assume -- its multipart behavior
+# differs from AWS's, though this module never needs multipart). Leave empty for
+# boto3's own default AWS endpoint resolution.
+endpoint_url = ""
+
+# Cloudflare R2 requires exactly "auto"; a real AWS deployment overrides this with
+# a genuine region name (e.g. "us-east-1").
+region = "auto"
+
+# Every uploaded key is prefixed with this (plus a trailing slash), e.g.
+# "ansina-prod" -> "ansina-prod/kind=bench/dt=2026-10-06/...". Empty means no
+# prefix -- keys start directly at "kind=bench/..."/"kind=soak/...".
+key_prefix = ""
+
+# access_key_id / secret_access_key, like every secret, are env-only -- setting
+# either in this file is a hard startup error. Both are required together when
+# enabled = true (Ansina never falls back to boto3's own ambient AWS credential
+# chain):
+#   ANSINA_TELEMETRY__S3__ACCESS_KEY_ID=...
+#   ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY=...

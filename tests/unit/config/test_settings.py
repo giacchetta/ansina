@@ -73,6 +73,13 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.brain.retry_max_backoff_seconds == 30.0
     assert settings.brain.price_per_1m_input_tokens is None
     assert settings.brain.price_per_1m_output_tokens is None
+    assert settings.telemetry.s3.enabled is False
+    assert settings.telemetry.s3.bucket == ""
+    assert settings.telemetry.s3.endpoint_url == ""
+    assert settings.telemetry.s3.region == "auto"
+    assert settings.telemetry.s3.key_prefix == ""
+    assert settings.telemetry.s3.access_key_id is None
+    assert settings.telemetry.s3.secret_access_key is None
 
 
 def test_toml_overrides_defaults(clean_env: None, tmp_cwd: Path) -> None:
@@ -1060,3 +1067,83 @@ def test_cors_settings_disabled_accepts_empty_origins_directly() -> None:
 
     assert settings.enabled is False
     assert settings.allowed_origins == ()
+
+
+# --- issue #59: [telemetry.s3] --------------------------------------------------
+
+
+def test_telemetry_s3_secret_in_toml_file_rejected(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[telemetry.s3]\naccess_key_id = "leaked-key-id"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_TELEMETRY__S3__ACCESS_KEY_ID" in message
+    assert "leaked-key-id" not in message
+
+
+def test_telemetry_s3_secret_access_key_in_toml_file_rejected(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[telemetry.s3]\nsecret_access_key = "leaked-secret"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY" in message
+    assert "leaked-secret" not in message
+
+
+def test_telemetry_s3_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__BUCKET", "ansina-heart-corpus")
+    monkeypatch.setenv(
+        "ANSINA_TELEMETRY__S3__ENDPOINT_URL",
+        "https://abc123.r2.cloudflarestorage.com",
+    )
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__REGION", "auto")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__KEY_PREFIX", "prod")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__ACCESS_KEY_ID", "AKIAEXAMPLE")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY", "s3cr3t-value")
+
+    settings = load_settings()
+
+    s3 = settings.telemetry.s3
+    assert s3.enabled is True
+    assert s3.bucket == "ansina-heart-corpus"
+    assert s3.endpoint_url == "https://abc123.r2.cloudflarestorage.com"
+    assert s3.region == "auto"
+    assert s3.key_prefix == "prod"
+    assert s3.access_key_id is not None
+    assert s3.access_key_id.get_secret_value() == "AKIAEXAMPLE"
+    assert s3.secret_access_key is not None
+    assert s3.secret_access_key.get_secret_value() == "s3cr3t-value"
+    assert "s3cr3t-value" not in repr(settings)
+    assert "s3cr3t-value" not in str(settings)
+
+
+def test_telemetry_s3_enabled_with_no_bucket_still_loads(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #59 AC: a missing/invalid `[telemetry.s3]` config must degrade to a
+    *logged upload failure*, never a boot-time `ConfigError` — unlike
+    `OidcSettings`/`CorsSettings`, `S3Settings` has no `enabled=True`-requires-X
+    `model_validator`. `heart.eval.storage.build_report_storage` is what validates
+    coherence instead, at upload time.
+    """
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__ENABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.telemetry.s3.enabled is True
+    assert settings.telemetry.s3.bucket == ""

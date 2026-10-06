@@ -76,9 +76,12 @@ once #54 gave it real, nameable fault conditions to judge, and it broke toward
 `escalate` on several single, routine issues. Before the fix: 80.56% accuracy (gate
 FAIL), driven by weak `self_state` (50.0%) and `self_state_fault` (37.5%) recall —
 see `docs/heart/soak.md`'s sibling evidence,
-`docs/heart/bench/2026-09-30-gemma-4-e2b-it-4bit-strict-preimprovement.{md,json}`
-(gitignored as of #58, kept on this machine; the numbers are reproduced here since
-the file itself isn't committed). The fix kept `"strict"`'s original capability-based
+`2026-09-30-gemma-4-e2b-it-4bit-strict-preimprovement.{md,json}` (gitignored as of
+#58, and as of #59 published to the report bucket at
+`kind=bench/dt=2026-09-30/2026-09-30-gemma-4-e2b-it-4bit-strict-preimprovement.
+{md,json}` once `make heart-bench-publish` has run; the numbers are reproduced here
+regardless, since neither the local file nor the bucket is guaranteed present in
+every clone). The fix kept `"strict"`'s original capability-based
 clause and added an explicit counting rule: one routine problem is `act`, two or more
 simultaneous problems (or one that keeps recurring despite retries) is `escalate`.
 Re-measured at 97.2% accuracy, gate PASS, reproduced three times (see "Chosen model"
