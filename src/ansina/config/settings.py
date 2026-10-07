@@ -624,15 +624,83 @@ class S3Settings(BaseModel):
 
 
 class TelemetrySettings(BaseModel):
-    """Umbrella for `[telemetry.*]` — currently just the object store. A separate
-    top-level table from `[security]`/`[heart]` since issue #61/#62's own telemetry
-    config (producer sampling, the Vector sidecar) will land as siblings under this
-    same table, not under either of those.
+    """Umbrella for `[telemetry.*]`: the object store (`s3`, issue #59) plus the
+    flag-gated local producer (issue #61, `ansina.telemetry`) — a continuous,
+    file-only RSS/tick/decision sample stream plus a redacted log mirror, both
+    bounded by the same three-way budget below. `enabled = false` (the default) is
+    a byte-for-byte no-op: no spool directory is created, no log-mirror handler is
+    attached (`ansina.logging.setup.configure_logging`), and no sampling loop starts
+    (`ansina.api.app.create_app`) — same "off means nothing happens" shape
+    `[heart]`/`[security.oidc]`/`[security.cors]` already use. Issue #62's Vector
+    sidecar config will land as a further sibling under this same table, not under
+    `[security]`/`[heart]`.
+
+    Telemetry never writes to SQLite and never uploads anything itself (that's
+    issue #62's sidecar and `s3`'s own `heart.eval.storage`/`heart.eval.publish`) —
+    files only, and strictly local.
     """
 
-    model_config = _MODEL_CONFIG
+    # `validate_default=True` (unlike the shared `_MODEL_CONFIG`) so the *default*
+    # `spool_dir` goes through `_resolve_spool_dir` too — same reasoning
+    # `DatabaseSettings`/`HeartSettings` already document for their own paths.
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    enabled: bool = False
+
+    # Where rotated sample/log files are written. Never created by this settings
+    # model itself (only resolved to an absolute path) — `enabled = false` must
+    # create nothing, so the directory is only ever made lazily, by
+    # `ansina.telemetry.rotation.SpooledRotatingWriter`'s own first write, and only
+    # when something is actually enabled to write.
+    spool_dir: Path = Path("~/.local/state/ansina/telemetry")
+
+    # Matches `scripts/heart-soak-run.sh`'s own sampling cadence (issue #56).
+    sample_interval_seconds: float = Field(default=60.0, gt=0)
+
+    # Per rotated-file-family budget (one family for samples, one for the log
+    # mirror — see `ansina.telemetry.rotation`'s own module docstring for why each
+    # family is bounded independently rather than sharing one combined pool).
+    # 1 MiB/file, 100 MiB/family total, 7 days — generous headroom against the
+    # issue's own measured ~15 MB/week combined real rate, against a 10 GB/week
+    # target ceiling.
+    max_file_bytes: int = Field(default=1_048_576, gt=0)
+    max_spool_bytes: int = Field(default=104_857_600, gt=0)
+    # Independent of `max_spool_bytes`, mirroring `LoginAttemptRepository.
+    # delete_expired`'s own two-cutoffs reasoning: nothing guarantees one bound is
+    # tighter than the other, so a file failing either test is deleted.
+    retention_hours: int = Field(default=168, ge=1)
 
     s3: S3Settings = Field(default_factory=S3Settings)
+
+    @field_validator("spool_dir")
+    @classmethod
+    def _resolve_spool_dir(cls, value: Path) -> Path:
+        """Same `~`-expand-and-anchor-to-CWD treatment as
+        `DatabaseSettings._resolve_path`/`HeartSettings._resolve_paths`.
+        """
+        return value.expanduser().resolve()
+
+    @model_validator(mode="after")
+    def _validate_file_fits_in_spool(self) -> TelemetrySettings:
+        """A rotated file that could never fit under its own family's total cap is
+        a configuration error, not something to discover later at rotation time —
+        the same "fail loudly, don't discover this on the first real request"
+        reasoning `CorsSettings`/`OidcSettings` already apply to their own
+        enabled-requires-coherent-config checks. Raised directly (not `ValueError`):
+        a model-level check with no single field `loc`, same pattern those two use.
+        """
+        if self.max_file_bytes > self.max_spool_bytes:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "telemetry.max_file_bytes: must be <= "
+                        "telemetry.max_spool_bytes (got "
+                        f"max_file_bytes={self.max_file_bytes}, "
+                        f"max_spool_bytes={self.max_spool_bytes})"
+                    ]
+                )
+            )
+        return self
 
 
 class SecuritySettings(BaseModel):

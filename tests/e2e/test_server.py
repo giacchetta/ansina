@@ -1534,3 +1534,76 @@ def test_shuts_down_cleanly(tmp_path: Path) -> None:
     assert process.returncode == -signal.SIGTERM
     output = process.stdout.read() if process.stdout else ""
     assert "Traceback" not in output
+
+
+def test_telemetry_disabled_by_default_creates_no_spool_directory(
+    tmp_path: Path,
+) -> None:
+    """AC: `[telemetry] enabled = false` (the default) is byte-for-byte a no-op —
+    proven here as a real subprocess boot (`python -m ansina`), not just
+    `create_app`/`configure_logging` called in isolation the way the unit suite
+    exercises them.
+    """
+    spool_dir = tmp_path / "telemetry-spool"
+    with _launch_server(
+        tmp_path, env={"ANSINA_TELEMETRY__SPOOL_DIR": str(spool_dir)}
+    ) as srv:
+        response = httpx.get(f"{srv.base_url}/healthz")
+        assert response.status_code == 200
+
+    assert not spool_dir.exists()
+
+
+def test_telemetry_enabled_produces_sample_and_log_files(tmp_path: Path) -> None:
+    """Issue #61's whole producer pipeline, end to end: `python -m ansina`'s real
+    boot sequence (`configure_logging` then `create_app`, exactly as `__main__.main`
+    runs them together — the unit suite only ever calls each in isolation) must
+    actually create both rotated families, with the documented sample schema, and
+    the mirrored log must not leak the configured admin's own token.
+    """
+    spool_dir = tmp_path / "telemetry-spool"
+    with _launch_server(
+        tmp_path,
+        env={
+            "ANSINA_TELEMETRY__ENABLED": "true",
+            "ANSINA_TELEMETRY__SPOOL_DIR": str(spool_dir),
+            "ANSINA_TELEMETRY__SAMPLE_INTERVAL_SECONDS": "0.2",
+            "ANSINA_SECURITY__ADMIN_USERNAME": _E2E_ADMIN_USERNAME,
+            "ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN,
+        },
+    ) as srv:
+        samples_path = spool_dir / "samples.jsonl"
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if samples_path.exists() and samples_path.read_text().strip():
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("samples.jsonl never appeared with content within 5s")
+
+        process = srv.process
+
+    sample = json.loads(samples_path.read_text().splitlines()[0])
+    for key in (
+        "t",
+        "elapsed_s",
+        "rss_kib",
+        "ticks",
+        "paused",
+        "paused_reason",
+        "last_decision",
+        "last_duration_seconds",
+        "failures_total",
+        "consecutive_failures",
+        "consecutive_overruns",
+    ):
+        assert key in sample
+
+    log_path = spool_dir / "log.jsonl"
+    assert log_path.exists()
+    log_content = log_path.read_text()
+    assert json.loads(log_content.splitlines()[0])["message"]  # real JSON lines
+    assert _E2E_TOKEN not in log_content
+
+    output = process.stdout.read() if process.stdout else ""
+    assert _E2E_TOKEN not in output

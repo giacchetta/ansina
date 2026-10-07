@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import logging.config
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ansina.logging.redaction import register_secret
 
@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from ansina.config import Settings
 
 _HANDLER_NAME = "ansina.json"
+# Issue #61: the optional log-mirror handler's name — only ever added to `root.
+# handlers` when `settings.telemetry.enabled`.
+_TELEMETRY_HANDLER_NAME = "ansina.telemetry.log_mirror"
 
 
 def configure_logging(settings: Settings) -> None:
@@ -26,11 +29,42 @@ def configure_logging(settings: Settings) -> None:
     handler, so no log call can reach a sink before the real configured secret is
     masked. Safe to call more than once — `dictConfig` replaces the root logger's
     handlers wholesale each time rather than accumulating duplicates.
+
+    Issue #61: when `settings.telemetry.enabled`, a second handler
+    (`ansina.telemetry.log_mirror.TelemetryLogHandler`) is added, mirroring every
+    record to a rotated file under `settings.telemetry.spool_dir` — through the
+    *same* `"json"` formatter entry as the primary handler (`dictConfig`
+    instantiates one formatter instance per name and shares it across every
+    handler naming it), so the mirror's redaction can never diverge from the
+    primary stream's. `settings.telemetry.enabled = false` (the default) adds
+    nothing at all — the same "no-op when off" shape `[heart]`/`[security.oidc]`
+    already use.
     """
     if settings.security.api_token is not None:
         register_secret(settings.security.api_token.get_secret_value())
     if settings.brain.api_key is not None:
         register_secret(settings.brain.api_key.get_secret_value())
+
+    handlers: dict[str, Any] = {
+        _HANDLER_NAME: {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+            "stream": "ext://sys.stderr",
+        },
+    }
+    root_handler_names = [_HANDLER_NAME]
+
+    telemetry = settings.telemetry
+    if telemetry.enabled:
+        handlers[_TELEMETRY_HANDLER_NAME] = {
+            "()": "ansina.telemetry.log_mirror.TelemetryLogHandler",
+            "formatter": "json",
+            "spool_dir": str(telemetry.spool_dir),
+            "max_file_bytes": telemetry.max_file_bytes,
+            "max_spool_bytes": telemetry.max_spool_bytes,
+            "retention_hours": telemetry.retention_hours,
+        }
+        root_handler_names.append(_TELEMETRY_HANDLER_NAME)
 
     logging.config.dictConfig(
         {
@@ -39,16 +73,10 @@ def configure_logging(settings: Settings) -> None:
             "formatters": {
                 "json": {"()": "ansina.logging.formatter.JsonFormatter"},
             },
-            "handlers": {
-                _HANDLER_NAME: {
-                    "class": "logging.StreamHandler",
-                    "formatter": "json",
-                    "stream": "ext://sys.stderr",
-                },
-            },
+            "handlers": handlers,
             "root": {
                 "level": settings.logging.level,
-                "handlers": [_HANDLER_NAME],
+                "handlers": root_handler_names,
             },
         }
     )

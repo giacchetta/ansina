@@ -31,7 +31,8 @@ from ansina.brain.selection import BrainUnavailableError
 from ansina.config import Settings, load_settings
 from ansina.errors import StorageError
 from ansina.heart.runtime import BaseHeartRuntime, HeartRuntime, HeartUnavailableError
-from ansina.heart.tick.loop import TickLifecycle, TickLoop
+from ansina.heart.tick.decision import TickDecision
+from ansina.heart.tick.loop import TickController, TickLoop
 from ansina.storage import Database
 
 
@@ -78,9 +79,27 @@ class _FakeBrainProvider:
 
 
 class _StubTickLoop:
-    """A minimal `TickLifecycle` double for tests that only care about what
-    `tick_loop_factory` was called with, not what the returned loop does.
+    """A minimal `TickController` double for tests that only care about what
+    `tick_loop_factory` was called with, not what the returned loop does. Every
+    field is a fixed dummy — nothing here exercises any of them.
     """
+
+    paused = False
+    pause_reason: str | None = None
+    ticks_run = 0
+    last_decision: TickDecision | None = None
+    last_tick_at: str | None = None
+    last_duration_seconds: float | None = None
+    # Issue #61 widened `TickController` with these three.
+    failures_total = 0
+    consecutive_failures = 0
+    consecutive_overruns = 0
+
+    def pause(self, *, reason: str | None = None) -> None:
+        pass
+
+    def resume(self) -> None:
+        pass
 
     def is_healthy(self) -> bool:
         return True
@@ -159,7 +178,7 @@ def test_tick_loop_factory_not_called_when_heart_disabled(
 ) -> None:
     def _factory(
         _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
-    ) -> TickLifecycle:
+    ) -> TickController:
         pytest.fail("tick_loop_factory must not be called when heart.enabled is False")
 
     app = create_app(load_settings(), tick_loop_factory=_factory)
@@ -175,7 +194,7 @@ def test_tick_loop_factory_not_called_when_tick_disabled(
 
     def _factory(
         _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
-    ) -> TickLifecycle:
+    ) -> TickController:
         pytest.fail(
             "tick_loop_factory must not be called when heart.tick.enabled is False"
         )
@@ -209,6 +228,22 @@ def test_tick_loop_started_after_heart_loads_and_stopped_before_heart_unloads(
             super()._unload_backend()
 
     class _RecordingTickLoop:
+        paused = False
+        pause_reason: str | None = None
+        ticks_run = 0
+        last_decision: TickDecision | None = None
+        last_tick_at: str | None = None
+        last_duration_seconds: float | None = None
+        failures_total = 0
+        consecutive_failures = 0
+        consecutive_overruns = 0
+
+        def pause(self, *, reason: str | None = None) -> None:
+            pass
+
+        def resume(self) -> None:
+            pass
+
         def is_healthy(self) -> bool:
             return True
 
@@ -244,7 +279,7 @@ def test_tick_loop_factory_receives_the_apps_own_db_and_readiness(
 
     def _factory(
         _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
-    ) -> TickLifecycle:
+    ) -> TickController:
         received["db"] = db
         received["readiness"] = readiness
         return _StubTickLoop()
@@ -319,6 +354,137 @@ def test_brain_enabled_independent_of_heart(
 
     assert app.state.heart is None
     assert app.state.brain is not None
+
+
+class _StubTelemetrySampler:
+    """A minimal `TelemetrySamplerLifecycle` double — only `is_healthy`/`start`/
+    `stop` matter to `create_app`'s own lifespan ordering.
+    """
+
+    def __init__(self) -> None:
+        self._started = False
+        self._stopped = False
+
+    def is_healthy(self) -> bool:
+        return self._started and not self._stopped
+
+    async def start(self) -> None:
+        self._started = True
+
+    async def stop(self) -> None:
+        self._stopped = True
+
+
+def test_telemetry_disabled_by_default_no_state(app: FastAPI) -> None:
+    assert app.state.telemetry is None
+
+
+def test_telemetry_factory_not_called_when_disabled(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    def _factory(_settings: Settings, /, *, tick: object) -> _StubTelemetrySampler:
+        pytest.fail(
+            "telemetry_factory must not be called when telemetry.enabled is False"
+        )
+
+    app = create_app(load_settings(), telemetry_factory=_factory)
+
+    assert app.state.telemetry is None
+
+
+def test_telemetry_factory_called_independently_of_heart_being_disabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #61: telemetry sampling is gated by `telemetry.enabled` alone — an
+    operator may want RSS/uptime telemetry on a daemon with the Heart disabled.
+    """
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    settings = load_settings()
+    received: dict[str, object] = {}
+
+    def _factory(_settings: Settings, /, *, tick: object) -> _StubTelemetrySampler:
+        received["tick"] = tick
+        return _StubTelemetrySampler()
+
+    app = create_app(settings, telemetry_factory=_factory)
+
+    assert app.state.heart is None
+    assert received["tick"] is None
+    assert app.state.telemetry is not None
+
+
+def test_telemetry_factory_receives_the_real_tick_loop_when_heart_is_enabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    settings = load_settings()
+    received: dict[str, object] = {}
+
+    def _tick_factory(
+        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+    ) -> TickController:
+        return _StubTickLoop()
+
+    def _telemetry_factory(
+        _settings: Settings, /, *, tick: object
+    ) -> _StubTelemetrySampler:
+        received["tick"] = tick
+        return _StubTelemetrySampler()
+
+    create_app(
+        settings,
+        heart_factory=lambda _settings: _FakeHeartRuntime(),
+        tick_loop_factory=_tick_factory,
+        telemetry_factory=_telemetry_factory,
+    )
+
+    assert isinstance(received["tick"], _StubTickLoop)
+
+
+def test_telemetry_started_after_heart_and_stopped_before_it(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    settings = load_settings()
+    events: list[str] = []
+
+    class _OrderedHeart(_FakeHeartRuntime):
+        def _load_backend(self) -> None:
+            events.append("heart_load")
+            super()._load_backend()
+
+        def _unload_backend(self) -> None:
+            events.append("heart_unload")
+            super()._unload_backend()
+
+    class _RecordingTelemetrySampler:
+        def is_healthy(self) -> bool:
+            return True
+
+        async def start(self) -> None:
+            events.append("telemetry_start")
+
+        async def stop(self) -> None:
+            events.append("telemetry_stop")
+
+    app = create_app(
+        settings,
+        heart_factory=lambda _settings: _OrderedHeart(),
+        tick_loop_factory=lambda _settings, _heart, **_kwargs: _StubTickLoop(),
+        telemetry_factory=lambda _settings, /, **_kwargs: _RecordingTelemetrySampler(),
+    )
+
+    with TestClient(app):
+        pass
+
+    assert events == [
+        "heart_load",
+        "telemetry_start",
+        "telemetry_stop",
+        "heart_unload",
+    ]
 
 
 def test_oidc_disabled_by_default_no_state(app: FastAPI) -> None:

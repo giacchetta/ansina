@@ -64,13 +64,18 @@ from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
 from ansina.heart import (
     HeartRuntime,
-    TickLifecycle,
+    TickController,
     TickLoopFactory,
     build_heart_runtime,
     build_tick_loop,
 )
 from ansina.logging import get_logger
 from ansina.storage import Database, run_migrations
+from ansina.telemetry.sampler import (
+    TelemetrySamplerFactory,
+    TelemetrySamplerLifecycle,
+    build_telemetry_sampler,
+)
 
 logger = get_logger(__name__)
 
@@ -84,6 +89,7 @@ def create_app(
     oidc_factory: Callable[
         [Database, Settings], OidcLoginService | None
     ] = build_oidc_login_service,
+    telemetry_factory: TelemetrySamplerFactory = build_telemetry_sampler,
 ) -> FastAPI:
     """Build the FastAPI application. Loads `Settings` via `load_settings()` when none
     is given — tests and `python -m ansina` both pass an already-loaded one instead, so
@@ -108,6 +114,13 @@ def create_app(
     first use — and, unlike both, is never gated by an external `if .enabled:` here:
     `build_oidc_login_service` already returns `None` internally, so tests can inject
     a factory that swaps in a fake `OidcHttpClient` without duplicating that check.
+    `telemetry_factory` (default `ansina.telemetry.sampler.build_telemetry_sampler`,
+    issue #61) is gated by `telemetry.enabled` alone, independently of
+    `heart.enabled`/`heart.tick.enabled` — an operator may want RSS/uptime telemetry
+    on a daemon with the Heart disabled, so `tick_loop` (possibly `None`) is passed
+    straight through rather than this factory being skipped whenever the Heart is
+    off. `app.state.telemetry` is `None` when `telemetry.enabled` is `False` (the
+    default) — the same "`None` when off" shape `heart`/`brain`/`oidc` already use.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
@@ -140,7 +153,7 @@ def create_app(
     if resolved_settings.heart.enabled:
         heart = heart_factory(resolved_settings)
 
-    tick_loop: TickLifecycle | None = None
+    tick_loop: TickController | None = None
     if heart is not None and resolved_settings.heart.tick.enabled:
         tick_loop = tick_loop_factory(
             resolved_settings, heart, db=db, readiness=readiness
@@ -152,6 +165,15 @@ def create_app(
     brain: BrainProvider | None = None
     if resolved_settings.brain.enabled:
         brain = brain_factory(resolved_settings)
+
+    # Issue #61: independent of `heart.enabled` — see `create_app`'s own docstring
+    # above. Built here (never inside `lifespan`), the same "assemble up front"
+    # shape `heart`/`tick_loop`/`brain` already use, though unlike those three this
+    # never raises at construction time (see `build_telemetry_sampler`'s own
+    # docstring) — a bad `spool_dir` only ever fails an individual sample write.
+    telemetry: TelemetrySamplerLifecycle | None = None
+    if resolved_settings.telemetry.enabled:
+        telemetry = telemetry_factory(resolved_settings, tick=tick_loop)
 
     if not resolved_settings.security.enabled:
         logger.warning(
@@ -202,11 +224,22 @@ def create_app(
         # for a remote provider is a real network round-trip, and paying for one on
         # every `/readyz` poll is the wrong trade. `brain is not None` already tells an
         # operator whether it's configured; issue #12 doesn't ask for more than that.
+        # Issue #61: started last, after the heart/tick-loop block — it only ever
+        # *observes* `tick_loop`'s state, so there's no reason to start it before
+        # there's anything meaningful to observe. No `/readyz` check either, the same
+        # "not asked for, not worth it" reasoning as the Brain's own omission above.
+        if telemetry is not None:
+            await telemetry.start()
         readiness.register("startup", lambda: True)
         try:
             yield
         finally:
             logger.info("ansina shutting down")
+            # Stopped first (LIFO: last started, first stopped) — the same "stop the
+            # observer before the thing it observes" reasoning already governing
+            # `brain.aclose()`'s position relative to `heart.unload()` below.
+            if telemetry is not None:
+                await telemetry.stop()
             if tick_loop is not None:
                 await tick_loop.stop()
             if heart is not None:
@@ -239,6 +272,7 @@ def create_app(
     app.state.sudo = sudo
     app.state.login_throttle = login_throttle
     app.state.oidc = oidc
+    app.state.telemetry = telemetry
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware

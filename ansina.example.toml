@@ -330,6 +330,38 @@ max_age_seconds = 600
 # header, never a cookie, so there is nothing for a credentialed CORS mode to
 # protect -- it would only add CSRF surface for no benefit.
 
+[telemetry]
+# The flag-gated local telemetry producer (issue #61): continuously, during
+# ordinary operation, writes the same RSS/tick/decision sample stream
+# scripts/heart-soak-run.sh already produces for a one-off soak, plus a redacted
+# mirror of the daemon's own log stream -- both to rotated files only, never to
+# SQLite, never uploaded by this daemon itself (that's issue #62's Vector sidecar
+# and heart-bench-publish/[telemetry.s3] below). false (the default) is a
+# byte-for-byte no-op -- no spool directory is created, no log-mirror handler is
+# attached, no sampling loop starts.
+enabled = false
+
+# Where rotated sample/log files are written. Resolved the same way
+# [database] path/[heart] cache_dir are: `~` expanded, relative paths anchored
+# to the CWD, once, at load time.
+spool_dir = "~/.local/state/ansina/telemetry"
+
+# How often one RSS/tick/decision sample is appended to samples.jsonl. Matches
+# scripts/heart-soak-run.sh's own default cadence.
+sample_interval_seconds = 60
+
+# Per rotated-file-family budget -- one family for samples.jsonl, one for
+# log.jsonl, each enforced independently (not a combined pool). A family's
+# active file rotates out once it reaches max_file_bytes; the family's total
+# bytes are then capped at max_spool_bytes (oldest rotated file deleted first)
+# and swept by retention_hours (age-based, independent of the byte cap -- a
+# file failing either test is deleted). Defaults below (1 MiB/file, 100 MiB/
+# family, 7 days) are generous headroom against the issue's own measured real
+# rate (~15 MB/week combined, against a 10 GB/week target ceiling).
+max_file_bytes = 1048576
+max_spool_bytes = 104857600
+retention_hours = 168
+
 [telemetry.s3]
 # S3-compatible object store for the Heart bench/soak report corpus (issue #59) --
 # the destination `make heart-bench`/`make remote-heart`/`make heart-bench-publish`

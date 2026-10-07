@@ -90,7 +90,11 @@ class TickLoopFactory(Protocol):
     and (unlike `ansina.api`, the real cycle `DaemonStateSource`'s own structural
     `ReadinessProbe` exists to avoid) `ansina.storage` sits strictly below
     `ansina.heart`, so naming it concretely here is no layering violation —
-    `auth/repositories.py` already imports it exactly this way.
+    `auth/repositories.py` already imports it exactly this way. Issue #61 widens the
+    return type again, from `TickLifecycle` to `TickController` (a strict superset)
+    — `api/app.py`'s own `tick_loop` local needs the breaker counters to hand to
+    `ansina.telemetry.sampler`, and the concrete `build_tick_loop` already returns a
+    real `TickLoop`, which already satisfies the wider Protocol.
     """
 
     def __call__(
@@ -101,12 +105,21 @@ class TickLoopFactory(Protocol):
         *,
         db: Database,
         readiness: ReadinessProbe,
-    ) -> TickLifecycle: ...
+    ) -> TickController: ...
 
 
 class TickController(TickLifecycle, Protocol):
     """The fuller surface `api/routes/heart.py` depends on: lifecycle plus the kill
     switch and the status fields `GET /heart/tick` reports.
+
+    Issue #61 widens this with the three circuit-breaker counters (already on the
+    concrete `TickLoop` since issue #54, structurally duplicated from
+    `heart.tick.sources.daemon_state.TickStats`) — a pure protocol widening, no
+    behavior change — so `ansina.telemetry.sampler` can depend on this one,
+    already-exported Protocol instead of inventing a near-duplicate of its own.
+    `GET /heart/tick` itself is deliberately *not* widened to expose them (M6's
+    `docs/heart/findings.md` open question #2 is answered as a telemetry file
+    field, not a new API surface).
     """
 
     @property
@@ -121,6 +134,12 @@ class TickController(TickLifecycle, Protocol):
     def last_tick_at(self) -> str | None: ...
     @property
     def last_duration_seconds(self) -> float | None: ...
+    @property
+    def failures_total(self) -> int: ...
+    @property
+    def consecutive_failures(self) -> int: ...
+    @property
+    def consecutive_overruns(self) -> int: ...
 
     def pause(self, *, reason: str | None = None) -> None: ...
     def resume(self) -> None: ...

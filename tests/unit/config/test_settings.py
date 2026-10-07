@@ -1147,3 +1147,79 @@ def test_telemetry_s3_enabled_with_no_bucket_still_loads(
 
     assert settings.telemetry.s3.enabled is True
     assert settings.telemetry.s3.bucket == ""
+
+
+def test_telemetry_producer_defaults(clean_env: None, tmp_cwd: Path) -> None:
+    """Issue #61's new top-level `[telemetry]` keys — `enabled = false` is the
+    default, matching `[heart]`/`[security.oidc]`/`[security.cors]`'s own
+    "off means nothing happens" shape.
+    """
+    settings = load_settings()
+
+    telemetry = settings.telemetry
+    assert telemetry.enabled is False
+    assert telemetry.spool_dir.is_absolute()
+    assert telemetry.spool_dir.name == "telemetry"
+    assert telemetry.sample_interval_seconds == 60.0
+    assert telemetry.max_file_bytes == 1_048_576
+    assert telemetry.max_spool_bytes == 104_857_600
+    assert telemetry.retention_hours == 168
+
+
+def test_telemetry_spool_dir_expands_and_resolves_like_database_path(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__SPOOL_DIR", "~/my-telemetry")
+
+    settings = load_settings()
+
+    assert settings.telemetry.spool_dir.is_absolute()
+    assert "~" not in str(settings.telemetry.spool_dir)
+    assert settings.telemetry.spool_dir == Path("~/my-telemetry").expanduser()
+
+
+def test_telemetry_producer_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__SPOOL_DIR", str(tmp_cwd / "spool"))
+    monkeypatch.setenv("ANSINA_TELEMETRY__SAMPLE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "2000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_SPOOL_BYTES", "20000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__RETENTION_HOURS", "72")
+
+    settings = load_settings()
+
+    telemetry = settings.telemetry
+    assert telemetry.enabled is True
+    assert telemetry.spool_dir == (tmp_cwd / "spool").resolve()
+    assert telemetry.sample_interval_seconds == 15.0
+    assert telemetry.max_file_bytes == 2000
+    assert telemetry.max_spool_bytes == 20000
+    assert telemetry.retention_hours == 72
+
+
+def test_telemetry_max_file_bytes_exceeding_max_spool_bytes_is_refused(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "2000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_SPOOL_BYTES", "1000")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "telemetry.max_file_bytes" in message
+    assert "telemetry.max_spool_bytes" in message
+
+
+def test_telemetry_max_file_bytes_equal_to_max_spool_bytes_is_accepted(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "1000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_SPOOL_BYTES", "1000")
+
+    settings = load_settings()
+
+    assert settings.telemetry.max_file_bytes == 1000
+    assert settings.telemetry.max_spool_bytes == 1000
