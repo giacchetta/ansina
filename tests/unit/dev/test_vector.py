@@ -84,13 +84,21 @@ def test_build_vector_env_includes_only_the_allow_listed_names() -> None:
     assert "UNRELATED" not in env
 
 
-def test_build_vector_env_carries_telemetry_and_s3_fields() -> None:
-    settings = _settings(key_prefix="prod", spool_dir=Path("/var/spool/telemetry"))
+def test_build_vector_env_carries_telemetry_and_s3_fields(tmp_path: Path) -> None:
+    """Uses `tmp_path`, not a hand-typed absolute literal — `TelemetrySettings.
+    spool_dir`'s own `field_validator` calls `.resolve()`, which on macOS follows
+    the `/var` -> `/private/var` symlink; a literal `/var/...` expectation only
+    ever matches on platforms where that symlink doesn't exist (reproduced for
+    real on `macos-26` CI, not assumed).
+    """
+    spool_dir = tmp_path / "telemetry"
+    settings = _settings(key_prefix="prod", spool_dir=spool_dir)
+    resolved_spool_dir = str(spool_dir.resolve())
 
     env = build_vector_env(settings, base_env={})
 
-    assert env[ENV_SPOOL_DIR] == "/var/spool/telemetry"
-    assert env[ENV_VECTOR_DATA_DIR] == "/var/spool/telemetry/vector"
+    assert env[ENV_SPOOL_DIR] == resolved_spool_dir
+    assert env[ENV_VECTOR_DATA_DIR] == f"{resolved_spool_dir}/vector"
     assert env[ENV_S3_BUCKET] == "my-bucket"
     assert env[ENV_S3_ENDPOINT_URL] == "https://abc123.r2.cloudflarestorage.com"
     assert env[ENV_S3_REGION] == "auto"
