@@ -233,6 +233,19 @@ export ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY=<secret access key>
 
 With that in place, `make heart-bench`/`make remote-heart` upload the report pair they just wrote (auto-suffixing the *key* on a same-day collision, mirroring the local never-overwrite discipline above) — a missing bucket, bad credentials, or an unreachable endpoint degrades to a logged warning, never a changed bench exit code. `make heart-bench-publish` is the separate, one-shot backlog migration: it walks `docs/heart/bench/` and `docs/heart/soak/` and uploads whichever files aren't already in the bucket, keyed deterministically (`kind=bench/dt=<date>/<file>`, `kind=soak/dt=<date>/<run_id>/<file>`), so running it again is a verified no-op. `python -m ansina.heart.eval.publish --dry-run` resolves and prints every key with no bucket configured at all, to check the walk before ever touching the network.
 
+### 🧫 Dev Mode
+
+`ansina --dev` (issue #62) is a lab/pre-customer posture, never a default: it preflights and auto-launches [Vector](https://vector.dev) as a supervised sidecar that continuously ships `[telemetry]`'s rotated sample/log files to the same `[telemetry.s3]` bucket above, under `kind=telemetry/`/`kind=runlog/`. Needs `vector` on `PATH`, `[telemetry] enabled = true`, and a fully configured `[telemetry.s3]` — any one missing is a logged skip (never a crash), so the daemon always boots regardless.
+
+**Install Vector 0.45.x, not latest** — every later release is incompatible with Cloudflare R2 (vectordotdev/vector#23029, unfixed as of this writing):
+
+```bash
+curl -L https://sh.vector.dev | VECTOR_VERSION=0.45.0 bash -s -- -y
+ANSINA_TELEMETRY__ENABLED=true uv run python -m ansina --dev
+```
+
+`make vector-validate` checks `deploy/vector.toml` itself (needs only `vector` on `PATH`, no bucket). `make dev-mode-smoke` is the real end-to-end check: it boots `ansina --dev` against a scratch database/spool dir with whatever `[telemetry.s3]` credentials this host already has, then verifies objects actually landed by reading them back out of the bucket directly — under an isolated, easily-deleted `_devmode-smoke/...` key prefix so it never touches the real corpus. It needs no GPU and no Heart, so it runs the same way here as on the Mac Mini (`make remote-dev-mode` just runs it there instead).
+
 ## 🛠️ Development
 
 | Target | Runs |

@@ -232,13 +232,20 @@ class Server:
 
 @contextmanager
 def _launch_server(
-    tmp_path: Path, *, env: dict[str, str] | None = None
+    tmp_path: Path,
+    *,
+    env: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
 ) -> Iterator[Server]:
     """Launch `python -m ansina` against `tmp_path`'s config, yielding its `Server`.
 
     A `@contextmanager` rather than a bare generator so a test can start, stop, and
     restart the server against the *same* `tmp_path` — e.g. to prove a migration
     applied on the first boot is not re-applied on the second.
+
+    `extra_args` (issue #62) is appended to the fixed argv — `["--dev"]` is its one
+    real use, proving Dev Mode's own preflight-skip path through a real subprocess
+    boot rather than only the unit suite's mocked one.
     """
     port = _free_port()
     (tmp_path / "ansina.toml").write_text(
@@ -249,7 +256,7 @@ def _launch_server(
     base_url = f"http://127.0.0.1:{port}"
 
     process = subprocess.Popen(  # fixed argv, no shell, no untrusted input
-        [sys.executable, "-m", "ansina"],
+        [sys.executable, "-m", "ansina", *(extra_args or [])],
         cwd=tmp_path,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1607,3 +1614,33 @@ def test_telemetry_enabled_produces_sample_and_log_files(tmp_path: Path) -> None
 
     output = process.stdout.read() if process.stdout else ""
     assert _E2E_TOKEN not in output
+
+
+def test_dev_mode_flag_boots_normally_and_skips_the_sidecar_when_telemetry_is_disabled(
+    tmp_path: Path,
+) -> None:
+    """Issue #62: `--dev` with `[telemetry]` left disabled (the default) must still
+    boot the daemon normally — the preflight's own first (cheapest) check must skip
+    with a logged reason, never spawn anything, and never affect `/healthz`. Neither
+    CI leg has the `vector` binary installed, so this is also, as a side effect, the
+    one path both legs exercise for real on every run.
+    """
+    with _launch_server(
+        tmp_path,
+        env={"ANSINA_SECURITY__ENABLED": "false"},
+        extra_args=["--dev"],
+    ) as srv:
+        response = httpx.get(f"{srv.base_url}/healthz")
+        assert response.status_code == 200
+
+        readyz = httpx.get(f"{srv.base_url}/readyz")
+        assert readyz.status_code == 200
+
+        process = srv.process
+
+    assert process.returncode == -signal.SIGTERM
+
+    output = process.stdout.read() if process.stdout else ""
+    assert "DEV MODE ENABLED" in output
+    assert "vector sidecar not started" in output
+    assert "telemetry.enabled is false" in output

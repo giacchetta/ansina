@@ -399,3 +399,37 @@ key_prefix = ""
 # chain):
 #   ANSINA_TELEMETRY__S3__ACCESS_KEY_ID=...
 #   ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY=...
+
+[dev]
+# Dev Mode (issue #62): a lab/pre-customer posture, never a default -- enabled
+# only by passing `--dev` on the command line (or ANSINA_DEV__ENABLED=true),
+# never by this file alone. When enabled, the daemon preflights and supervises a
+# Vector sidecar that ships [telemetry]'s rotated sample/log files to the bucket
+# configured under [telemetry.s3] above. Every preflight check that fails is a
+# logged skip, never a crash -- a shipper with nothing to ship is worse than no
+# shipper, so a lab host missing `vector` or real bucket credentials still boots
+# the daemon normally.
+enabled = false
+
+# Resolved via a PATH lookup at preflight time (a bare name, the common case) or
+# used as-is if already absolute.
+vector_binary = "vector"
+
+# The committed, hand-editable Vector sidecar config (deploy/vector.toml) --
+# never daemon-generated, so there's no second copy to drift. Resolved the same
+# way [database] path/[heart] cache_dir are: `~` expanded, relative paths
+# anchored to the CWD, once, at load time.
+vector_config = "deploy/vector.toml"
+
+# How long after spawning the sidecar to wait before checking it's still alive --
+# the one post-spawn liveness check Dev Mode performs (no continuous supervision
+# loop).
+liveness_delay_seconds = 1.0
+
+# terminate() -> wait this long -> kill(), guaranteeing no orphan survives a
+# deliberate shutdown.
+shutdown_timeout_seconds = 5.0
+
+# Bounds the one-time `vector validate` preflight call -- never touches the
+# network itself (healthchecks are skipped), just config parsing.
+validate_timeout_seconds = 30.0

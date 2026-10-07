@@ -19,7 +19,7 @@ import os
 import re
 import tomllib
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -703,6 +703,63 @@ class TelemetrySettings(BaseModel):
         return self
 
 
+class DevSettings(BaseModel):
+    """`[dev]` — the lab/pre-customer posture (issue #62), never a default.
+
+    `enabled = false` (the default) is a byte-for-byte no-op: `ansina.dev.dev_mode`
+    yields immediately with nothing logged and nothing spawned. `enabled = true` is
+    set only by `python -m ansina --dev` (`ANSINA_DEV__ENABLED=true` works too, since
+    every setting is env-reachable) — established in `__main__.py` before uvicorn
+    binds a port, never inside `create_app()`/its lifespan, so the app factory and
+    every subprocess-launched test (`tests/e2e`, which never pass `--dev`) see zero
+    change.
+
+    Deliberately **no** `model_validator` refusing `enabled=True` with Vector missing
+    or `[telemetry]`/`[telemetry.s3]` incoherent, the same reasoning `S3Settings`
+    documents for its own `enabled=True`: every one of `ansina.dev.vector.preflight`'s
+    checks is a *logged skip*, never a boot-time `ConfigError` — a lab posture must
+    still boot the daemon normally when its sidecar can't come up.
+
+    `vector_binary` must resolve to a **0.45.x** build — see `ansina.dev.vector`'s
+    own module-level comment for why every later release is incompatible with
+    Cloudflare R2 (an empirical finding, not a guess: reproduced against this
+    project's own bucket, tracked upstream at vectordotdev/vector#23029).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    enabled: bool = False
+
+    # Resolved via `shutil.which` at preflight time, not here — a name (the common
+    # case) must stay a `PATH` lookup, not get silently turned into `None`/an error
+    # by this model just because it isn't yet an absolute path on this machine.
+    vector_binary: str = "vector"
+
+    # The committed, hand-editable sidecar config (issue #62's "Vector config
+    # ownership" — a static file, never daemon-generated, so there is no second copy
+    # to drift). Same `~`-expand-and-anchor-to-CWD treatment as `DatabaseSettings.path`.
+    vector_config: Path = Path("deploy/vector.toml")
+
+    # One post-spawn liveness check, no continuous supervision loop (per the issue's
+    # own "Dev Mode" scope) — this is how long after spawn that one check waits.
+    liveness_delay_seconds: float = Field(default=1.0, gt=0)
+
+    # `terminate()` -> wait this long -> `kill()`, guaranteeing no orphan survives a
+    # deliberate `dev_mode()` exit (SIGKILL to the daemon itself is a separate,
+    # documented limitation — see `ansina.dev.posture`).
+    shutdown_timeout_seconds: float = Field(default=5.0, gt=0)
+
+    # Bounds the one-time `vector validate --no-environment` preflight call — kept
+    # short since it never touches the network (`--no-environment` skips the sinks'
+    # own connectivity check), just config parsing.
+    validate_timeout_seconds: float = Field(default=30.0, gt=0)
+
+    @field_validator("vector_config")
+    @classmethod
+    def _resolve_vector_config(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -982,6 +1039,7 @@ class Settings(BaseSettings):
     heart: HeartSettings = Field(default_factory=HeartSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
+    dev: DevSettings = Field(default_factory=DevSettings)
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:
@@ -1048,8 +1106,20 @@ def _format_validation_error(
     return _render_report(problems)
 
 
-def load_settings(config_file: str | Path | None = None) -> Settings:
+def load_settings(
+    config_file: str | Path | None = None,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> Settings:
     """Load `Settings` from defaults, `ansina.toml` (or `config_file`), and env vars.
+
+    `overrides` (new, issue #62) is passed as `Settings(**overrides)` — the designed
+    highest-priority source `settings_customise_sources` already ranks `init_settings`
+    as, not a second, parallel override mechanism. `__main__.py`'s `--dev` flag is the
+    one real caller (`overrides={"dev": {"enabled": True}}`): a nested dict merges
+    with env/file values for every other field exactly the way two config sources
+    already merge with each other, so passing `{"dev": {...}}` can never shadow an
+    unrelated table like `[security]`.
 
     Raises `ConfigError` with one aggregated, readable report if anything is invalid —
     never a bare `pydantic.ValidationError` or `tomllib.TOMLDecodeError`.
@@ -1057,7 +1127,7 @@ def load_settings(config_file: str | Path | None = None) -> Settings:
     override = Path(config_file) if config_file is not None else None
     token = _config_file_override.set(override)
     try:
-        return Settings()
+        return Settings(**(overrides or {}))
     except ValidationError as exc:
         secret_paths = _walk_secret_paths(Settings)
         raise ConfigError(_format_validation_error(exc, secret_paths)) from exc

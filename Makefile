@@ -142,6 +142,36 @@ remote-heart-soak-stop: ## End a running soak early
 heart-bench-publish: ## Upload every local bench/soak report not already in the report bucket (see [telemetry.s3])
 	$(UV) run --extra s3 python -m ansina.heart.eval.publish $(ARGS)
 
+# Issue #62: the Vector sidecar's own config. Not Mac-only (Dev Mode needs no
+# GPU/Heart — see `src/ansina/dev/`), but Vector is installed on neither CI leg,
+# so this stays out of `check`/`check-all` the same way `heart-bench` does.
+.PHONY: vector-validate
+vector-validate: ## Validate deploy/vector.toml (requires the `vector` binary on PATH)
+	scripts/vector-validate.sh
+
+# `make dev-mode-smoke` is the primary end-to-end verification for issue #62: boots
+# `ansina --dev` against a scratch database/spool dir with whatever real
+# [telemetry.s3] credentials this host already has (.envrc/ansina.toml), and
+# verifies objects actually land in the bucket by reading them back out of it.
+# Runs unchanged here and on the Mac Mini — `remote-dev-mode` below just runs this
+# same target over there. Requires `vector` on PATH and real bucket credentials, so
+# it stays out of `check`/`check-all`, the same reasoning as `heart-bench-publish`.
+.PHONY: dev-mode-smoke
+dev-mode-smoke: ## Boot `ansina --dev` against a scratch spool + real bucket creds and verify objects land (requires vector + [telemetry.s3] creds)
+	scripts/dev-mode-smoke.sh
+
+.PHONY: remote-dev-mode
+remote-dev-mode: ## [Mac Mini] Run the dev-mode smoke check on real target hardware (see .envrc)
+	scripts/remote-dev-mode.sh run $(ARGS)
+
+.PHONY: remote-dev-mode-tail
+remote-dev-mode-tail: ## Tail the current/last remote dev-mode run's log
+	scripts/remote-dev-mode.sh tail
+
+.PHONY: remote-dev-mode-attach
+remote-dev-mode-attach: ## Attach to the live dev-mode tmux session on the Mac Mini (interactive)
+	scripts/remote-dev-mode.sh attach
+
 .PHONY: check
 check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs
 

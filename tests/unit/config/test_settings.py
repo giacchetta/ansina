@@ -1223,3 +1223,85 @@ def test_telemetry_max_file_bytes_equal_to_max_spool_bytes_is_accepted(
 
     assert settings.telemetry.max_file_bytes == 1000
     assert settings.telemetry.max_spool_bytes == 1000
+
+
+def test_dev_mode_defaults(clean_env: None, tmp_cwd: Path) -> None:
+    """Issue #62's new top-level `[dev]` keys — `enabled = false` is the default,
+    matching `[heart]`/`[telemetry]`'s own "off means nothing happens" shape.
+    """
+    settings = load_settings()
+
+    dev = settings.dev
+    assert dev.enabled is False
+    assert dev.vector_binary == "vector"
+    assert dev.vector_config.is_absolute()
+    assert dev.vector_config.name == "vector.toml"
+    assert dev.liveness_delay_seconds == 1.0
+    assert dev.shutdown_timeout_seconds == 5.0
+    assert dev.validate_timeout_seconds == 30.0
+
+
+def test_dev_mode_vector_config_expands_and_resolves_like_database_path(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DEV__VECTOR_CONFIG", "~/my-vector.toml")
+
+    settings = load_settings()
+
+    assert settings.dev.vector_config.is_absolute()
+    assert "~" not in str(settings.dev.vector_config)
+    assert settings.dev.vector_config == Path("~/my-vector.toml").expanduser()
+
+
+def test_dev_mode_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DEV__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_DEV__VECTOR_BINARY", "/opt/vector/bin/vector")
+    monkeypatch.setenv("ANSINA_DEV__VECTOR_CONFIG", str(tmp_cwd / "vector.toml"))
+    monkeypatch.setenv("ANSINA_DEV__LIVENESS_DELAY_SECONDS", "2.5")
+    monkeypatch.setenv("ANSINA_DEV__SHUTDOWN_TIMEOUT_SECONDS", "10")
+    monkeypatch.setenv("ANSINA_DEV__VALIDATE_TIMEOUT_SECONDS", "45")
+
+    settings = load_settings()
+
+    dev = settings.dev
+    assert dev.enabled is True
+    assert dev.vector_binary == "/opt/vector/bin/vector"
+    assert dev.vector_config == (tmp_cwd / "vector.toml").resolve()
+    assert dev.liveness_delay_seconds == 2.5
+    assert dev.shutdown_timeout_seconds == 10.0
+    assert dev.validate_timeout_seconds == 45.0
+
+
+def test_load_settings_overrides_sets_only_the_given_field(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    """`overrides` (issue #62, `__main__.py --dev`'s own seam) must behave like a
+    highest-priority config *source*, not a second, parallel mechanism — every
+    other field keeps resolving from its own default/env/file the normal way.
+    """
+    settings = load_settings(overrides={"dev": {"enabled": True}})
+
+    assert settings.dev.enabled is True
+    assert settings.security.enabled is True  # untouched by the override
+    assert settings.server.host == "127.0.0.1"
+
+
+def test_load_settings_overrides_defaults_to_none(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    settings = load_settings()
+
+    assert settings.dev.enabled is False
+
+
+def test_load_settings_overrides_still_respects_env_for_other_fields(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SERVER__PORT", "9999")
+
+    settings = load_settings(overrides={"dev": {"enabled": True}})
+
+    assert settings.dev.enabled is True
+    assert settings.server.port == 9999

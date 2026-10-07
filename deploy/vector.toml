@@ -1,0 +1,84 @@
+# Vector sidecar config for Ansina's Dev Mode (issue #62). Static and
+# hand-editable, never daemon-generated — no second config copy to drift against,
+# and secrets reach this process only via environment variables Ansina itself
+# injects at spawn time (see `ansina.dev.vector.build_vector_env`), never written
+# to any file Vector reads.
+#
+# Two independent source/sink pairs, matching the hive-partitioned bucket layout
+# `src/ansina/heart/eval/storage.py`'s own module docstring already documents:
+#   samples*.jsonl -> kind=telemetry/dt=<date>/...
+#   log*.jsonl     -> kind=runlog/dt=<date>/...
+#
+# Validate with `make vector-validate` (wraps `scripts/vector-validate.sh`) — the
+# daemon's own `ansina.dev.vector.preflight()` runs the identical `vector validate`
+# invocation (real interpolation, `--skip-healthchecks`) before ever spawning this
+# config for real.
+#
+# KNOWN UPSTREAM RISK (watch, do not assume solved): vectordotdev/vector#23875 —
+# the aws_s3 sink's disk buffer can grow unbounded in memory during a prolonged
+# upload outage. Mitigations already in scope elsewhere: issue #61's own spool
+# byte cap bounds how much *source* data can ever exist to buffer, and this
+# issue's post-spawn liveness check surfaces an outright-dead sidecar. Neither is
+# a fix for the upstream issue itself.
+
+data_dir = "${ANSINA_TELEMETRY_VECTOR_DATA_DIR}"
+
+[api]
+enabled = false
+
+# --- samples.jsonl -> kind=telemetry/ -------------------------------------------
+
+[sources.telemetry_samples]
+type = "file"
+include = ["${ANSINA_TELEMETRY_SPOOL_DIR}/samples*.jsonl"]
+read_from = "beginning"
+
+[sinks.telemetry_samples_s3]
+type = "aws_s3"
+inputs = ["telemetry_samples"]
+bucket = "${ANSINA_TELEMETRY_S3_BUCKET}"
+region = "${ANSINA_TELEMETRY_S3_REGION}"
+endpoint = "${ANSINA_TELEMETRY_S3_ENDPOINT_URL}"
+key_prefix = "${ANSINA_TELEMETRY_S3_KEY_PREFIX}kind=telemetry/dt=%Y-%m-%d/"
+compression = "none"
+force_path_style = true
+# Dev Mode is a lab posture, not a tuned production pipeline — a short batch
+# timeout favors fast feedback (an operator watching the bucket fill) over
+# fewer/larger PUTs. Revisit if/when this config ever serves outside Dev Mode.
+batch.timeout_secs = 5
+
+[sinks.telemetry_samples_s3.encoding]
+codec = "text"
+framing.method = "newline_delimited"
+
+[sinks.telemetry_samples_s3.buffer]
+type = "disk"
+max_size = 268435488
+when_full = "block"
+
+# --- log.jsonl -> kind=runlog/ ---------------------------------------------------
+
+[sources.telemetry_log]
+type = "file"
+include = ["${ANSINA_TELEMETRY_SPOOL_DIR}/log*.jsonl"]
+read_from = "beginning"
+
+[sinks.telemetry_log_s3]
+type = "aws_s3"
+inputs = ["telemetry_log"]
+bucket = "${ANSINA_TELEMETRY_S3_BUCKET}"
+region = "${ANSINA_TELEMETRY_S3_REGION}"
+endpoint = "${ANSINA_TELEMETRY_S3_ENDPOINT_URL}"
+key_prefix = "${ANSINA_TELEMETRY_S3_KEY_PREFIX}kind=runlog/dt=%Y-%m-%d/"
+compression = "none"
+force_path_style = true
+batch.timeout_secs = 5
+
+[sinks.telemetry_log_s3.encoding]
+codec = "text"
+framing.method = "newline_delimited"
+
+[sinks.telemetry_log_s3.buffer]
+type = "disk"
+max_size = 268435488
+when_full = "block"

@@ -11,10 +11,12 @@ circuit-breaker counters `GET /heart/tick` does not expose (M6's own
 **`rss_kib` is peak, not instantaneous, RSS — a deliberate divergence from the
 soak script.** `scripts/heart-soak-run.sh` shells out to `ps -o rss=` for an
 instantaneous reading, but `heart/eval/provenance.py`'s own module docstring states
-a real invariant this codebase already relies on: the daemon itself never shells
-out (subprocess usage stays confined to dev-tooling under `heart/eval/`). Spawning
-a process every `sample_interval_seconds` inside an always-on daemon is also a real
-operational cost with no payoff proportional to it. This module instead reads
+a real invariant this codebase relies on: the daemon's own runtime-imported
+packages never shell out (subprocess usage stays confined to dev-tooling under
+`heart/eval/`, and — as of issue #62 — to `ansina.dev`, reached only once at boot,
+never from a periodic loop like this sampler's own). Spawning a process every
+`sample_interval_seconds` inside an always-on daemon is also a real operational
+cost with no payoff proportional to it. This module instead reads
 `resource.getrusage(RUSAGE_SELF).ru_maxrss` — the same call, with the same
 platform-dependent byte/KiB correction, `heart/eval/runner.py` already uses for its
 own `peak_rss_bytes` metric (duplicated locally here rather than imported:
