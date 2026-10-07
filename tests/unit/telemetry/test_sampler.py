@@ -64,10 +64,44 @@ class _FakeTick:
         pass
 
 
-def test_read_peak_rss_kib_returns_a_positive_int() -> None:
-    rss = _read_peak_rss_kib()
-    assert rss is not None
-    assert rss > 0
+class _FakeRusage:
+    def __init__(self, ru_maxrss: int) -> None:
+        self.ru_maxrss = ru_maxrss
+
+
+def test_read_peak_rss_kib_leaves_rss_unscaled_on_darwin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ru_maxrss` is already bytes on macOS/BSD — forced via monkeypatch so this
+    holds regardless of which OS actually runs the suite, the same reasoning
+    `tests/unit/heart/eval/test_runner.py`'s own `test_run_bench_leaves_rss_
+    unscaled_on_darwin` documents (and the same real CI gap that test exists to
+    close: without forcing both branches, the real macOS CI leg never executes
+    the Linux-only `*= 1024` line, and the real Linux leg never proves the
+    darwin-unscaled path either).
+    """
+    monkeypatch.setattr("ansina.telemetry.sampler.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "ansina.telemetry.sampler.resource.getrusage",
+        lambda _who: _FakeRusage(2048 * 1024),
+    )
+
+    assert _read_peak_rss_kib() == 2048
+
+
+def test_read_peak_rss_kib_scales_from_kib_to_bytes_off_darwin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ru_maxrss` is KiB on Linux — forced via monkeypatch for the same reason as
+    the darwin case above.
+    """
+    monkeypatch.setattr("ansina.telemetry.sampler.sys.platform", "linux")
+    monkeypatch.setattr(
+        "ansina.telemetry.sampler.resource.getrusage",
+        lambda _who: _FakeRusage(2048),
+    )
+
+    assert _read_peak_rss_kib() == 2048
 
 
 def test_read_peak_rss_kib_returns_none_on_failure(
