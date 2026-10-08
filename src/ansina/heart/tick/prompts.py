@@ -49,8 +49,7 @@ Reply with exactly one word: idle, act, or escalate.
 # heuristic on top: exactly one routine problem is `act`, two or more simultaneous
 # problems (or one that keeps recurring despite retries) is `escalate`. Re-measured
 # at 97.2% accuracy, gate PASS — see the plain-named report at the same bucket key
-# (no `-preimprovement` suffix), or `docs/heart/findings.md` for the numbers either
-# way.
+# (no `-preimprovement` suffix) for the numbers.
 _STRICT = """\
 Task: classify the current state as exactly one of idle, act, escalate.
 

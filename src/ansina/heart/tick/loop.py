@@ -117,9 +117,9 @@ class TickController(TickLifecycle, Protocol):
     `heart.tick.sources.daemon_state.TickStats`) — a pure protocol widening, no
     behavior change — so `ansina.telemetry.sampler` can depend on this one,
     already-exported Protocol instead of inventing a near-duplicate of its own.
-    `GET /heart/tick` itself is deliberately *not* widened to expose them (M6's
-    `docs/heart/findings.md` open question #2 is answered as a telemetry file
-    field, not a new API surface).
+    `GET /heart/tick` itself is deliberately *not* widened to expose them — M6's
+    own open question on this was answered as a telemetry file field (issue #61),
+    not a new API surface.
     """
 
     @property

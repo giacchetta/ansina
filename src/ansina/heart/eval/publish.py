@@ -26,6 +26,12 @@ walk that would have no real shape to validate against.
 Any filename this module can't confidently parse a date/run-id out of is **skipped
 with a warning**, never guessed — publishing a file under a wrong key would be worse
 than not publishing it at all.
+
+Issue #63 adds one more, unconditional step to every real (non-dry-run) run: publish
+the committed corpus-contract schema (`ansina.ml.contract.publish_contract_schema`)
+to `_contract/corpus-schema-v<N>.json`. Unlike a bench/soak backlog item, that one
+small file is never skipped on an existing-key match — it should always reflect
+what's currently committed, so it's re-uploaded every run regardless.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from ansina.heart.eval.storage import (
     soak_key,
 )
 from ansina.logging import configure_logging, get_logger
+from ansina.ml.contract import SCHEMA_PATH, contract_key, publish_contract_schema
 
 logger = get_logger(__name__)
 
@@ -219,6 +226,23 @@ def _publish_kind(
     return uploaded, skipped, failed
 
 
+def _publish_contract(storage: ReportStorage) -> bool:
+    """Issue #63: always re-uploads the committed `docs/ml/corpus-schema-v1.json` —
+    unlike a bench/soak backlog item, this one small file should always reflect
+    what's currently committed, never skipped because a same-named key already
+    exists. Returns `False` (logged, never raised) on any upload failure, the same
+    best-effort-but-counted-as-failed shape `_publish_kind` already uses for a
+    single item.
+    """
+    try:
+        publish_contract_schema(storage)
+    except ObjectStoreUploadError as exc:
+        logger.warning("failed to publish contract schema", extra={"error": str(exc)})
+        return False
+    print(f"published contract schema -> {contract_key()}")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -240,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             f"dry run: {len(bench_items) + len(soak_items)} file(s) resolved, "
             "0 uploaded"
         )
+        print(f"DRY RUN: would publish {SCHEMA_PATH} -> {contract_key()}")
         return 0
 
     try:
@@ -267,7 +292,10 @@ def main(argv: list[str] | None = None) -> int:
     skipped = bench_skipped + soak_skipped
     failed = bench_failed + soak_failed
     print(f"uploaded {uploaded}, skipped {skipped}, {failed} failed")
-    return 1 if failed else 0
+
+    contract_published = _publish_contract(storage)
+
+    return 1 if (failed or not contract_published) else 0
 
 
 if __name__ == "__main__":

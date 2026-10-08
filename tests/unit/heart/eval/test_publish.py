@@ -16,6 +16,7 @@ from ansina.heart.eval.storage import (
     ObjectStoreUnavailableError,
     ObjectStoreUploadError,
 )
+from ansina.ml.contract import SCHEMA_PATH, contract_key
 
 
 @pytest.fixture
@@ -239,6 +240,7 @@ def test_main_dry_run_prints_every_resolved_key_and_never_builds_storage(
     assert "2026-10-06-model-strict.md" in out
     assert "soak-2026-10-02.md" in out
     assert "4 file(s) resolved, 0 uploaded" in out
+    assert f"DRY RUN: would publish {SCHEMA_PATH} -> {contract_key()}" in out
 
 
 def test_main_exits_2_when_storage_is_misconfigured(
@@ -295,8 +297,12 @@ def test_main_uploads_everything_not_already_present(
     code = publish.main(["--bench-dir", str(bench_dir), "--soak-dir", str(soak_dir)])
 
     assert code == 0
-    assert len(storage.uploads) == 4  # 2 bench files + 2 soak files
-    assert "uploaded 4, skipped 0, 0 failed" in capsys.readouterr().out
+    # 2 bench files + 2 soak files + issue #63's own contract-schema upload.
+    assert len(storage.uploads) == 5
+    assert storage.uploads[-1] == (SCHEMA_PATH, contract_key())
+    out = capsys.readouterr().out
+    assert "uploaded 4, skipped 0, 0 failed" in out
+    assert f"published contract schema -> {contract_key()}" in out
 
 
 def test_main_is_a_verified_no_op_on_a_second_run(
@@ -324,7 +330,9 @@ def test_main_is_a_verified_no_op_on_a_second_run(
     code = publish.main(["--bench-dir", str(bench_dir)])
 
     assert code == 0
-    assert storage.uploads == []
+    # Both bench files were already present (skipped) -- the contract schema is
+    # never skipped that way, so it's the only upload this run makes.
+    assert storage.uploads == [(SCHEMA_PATH, contract_key())]
     assert "uploaded 0, skipped 2, 0 failed" in capsys.readouterr().out
 
 
@@ -367,8 +375,35 @@ def test_main_counts_a_listing_failure_as_every_item_failed(
     code = publish.main(["--bench-dir", str(bench_dir)])
 
     assert code == 1
-    assert storage.uploads == []
+    # The listing failure only affects the "kind=bench/" prefix _publish_kind
+    # itself lists -- the contract schema's own unconditional upload is a separate
+    # call with no listing step, so it still succeeds.
+    assert storage.uploads == [(SCHEMA_PATH, contract_key())]
     assert "uploaded 0, skipped 0, 2 failed" in capsys.readouterr().out
+
+
+def test_main_exits_1_when_contract_publish_fails_even_if_everything_else_succeeds(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bench_dir = tmp_path / "bench"
+    _bench_corpus(bench_dir)
+    storage = _FakeStorage(fail_upload_keys=frozenset({contract_key()}))
+    monkeypatch.setattr(publish, "load_settings", lambda: loaded_settings)
+    monkeypatch.setattr(publish, "configure_logging", lambda _s: None)
+    monkeypatch.setattr(publish, "build_report_storage", lambda _s: storage)
+
+    with caplog.at_level("WARNING"):
+        code = publish.main(["--bench-dir", str(bench_dir)])
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "uploaded 2, skipped 0, 0 failed" in out
+    assert "published contract schema" not in out
+    assert "failed to publish contract schema" in caplog.text
 
 
 def test_default_bench_and_soak_dirs_and_dry_run_flag() -> None:

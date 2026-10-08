@@ -4,8 +4,8 @@
 Reuses `scripts/heart-soak-run.sh`'s own sample schema verbatim (`t`, `elapsed_s`,
 `rss_kib`, `ticks`, `paused`, `paused_reason`, `last_decision`,
 `last_duration_seconds` — see `docs/heart/soak.md`), extended with the three
-circuit-breaker counters `GET /heart/tick` does not expose (M6's own
-`docs/heart/findings.md` open question #2): `failures_total`,
+circuit-breaker counters `GET /heart/tick` does not expose (M6's own open question
+on this, answered here rather than as a new API surface): `failures_total`,
 `consecutive_failures`, `consecutive_overruns`.
 
 **`rss_kib` is peak, not instantaneous, RSS — a deliberate divergence from the
