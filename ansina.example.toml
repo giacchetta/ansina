@@ -93,6 +93,12 @@ overrun_ratio = 0.8
 # counters still accrue and stay visible (daemon-state snapshot, logs) either way.
 auto_pause_enabled = true
 
+# Wires an "escalate" decision to BrainProvider.stream() (issue #64) — a true value
+# with [brain] enabled = false below is a "declined" journal outcome, not an error.
+# false (the default) keeps escalate exactly as log-only/journal-only. Issue #60's
+# 8-hour soak found zero false escalates, so no dedup/cooldown rung gates this.
+escalate_to_brain = false
+
 [heart.journal]
 # A durable, readable trace of what every completed tick decided (issue #55) — one
 # row in the "heart_journal" table per tick, read-only over GET /heart/journal.

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ansina.auth.clock import iso
-from ansina.heart.journal import HeartJournalRepository
+from ansina.heart.journal import BrainEscalationStatus, HeartJournalRepository
 from ansina.heart.tick.decision import TickDecision
 
 _NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -112,6 +112,40 @@ def test_get_journal_entry_shape(app: FastAPI, client: TestClient) -> None:
     assert entry["duration_seconds"] == 1.5
     assert entry["created_at"] == iso(_NOW)
     assert "id" in entry
+    # Issue #64: no Brain interaction on this (non-escalate) row.
+    assert entry["brain_status"] is None
+    assert entry["brain_detail"] == ""
+    assert entry["brain_prompt_tokens"] is None
+    assert entry["brain_completion_tokens"] is None
+
+
+def test_get_journal_entry_shape_with_a_brain_outcome(
+    app: FastAPI, client: TestClient
+) -> None:
+    """Issue #64's four new fields, populated — the second row
+    `BrainEscalationHandler` appends after an `escalate` tick that reached the Brain.
+    """
+    repository = HeartJournalRepository(app.state.db)
+    repository.append(
+        created_at=iso(_NOW),
+        tick_number=5,
+        decision=TickDecision.ESCALATE,
+        note="",
+        prompt_tokens=42,
+        duration_seconds=0.9,
+        max_entries=100,
+        retention_days=30,
+        brain_status=BrainEscalationStatus.CALLED,
+        brain_detail="",
+        brain_prompt_tokens=10,
+        brain_completion_tokens=3,
+    )
+
+    entry = client.get("/heart/journal").json()["entries"][0]
+
+    assert entry["brain_status"] == "called"
+    assert entry["brain_prompt_tokens"] == 10
+    assert entry["brain_completion_tokens"] == 3
 
 
 def test_get_journal_respects_limit(app: FastAPI, client: TestClient) -> None:

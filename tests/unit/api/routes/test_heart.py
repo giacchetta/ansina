@@ -199,7 +199,12 @@ def test_heart_factory_receives_real_heart_runtime(
     received: list[HeartRuntime] = []
 
     def _tick_loop_factory(
-        _settings: Settings, heart: HeartRuntime, *, db: object, readiness: object
+        _settings: Settings,
+        heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
     ) -> TickLoop:
         received.append(heart)
         return TickLoop(heart, interval_seconds=100, max_output_tokens=10)

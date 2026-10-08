@@ -1467,9 +1467,22 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         # (issue #38); (6,) = the totp credential type (issue #41); (7,) = role-mapping
         # provenance + the role_mappings unique index (issue #42); (8,) = the in-flight
         # OIDC login state table (issue #43); (9,) = the login-throttle table (issue
-        # #49); (10,) = the heart_journal table (issue #55) — bump this alongside
-        # `storage/migrations/` whenever a new migration lands.
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+        # #49); (10,) = the heart_journal table (issue #55); (11,) = the heart_journal
+        # brain-outcome columns (issue #64) — bump this alongside `storage/migrations/`
+        # whenever a new migration lands.
+        assert rows == [
+            (1,),
+            (2,),
+            (3,),
+            (4,),
+            (5,),
+            (6,),
+            (7,),
+            (8,),
+            (9,),
+            (10,),
+            (11,),
+        ]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -1479,7 +1492,19 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # still exactly these rows — nothing re-applied
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+        assert rows == [
+            (1,),
+            (2,),
+            (3,),
+            (4,),
+            (5,),
+            (6,),
+            (7,),
+            (8,),
+            (9,),
+            (10,),
+            (11,),
+        ]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:

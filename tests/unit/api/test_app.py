@@ -61,8 +61,11 @@ class _FakeHeartRuntime(BaseHeartRuntime):
 
 class _FakeBrainProvider:
     """Stands in for `OpenAICompatibleBrainProvider` so app-lifecycle tests never
-    open a socket. Nothing calls `stream()` yet (issue #12 doesn't wire the tick
-    loop's escalate branch to it) — only construction and `aclose()` matter here.
+    open a socket. These `create_app`-level tests only care about construction and
+    `aclose()` — `[heart.tick] escalate_to_brain` defaults `False`, so `stream()` is
+    never actually invoked by anything these tests exercise; see
+    `tests/unit/heart/tick/test_brain_escalation_handler.py` and
+    `tests/unit/heart/tick/test_loop.py` for coverage of issue #64's real caller.
     """
 
     def __init__(self) -> None:
@@ -177,7 +180,12 @@ def test_tick_loop_factory_not_called_when_heart_disabled(
     clean_env: None, tmp_cwd: Path
 ) -> None:
     def _factory(
-        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+        _settings: Settings,
+        _heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
     ) -> TickController:
         pytest.fail("tick_loop_factory must not be called when heart.enabled is False")
 
@@ -193,7 +201,12 @@ def test_tick_loop_factory_not_called_when_tick_disabled(
     monkeypatch.setenv("ANSINA_HEART__TICK__ENABLED", "false")
 
     def _factory(
-        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+        _settings: Settings,
+        _heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
     ) -> TickController:
         pytest.fail(
             "tick_loop_factory must not be called when heart.tick.enabled is False"
@@ -278,7 +291,12 @@ def test_tick_loop_factory_receives_the_apps_own_db_and_readiness(
     received: dict[str, object] = {}
 
     def _factory(
-        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+        _settings: Settings,
+        _heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
     ) -> TickController:
         received["db"] = db
         received["readiness"] = readiness
@@ -292,6 +310,69 @@ def test_tick_loop_factory_receives_the_apps_own_db_and_readiness(
 
     assert received["db"] is app.state.db
     assert received["readiness"] is app.state.readiness
+
+
+def test_tick_loop_factory_receives_the_apps_own_brain(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #64 widens `tick_loop_factory` with `brain` — `build_tick_loop` needs it
+    in hand to compose a `BrainEscalationHandler` when `escalate_to_brain` is `True`.
+    `create_app` now builds `brain` before `tick_loop` so it has something real to
+    pass through, including when the Brain itself is also enabled.
+    """
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_BRAIN__ENABLED", "true")
+    settings = load_settings()
+    fake_brain = _FakeBrainProvider()
+    received: dict[str, object] = {}
+
+    def _factory(
+        _settings: Settings,
+        _heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
+    ) -> TickController:
+        received["brain"] = brain
+        return _StubTickLoop()
+
+    app = create_app(
+        settings,
+        heart_factory=lambda _settings: _FakeHeartRuntime(),
+        brain_factory=lambda _settings: fake_brain,
+        tick_loop_factory=_factory,
+    )
+
+    assert received["brain"] is fake_brain
+    assert app.state.brain is fake_brain
+
+
+def test_tick_loop_factory_receives_none_brain_when_brain_disabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__ENABLED", "true")
+    settings = load_settings()
+    received: dict[str, object] = {}
+
+    def _factory(
+        _settings: Settings,
+        _heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
+    ) -> TickController:
+        received["brain"] = brain
+        return _StubTickLoop()
+
+    create_app(
+        settings,
+        heart_factory=lambda _settings: _FakeHeartRuntime(),
+        tick_loop_factory=_factory,
+    )
+
+    assert received["brain"] is None
 
 
 def test_brain_disabled_by_default_no_state_no_readiness_key(app: FastAPI) -> None:
@@ -422,7 +503,12 @@ def test_telemetry_factory_receives_the_real_tick_loop_when_heart_is_enabled(
     received: dict[str, object] = {}
 
     def _tick_factory(
-        _settings: Settings, _heart: HeartRuntime, *, db: object, readiness: object
+        _settings: Settings,
+        _heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
     ) -> TickController:
         return _StubTickLoop()
 
@@ -572,7 +658,7 @@ def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
             .execute("SELECT version FROM schema_version")
             .fetchall()
         )
-        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
 
     # Outside the `with` block, lifespan shutdown has run — the database is closed.
     with pytest.raises(StorageError, match="after close"):

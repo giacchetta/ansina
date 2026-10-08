@@ -56,6 +56,12 @@ max_consecutive_failures = 5
 overrun_ratio = 0.8
 auto_pause_enabled = true
 
+# Left at the built-in default (issue #64 landed after this profile was written) —
+# turning it on also requires a real [brain] endpoint configured below, which this
+# Heart-only profile deliberately doesn't cover. Issue #60's own 8-hour soak (zero
+# false escalates) is the evidence it's safe to flip once [brain] is set up.
+escalate_to_brain = false
+
 [heart.journal]
 # At this interval_seconds, 2000 rows ~= 16.7 hours of continuous-ticking history
 # (2000 * 30s / 3600) before the row-count bound starts pruning — the tighter of the

@@ -19,9 +19,11 @@ from typing import Protocol
 
 import anyio.to_thread
 
+from ansina.brain.provider import BrainProvider
 from ansina.config.settings import Settings
 from ansina.heart.journal import HeartJournalRepository
 from ansina.heart.runtime import HeartRuntime
+from ansina.heart.tick.brain_escalation_handler import BrainEscalationHandler
 from ansina.heart.tick.decision import TickDecision, parse_decision
 from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.snapshot import (
@@ -61,6 +63,43 @@ class DecisionHandler(Protocol):
     ) -> None: ...
 
 
+class CompositeDecisionHandler:
+    """Calls every handler in `handlers`, in order, awaiting each before the next.
+
+    The composition primitive issue #64 introduces so a second `DecisionHandler` (the
+    Brain escalation call) can be wired alongside `JournalDecisionHandler` without
+    rewriting either — `build_tick_loop` is the only caller today, composing
+    `(JournalDecisionHandler, BrainEscalationHandler)` in that order so the tick's own
+    journal row is always written before any Brain-call-outcome row that might follow
+    it for the same tick.
+
+    A handler that raises stops the ones after it from running — the same "no
+    swallowing inside a handler" posture every individual handler already has;
+    `TickLoop.run()`'s own swallow-and-log boundary is what isolates a composed
+    handler's failure from the rest of the loop, exactly as it already does for one
+    handler.
+    """
+
+    def __init__(self, handlers: Sequence[DecisionHandler]) -> None:
+        self._handlers = tuple(handlers)
+
+    async def handle(
+        self,
+        decision: TickDecision,
+        prompt: TickPrompt,
+        *,
+        tick_number: int,
+        duration_seconds: float,
+    ) -> None:
+        for handler in self._handlers:
+            await handler.handle(
+                decision,
+                prompt,
+                tick_number=tick_number,
+                duration_seconds=duration_seconds,
+            )
+
+
 class TickLifecycle(Protocol):
     """The minimal surface `create_app`'s lifespan needs: start, stop, health.
 
@@ -94,7 +133,12 @@ class TickLoopFactory(Protocol):
     return type again, from `TickLifecycle` to `TickController` (a strict superset)
     — `api/app.py`'s own `tick_loop` local needs the breaker counters to hand to
     `ansina.telemetry.sampler`, and the concrete `build_tick_loop` already returns a
-    real `TickLoop`, which already satisfies the wider Protocol.
+    real `TickLoop`, which already satisfies the wider Protocol. Issue #64 widens this
+    once more with `brain: BrainProvider | None` — `create_app` already builds `brain`
+    before the tick loop (reordered for this issue), so passing it through needs no new
+    construction, the same reasoning `db`/`readiness` were added on. `None` is a
+    legitimate value here (`[brain] enabled = false`), not an error — see
+    `BrainEscalationHandler`'s own `brain is None` branch.
     """
 
     def __call__(
@@ -105,6 +149,7 @@ class TickLoopFactory(Protocol):
         *,
         db: Database,
         readiness: ReadinessProbe,
+        brain: BrainProvider | None,
     ) -> TickController: ...
 
 
@@ -536,6 +581,7 @@ def build_tick_loop(
     *,
     db: Database,
     readiness: ReadinessProbe,
+    brain: BrainProvider | None,
 ) -> TickLoop:
     """The default `tick_loop_factory` for `create_app` — wires a `TickLoop` to
     `settings.heart.tick`, then registers two snapshot sources and the default
@@ -552,26 +598,51 @@ def build_tick_loop(
     Ships with `JournalDecisionHandler` (issue #55, replacing issue #11's
     `LoggingDecisionHandler`) as the default, writing one `heart_journal` row per
     completed tick via the same `HeartJournalRepository` the source above reads from.
+    Issue #64: when `settings.heart.tick.escalate_to_brain` is `True`, a second handler
+    — `BrainEscalationHandler` — is composed alongside it via `CompositeDecisionHandler`
+    (`JournalDecisionHandler` first, so the tick's own row always precedes any
+    Brain-call-outcome row for the same tick). When it's `False` (the default),
+    `decision_handler` stays the bare `JournalDecisionHandler` instance — the exact
+    object graph this function has always built, not merely equivalent behavior, which
+    is what makes `escalate_to_brain = false` a *verified* no-op rather than an
+    assumed one.
 
     `db`/`readiness` widen this signature beyond issue #11's original
     `(settings, heart)` — both already exist in `create_app` before the tick loop is
     built, so this needs no new construction of its own. Issue #55 widens `db` again,
     from a structural `HealthProbe` to a concrete `Database` — see `TickLoopFactory`'s
-    own docstring for why that's not a layering violation.
+    own docstring for why that's not a layering violation. Issue #64 widens this once
+    more with `brain` — see `TickLoopFactory`'s own docstring for that one too.
     """
     tick_settings = settings.heart.tick
     journal_settings = settings.heart.journal
     journal_repository = HeartJournalRepository(db)
+    journal_handler = JournalDecisionHandler(
+        journal_repository,
+        max_entries=journal_settings.max_entries,
+        retention_days=journal_settings.retention_days,
+    )
+    decision_handler: DecisionHandler = journal_handler
+    if tick_settings.escalate_to_brain:
+        decision_handler = CompositeDecisionHandler(
+            (
+                journal_handler,
+                BrainEscalationHandler(
+                    brain,
+                    journal_repository,
+                    model=settings.brain.model,
+                    max_output_tokens=settings.brain.max_output_tokens,
+                    max_entries=journal_settings.max_entries,
+                    retention_days=journal_settings.retention_days,
+                ),
+            )
+        )
     loop = TickLoop(
         heart,
         interval_seconds=tick_settings.interval_seconds,
         jitter_seconds=tick_settings.jitter_seconds,
         max_output_tokens=settings.heart.max_output_tokens,
-        decision_handler=JournalDecisionHandler(
-            journal_repository,
-            max_entries=journal_settings.max_entries,
-            retention_days=journal_settings.retention_days,
-        ),
+        decision_handler=decision_handler,
         max_consecutive_failures=tick_settings.max_consecutive_failures,
         overrun_ratio=tick_settings.overrun_ratio,
         auto_pause_enabled=tick_settings.auto_pause_enabled,

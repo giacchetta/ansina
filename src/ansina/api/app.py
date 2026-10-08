@@ -105,9 +105,12 @@ def create_app(
     `heart.tick.enabled` — `app.state.tick_loop` is `None` unless both are true.
     `brain_factory` (default `ansina.brain.build_brain_provider`, issue
     #12) follows the same shape again, gated by `brain.enabled` alone — the Brain has
-    no dependency on the Heart being enabled. Nothing calls `BrainProvider.stream()`
-    yet (the tick loop's `escalate` branch stays log-only until a follow-up issue wires
-    it up), so `app.state.brain` exists only for that future consumer to reach.
+    no dependency on the Heart being enabled. Built *before* `tick_loop_factory` is
+    called (reordered for issue #64) so it can be passed straight through: when
+    `[heart.tick] escalate_to_brain` is `True`, `build_tick_loop` composes a
+    `BrainEscalationHandler` that calls `BrainProvider.stream()` on an `escalate`
+    decision; when it's `False` (the default), `escalate` stays exactly as
+    log-only/journal-only as it always has been.
     `oidc_factory` (default `ansina.auth.build_oidc_login_service`, issue #43) takes
     `(db, settings)` rather than `heart_factory`/`brain_factory`'s bare `(settings,)` —
     unlike either, it needs a repository handle at construction time, not just at
@@ -153,18 +156,20 @@ def create_app(
     if resolved_settings.heart.enabled:
         heart = heart_factory(resolved_settings)
 
-    tick_loop: TickController | None = None
-    if heart is not None and resolved_settings.heart.tick.enabled:
-        tick_loop = tick_loop_factory(
-            resolved_settings, heart, db=db, readiness=readiness
-        )
-
     # Same "fail loudly before uvicorn binds a port" shape as `heart` above —
     # `BrainUnavailableError` (issue #12) surfaces here, not on the first `stream()`
     # call. Independent of `heart.enabled`: the Brain has no dependency on the Heart.
+    # Built *before* `tick_loop` (reordered for issue #64) so it can be passed
+    # straight through to `tick_loop_factory` below.
     brain: BrainProvider | None = None
     if resolved_settings.brain.enabled:
         brain = brain_factory(resolved_settings)
+
+    tick_loop: TickController | None = None
+    if heart is not None and resolved_settings.heart.tick.enabled:
+        tick_loop = tick_loop_factory(
+            resolved_settings, heart, db=db, readiness=readiness, brain=brain
+        )
 
     # Issue #61: independent of `heart.enabled` — see `create_app`'s own docstring
     # above. Built here (never inside `lifespan`), the same "assemble up front"

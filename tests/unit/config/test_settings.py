@@ -59,6 +59,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.tick.enabled is True
     assert settings.heart.tick.interval_seconds == 30.0
     assert settings.heart.tick.jitter_seconds == 3.0
+    assert settings.heart.tick.escalate_to_brain is False
     assert settings.heart.journal.max_entries == 2000
     assert settings.heart.journal.retention_days == 14
     assert settings.heart.journal.recent_entries == 5

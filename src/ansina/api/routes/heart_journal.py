@@ -22,7 +22,11 @@ from pydantic import BaseModel
 from ansina.api.authorization import require
 from ansina.api.problems import CODE_REQUEST_INVALID, problem_response
 from ansina.auth.clock import parse_iso
-from ansina.heart.journal import HeartJournalRepository, JournalEntry
+from ansina.heart.journal import (
+    BrainEscalationStatus,
+    HeartJournalRepository,
+    JournalEntry,
+)
 from ansina.heart.tick.decision import TickDecision
 
 if TYPE_CHECKING:
@@ -48,6 +52,14 @@ def _require_journal() -> Depends:
 
 
 class JournalEntryOut(BaseModel):
+    """`brain_status`/`brain_detail`/`brain_prompt_tokens`/`brain_completion_tokens`
+    (issue #64) are `null`/`""` on every `idle`/`act` row and on an `escalate` row
+    that predates this issue or that `[heart.tick] escalate_to_brain` never handed to
+    the Brain — they're only populated on the second row
+    `BrainEscalationHandler` appends after an `escalate` tick's own row, sharing its
+    `tick_number`.
+    """
+
     id: str
     created_at: str
     tick_number: int
@@ -55,6 +67,10 @@ class JournalEntryOut(BaseModel):
     note: str
     prompt_tokens: int
     duration_seconds: float
+    brain_status: BrainEscalationStatus | None
+    brain_detail: str
+    brain_prompt_tokens: int | None
+    brain_completion_tokens: int | None
 
     @classmethod
     def from_model(cls, entry: JournalEntry) -> JournalEntryOut:
@@ -66,6 +82,10 @@ class JournalEntryOut(BaseModel):
             note=entry.note,
             prompt_tokens=entry.prompt_tokens,
             duration_seconds=entry.duration_seconds,
+            brain_status=entry.brain_status,
+            brain_detail=entry.brain_detail,
+            brain_prompt_tokens=entry.brain_prompt_tokens,
+            brain_completion_tokens=entry.brain_completion_tokens,
         )
 
 

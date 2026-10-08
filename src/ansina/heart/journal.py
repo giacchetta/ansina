@@ -32,6 +32,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Self
 
 from ansina.auth.clock import iso, parse_iso
@@ -41,10 +42,35 @@ if TYPE_CHECKING:
     from ansina.heart.tick.decision import TickDecision
 
 
+class BrainEscalationStatus(StrEnum):
+    """What happened when `heart.tick.brain_escalation_handler.BrainEscalationHandler`
+    tried to hand an `escalate` decision to `BrainProvider.stream()`. See issue #64.
+
+    Defined here, not in `heart.tick.brain_escalation_handler` (where the handler that
+    produces it lives): `heart_journal.brain_status`'s own `CHECK` constraint is a fact
+    about *this table's* schema — the same reason `TickDecision` would live here too if
+    it didn't already exist in `heart.tick.decision` for an unrelated, older reason (see
+    this module's own docstring on the deferred import that avoids). No circular-import
+    risk here either way, since nothing outside this module needs to define it.
+    """
+
+    CALLED = "called"
+    DECLINED = "declined"
+    ERROR = "error"
+
+
 @dataclass(frozen=True, slots=True)
 class JournalEntry:
     """A row in `heart_journal` — one completed tick's decision and (for `act`/
     `escalate`) the code-generated note explaining what triggered it.
+
+    `brain_status`/`brain_detail`/`brain_prompt_tokens`/`brain_completion_tokens`
+    (issue #64) are `None`/`""` for every `idle`/`act` row and for an `escalate` row
+    that predates this issue — they're only ever set on the *second* row
+    `heart.tick.brain_escalation_handler.BrainEscalationHandler` appends after a
+    `JournalDecisionHandler`-written `escalate` row, sharing its `tick_number`.
+    Defaulted here so every pre-#64 `JournalEntry(...)` construction (tests
+    included) stays valid.
     """
 
     id: str
@@ -54,6 +80,10 @@ class JournalEntry:
     note: str
     prompt_tokens: int
     duration_seconds: float
+    brain_status: BrainEscalationStatus | None = None
+    brain_detail: str = ""
+    brain_prompt_tokens: int | None = None
+    brain_completion_tokens: int | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Self:
@@ -61,6 +91,7 @@ class JournalEntry:
         # is never imported at module scope here.
         from ansina.heart.tick.decision import TickDecision
 
+        brain_status = row["brain_status"]
         return cls(
             id=row["id"],
             created_at=row["created_at"],
@@ -69,6 +100,14 @@ class JournalEntry:
             note=row["note"],
             prompt_tokens=row["prompt_tokens"],
             duration_seconds=row["duration_seconds"],
+            brain_status=(
+                BrainEscalationStatus(brain_status)
+                if brain_status is not None
+                else None
+            ),
+            brain_detail=row["brain_detail"],
+            brain_prompt_tokens=row["brain_prompt_tokens"],
+            brain_completion_tokens=row["brain_completion_tokens"],
         )
 
 
@@ -93,10 +132,23 @@ class HeartJournalRepository:
         duration_seconds: float,
         max_entries: int,
         retention_days: int,
+        brain_status: BrainEscalationStatus | None = None,
+        brain_detail: str = "",
+        brain_prompt_tokens: int | None = None,
+        brain_completion_tokens: int | None = None,
     ) -> JournalEntry:
         """Inserts one row, then sweeps bounded retention as a documented side
         effect — the same "sweep on the already-writing path" shape
         `LoginThrottle.record_failure` uses for `login_attempts`.
+
+        `brain_status`/`brain_detail`/`brain_prompt_tokens`/`brain_completion_tokens`
+        (issue #64) are optional, keyword-only, and default to "no Brain interaction" —
+        every caller before issue #64 (`JournalDecisionHandler`) is unaffected.
+        `heart.tick.brain_escalation_handler.BrainEscalationHandler` is the one caller
+        that passes them, appending a *second* row for the same `tick_number` (this
+        repository is deliberately append-only — see the class docstring — so a second
+        row, not an update to the first, is how a later-arriving Brain-call outcome is
+        recorded).
         """
         entry_id = uuid.uuid4().hex
         with self._db.transaction() as cursor:
@@ -104,8 +156,9 @@ class HeartJournalRepository:
                 """
                 INSERT INTO heart_journal
                     (id, created_at, tick_number, decision, note, prompt_tokens,
-                     duration_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     duration_seconds, brain_status, brain_detail,
+                     brain_prompt_tokens, brain_completion_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
@@ -115,6 +168,10 @@ class HeartJournalRepository:
                     note,
                     prompt_tokens,
                     duration_seconds,
+                    brain_status.value if brain_status is not None else None,
+                    brain_detail,
+                    brain_prompt_tokens,
+                    brain_completion_tokens,
                 ),
             )
             row = cursor.execute(

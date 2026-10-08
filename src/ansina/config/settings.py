@@ -127,6 +127,16 @@ class TickSettings(BaseModel):
     # stay visible (in the daemon-state snapshot and in logs) either way.
     auto_pause_enabled: bool = True
 
+    # Issue #64: wires an `escalate` decision to `BrainProvider.stream()` (independent
+    # of `[brain] enabled` — a `True` flag with the Brain itself off/misconfigured is
+    # a "declined" journal outcome, not an error). Defaults `False` — "logged/
+    # journal-only" is the byte-for-byte behavior until an operator opts in, mirroring
+    # `[brain] enabled`'s own off-by-default shape. Issue #60's own 8-hour soak (zero
+    # false `escalate`s, a hard call-volume ceiling already enforced by the tick
+    # cadence + the circuit breaker above) is the evidence that no dedup/cooldown rung
+    # is needed before turning this on — see `AGENTS.md`'s M7 #64 entry.
+    escalate_to_brain: bool = False
+
 
 class JournalSettings(BaseModel):
     """The `heart_journal` table's bounded retention and replay size, consumed by
