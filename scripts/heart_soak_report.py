@@ -13,8 +13,9 @@ with `heart_journal_smoke_verify.py` rather than duplicating it.
 Output lands in a *gitignored* directory (`docs/heart/soak/`), auto-suffixed (`-2`,
 `-3`, ...) on a same-day collision so a re-render never clobbers a prior run — the same
 "never overwrite a report" discipline `scripts/remote-heart.sh` established for
-`docs/heart/bench/`. Reports are not committed pending issue #59's S3-compatible
-upload; `docs/heart/soak.md` (committed) documents why.
+`docs/heart/bench/`. Reports are not committed; `docs/heart/soak.md` (committed)
+documents why. `make heart-bench-publish` (issue #59, `[telemetry.s3]`) is the
+S3-compatible upload for this directory and `docs/heart/bench/` both.
 
 Usage: python scripts/heart_soak_report.py <run.log> <samples.jsonl> <journal.json> \
     <dest_dir>

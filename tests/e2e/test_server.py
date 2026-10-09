@@ -232,13 +232,20 @@ class Server:
 
 @contextmanager
 def _launch_server(
-    tmp_path: Path, *, env: dict[str, str] | None = None
+    tmp_path: Path,
+    *,
+    env: dict[str, str] | None = None,
+    extra_args: list[str] | None = None,
 ) -> Iterator[Server]:
     """Launch `python -m ansina` against `tmp_path`'s config, yielding its `Server`.
 
     A `@contextmanager` rather than a bare generator so a test can start, stop, and
     restart the server against the *same* `tmp_path` — e.g. to prove a migration
     applied on the first boot is not re-applied on the second.
+
+    `extra_args` (issue #62) is appended to the fixed argv — `["--dev"]` is its one
+    real use, proving Dev Mode's own preflight-skip path through a real subprocess
+    boot rather than only the unit suite's mocked one.
     """
     port = _free_port()
     (tmp_path / "ansina.toml").write_text(
@@ -249,7 +256,7 @@ def _launch_server(
     base_url = f"http://127.0.0.1:{port}"
 
     process = subprocess.Popen(  # fixed argv, no shell, no untrusted input
-        [sys.executable, "-m", "ansina"],
+        [sys.executable, "-m", "ansina", *(extra_args or [])],
         cwd=tmp_path,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1460,9 +1467,22 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         # (issue #38); (6,) = the totp credential type (issue #41); (7,) = role-mapping
         # provenance + the role_mappings unique index (issue #42); (8,) = the in-flight
         # OIDC login state table (issue #43); (9,) = the login-throttle table (issue
-        # #49); (10,) = the heart_journal table (issue #55) — bump this alongside
-        # `storage/migrations/` whenever a new migration lands.
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+        # #49); (10,) = the heart_journal table (issue #55); (11,) = the heart_journal
+        # brain-outcome columns (issue #64) — bump this alongside `storage/migrations/`
+        # whenever a new migration lands.
+        assert rows == [
+            (1,),
+            (2,),
+            (3,),
+            (4,),
+            (5,),
+            (6,),
+            (7,),
+            (8,),
+            (9,),
+            (10,),
+            (11,),
+        ]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
     with _launch_server(tmp_path) as srv:
@@ -1472,7 +1492,19 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
         # still exactly these rows — nothing re-applied
-        assert rows == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+        assert rows == [
+            (1,),
+            (2,),
+            (3,),
+            (4,),
+            (5,),
+            (6,),
+            (7,),
+            (8,),
+            (9,),
+            (10,),
+            (11,),
+        ]
 
 
 def test_heart_enabled_without_a_viable_runtime_fails_loudly(tmp_path: Path) -> None:
@@ -1534,3 +1566,106 @@ def test_shuts_down_cleanly(tmp_path: Path) -> None:
     assert process.returncode == -signal.SIGTERM
     output = process.stdout.read() if process.stdout else ""
     assert "Traceback" not in output
+
+
+def test_telemetry_disabled_by_default_creates_no_spool_directory(
+    tmp_path: Path,
+) -> None:
+    """AC: `[telemetry] enabled = false` (the default) is byte-for-byte a no-op —
+    proven here as a real subprocess boot (`python -m ansina`), not just
+    `create_app`/`configure_logging` called in isolation the way the unit suite
+    exercises them.
+    """
+    spool_dir = tmp_path / "telemetry-spool"
+    with _launch_server(
+        tmp_path, env={"ANSINA_TELEMETRY__SPOOL_DIR": str(spool_dir)}
+    ) as srv:
+        response = httpx.get(f"{srv.base_url}/healthz")
+        assert response.status_code == 200
+
+    assert not spool_dir.exists()
+
+
+def test_telemetry_enabled_produces_sample_and_log_files(tmp_path: Path) -> None:
+    """Issue #61's whole producer pipeline, end to end: `python -m ansina`'s real
+    boot sequence (`configure_logging` then `create_app`, exactly as `__main__.main`
+    runs them together — the unit suite only ever calls each in isolation) must
+    actually create both rotated families, with the documented sample schema, and
+    the mirrored log must not leak the configured admin's own token.
+    """
+    spool_dir = tmp_path / "telemetry-spool"
+    with _launch_server(
+        tmp_path,
+        env={
+            "ANSINA_TELEMETRY__ENABLED": "true",
+            "ANSINA_TELEMETRY__SPOOL_DIR": str(spool_dir),
+            "ANSINA_TELEMETRY__SAMPLE_INTERVAL_SECONDS": "0.2",
+            "ANSINA_SECURITY__ADMIN_USERNAME": _E2E_ADMIN_USERNAME,
+            "ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN,
+        },
+    ) as srv:
+        samples_path = spool_dir / "samples.jsonl"
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if samples_path.exists() and samples_path.read_text().strip():
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("samples.jsonl never appeared with content within 5s")
+
+        process = srv.process
+
+    sample = json.loads(samples_path.read_text().splitlines()[0])
+    for key in (
+        "t",
+        "elapsed_s",
+        "rss_kib",
+        "ticks",
+        "paused",
+        "paused_reason",
+        "last_decision",
+        "last_duration_seconds",
+        "failures_total",
+        "consecutive_failures",
+        "consecutive_overruns",
+    ):
+        assert key in sample
+
+    log_path = spool_dir / "log.jsonl"
+    assert log_path.exists()
+    log_content = log_path.read_text()
+    assert json.loads(log_content.splitlines()[0])["message"]  # real JSON lines
+    assert _E2E_TOKEN not in log_content
+
+    output = process.stdout.read() if process.stdout else ""
+    assert _E2E_TOKEN not in output
+
+
+def test_dev_mode_flag_boots_normally_and_skips_the_sidecar_when_telemetry_is_disabled(
+    tmp_path: Path,
+) -> None:
+    """Issue #62: `--dev` with `[telemetry]` left disabled (the default) must still
+    boot the daemon normally — the preflight's own first (cheapest) check must skip
+    with a logged reason, never spawn anything, and never affect `/healthz`. Neither
+    CI leg has the `vector` binary installed, so this is also, as a side effect, the
+    one path both legs exercise for real on every run.
+    """
+    with _launch_server(
+        tmp_path,
+        env={"ANSINA_SECURITY__ENABLED": "false"},
+        extra_args=["--dev"],
+    ) as srv:
+        response = httpx.get(f"{srv.base_url}/healthz")
+        assert response.status_code == 200
+
+        readyz = httpx.get(f"{srv.base_url}/readyz")
+        assert readyz.status_code == 200
+
+        process = srv.process
+
+    assert process.returncode == -signal.SIGTERM
+
+    output = process.stdout.read() if process.stdout else ""
+    assert "DEV MODE ENABLED" in output
+    assert "vector sidecar not started" in output
+    assert "telemetry.enabled is false" in output

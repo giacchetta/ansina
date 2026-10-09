@@ -8,6 +8,7 @@ import pytest
 from ansina.config import ConfigError, Settings, load_settings
 from ansina.heart.eval import __main__ as heart_main
 from ansina.heart.eval.provenance import Provenance
+from ansina.heart.eval.storage import bench_key
 from ansina.heart.runtime import BaseHeartRuntime, HeartUnavailableError
 
 
@@ -43,6 +44,16 @@ def _fixtures_file(tmp_path: Path) -> Path:
         '{"id": "a1", "expect": "act", "items": [{"source": "s", "text": "t"}]}\n'
         '{"id": "e1", "expect": "escalate", '
         '"items": [{"source": "s", "text": "t"}]}\n'
+    )
+    return path
+
+
+def _triage_fixtures_file(tmp_path: Path) -> Path:
+    path = tmp_path / "triage_fixtures.jsonl"
+    path.write_text(
+        '{"id": "t1", "expect": "trivial", "request": "what is 2+2?"}\n'
+        '{"id": "o1", "expect": "tool-only", "request": "pause the tick loop"}\n'
+        '{"id": "c1", "expect": "complex", "request": "design a migration plan"}\n'
     )
     return path
 
@@ -279,11 +290,14 @@ def test_main_writes_resolved_provenance_into_the_report(
     assert payload["branch"] == "m6-heartbeat"
 
 
-def test_default_out_dir_and_prompt_variant() -> None:
+def test_default_out_dir_and_suite() -> None:
     args = heart_main._build_parser().parse_args([])
 
     assert args.out_dir == Path("docs/heart/bench")
-    assert args.prompt_variant == "strict"
+    assert args.suite == "tick"
+    # Resolved per-suite inside main(), not a fixed default here — see
+    # `test_main_resolves_the_default_prompt_variant_per_suite` below.
+    assert args.prompt_variant is None
     assert args.model_repo is None
     assert args.fixtures is None
     assert args.max_output_tokens is None
@@ -293,3 +307,298 @@ def test_default_out_dir_and_prompt_variant() -> None:
 def test_prompt_variant_rejects_an_unknown_name() -> None:
     with pytest.raises(SystemExit):
         heart_main._build_parser().parse_args(["--prompt-variant", "nope"])
+
+
+def test_suite_rejects_an_unknown_name() -> None:
+    with pytest.raises(SystemExit):
+        heart_main._build_parser().parse_args(["--suite", "nope"])
+
+
+# --- issue #13: the --suite flag and the triage bench --------------------------------
+
+
+def test_main_runs_the_triage_suite_when_selected(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _FakeRuntime(replies=["trivial", "tool-only", "complex"])
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    code = heart_main.main(
+        [
+            "--suite",
+            "triage",
+            "--fixtures",
+            str(_triage_fixtures_file(tmp_path)),
+            "--out-dir",
+            str(out_dir),
+            "--model-repo",
+            "fake/model",
+        ]
+    )
+
+    assert code == 0
+    assert runtime.load_calls == 1
+    assert runtime.unload_calls == 1
+    md_files = list(out_dir.glob("*.md"))
+    assert len(md_files) == 1
+    assert "triage" in md_files[0].name
+    assert "strict" in md_files[0].name
+    payload = json.loads(next(out_dir.glob("*.json")).read_text())
+    assert payload["gate"]["passed"] is True
+    assert "metrics" in payload and "confusion" in payload["metrics"]
+    assert "PASS" in capsys.readouterr().out
+
+
+def test_main_resolves_the_default_prompt_variant_per_suite(
+    loaded_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _FakeRuntime(replies=["trivial", "tool-only", "complex"])
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    heart_main.main(
+        [
+            "--suite",
+            "triage",
+            "--fixtures",
+            str(_triage_fixtures_file(tmp_path)),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    md_files = list(out_dir.glob("*.md"))
+    assert len(md_files) == 1
+    assert "-triage-strict" in md_files[0].name
+
+
+def test_main_rejects_a_prompt_variant_not_in_the_selected_suites_map(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`fewshot` is a real tick-suite variant but not a triage one — must be
+    rejected at the suite-specific validation step in `main()`, not accepted just
+    because `argparse`'s own `--help` union of both suites' names includes it.
+    """
+    runtime = _FakeRuntime(replies=["trivial"])
+    runtime_calls = _patch_common(
+        monkeypatch, settings=loaded_settings, runtime=runtime
+    )
+
+    code = heart_main.main(
+        [
+            "--suite",
+            "triage",
+            "--prompt-variant",
+            "fewshot",
+            "--fixtures",
+            str(_triage_fixtures_file(tmp_path)),
+        ]
+    )
+
+    assert code == 1
+    assert "not a variant of the" in capsys.readouterr().err
+    assert runtime_calls == []
+
+
+# --- issue #59: the upload hook ------------------------------------------------------
+
+
+class _FakeStorage:
+    def __init__(
+        self,
+        *,
+        existing: frozenset[str] = frozenset(),
+        raise_on: str | None = None,
+    ) -> None:
+        self._existing = existing
+        self._raise_on = raise_on
+        self.uploads: list[tuple[Path, str]] = []
+
+    def existing_keys(self, prefix: str) -> frozenset[str]:
+        if self._raise_on == "list":
+            raise RuntimeError("list boom")
+        return self._existing
+
+    def upload(self, local_path: Path, key: str) -> None:
+        if self._raise_on == "upload":
+            raise RuntimeError("upload boom")
+        self.uploads.append((local_path, key))
+
+
+def test_upload_hook_is_a_quiet_no_op_when_telemetry_disabled(
+    loaded_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`loaded_settings` has `[telemetry.s3] enabled = false` by default — the
+    common, unconfigured case — so `build_report_storage` itself returns `None`
+    with no patching needed; this just asserts `main()`'s own happy path is
+    unaffected by it (already implicitly covered by the happy-path test above,
+    made explicit here).
+    """
+    runtime = _FakeRuntime(replies=["idle", "act", "escalate"])
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    code = heart_main.main(
+        ["--fixtures", str(_fixtures_file(tmp_path)), "--out-dir", str(out_dir)]
+    )
+
+    assert code == 0
+    assert list(out_dir.glob("*.md")) and list(out_dir.glob("*.json"))
+
+
+def test_upload_hook_uploads_both_files_when_enabled(
+    loaded_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    enabled_settings = loaded_settings.model_copy(
+        update={
+            "telemetry": loaded_settings.telemetry.model_copy(
+                update={
+                    "s3": loaded_settings.telemetry.s3.model_copy(
+                        update={"enabled": True}
+                    )
+                }
+            )
+        }
+    )
+    runtime = _FakeRuntime(replies=["idle", "act", "escalate"])
+    _patch_common(monkeypatch, settings=enabled_settings, runtime=runtime)
+    storage = _FakeStorage()
+    monkeypatch.setattr(heart_main, "build_report_storage", lambda _s3: storage)
+    out_dir = tmp_path / "bench"
+
+    heart_main.main(
+        ["--fixtures", str(_fixtures_file(tmp_path)), "--out-dir", str(out_dir)]
+    )
+
+    assert len(storage.uploads) == 2
+    local_paths = {path for path, _key in storage.uploads}
+    keys = {key for _path, key in storage.uploads}
+    assert all(path.exists() for path in local_paths)
+    md_files = list(out_dir.glob("*.md"))
+    assert len(md_files) == 1
+    stem = md_files[0].stem
+    assert keys == {bench_key(f"{stem}.md"), bench_key(f"{stem}.json")}
+
+
+def test_upload_hook_suffixes_the_key_on_a_bucket_collision(
+    loaded_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    enabled_settings = loaded_settings.model_copy(
+        update={
+            "telemetry": loaded_settings.telemetry.model_copy(
+                update={
+                    "s3": loaded_settings.telemetry.s3.model_copy(
+                        update={"enabled": True}
+                    )
+                }
+            )
+        }
+    )
+    runtime = _FakeRuntime(replies=["idle", "act", "escalate"])
+    _patch_common(monkeypatch, settings=enabled_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+    first_storage = _FakeStorage()
+    monkeypatch.setattr(heart_main, "build_report_storage", lambda _s3: first_storage)
+
+    heart_main.main(
+        ["--fixtures", str(_fixtures_file(tmp_path)), "--out-dir", str(out_dir)]
+    )
+    md_files = list(out_dir.glob("*.md"))
+    stem = md_files[0].stem
+    first_run_keys = {key for _path, key in first_storage.uploads}
+    assert first_run_keys == {bench_key(f"{stem}.md"), bench_key(f"{stem}.json")}
+
+    # Second run against a bucket that already has that stem's keys: the upload
+    # must go out under a suffixed key, while the local files stay named `stem`
+    # (the real write_text calls happen again, overwriting the same local path).
+    # A fresh runtime, since the first run already exhausted the scripted replies.
+    _patch_common(
+        monkeypatch,
+        settings=enabled_settings,
+        runtime=_FakeRuntime(replies=["idle", "act", "escalate"]),
+    )
+    colliding_storage = _FakeStorage(existing=frozenset(first_run_keys))
+    monkeypatch.setattr(
+        heart_main, "build_report_storage", lambda _s3: colliding_storage
+    )
+
+    heart_main.main(
+        ["--fixtures", str(_fixtures_file(tmp_path)), "--out-dir", str(out_dir)]
+    )
+
+    second_run_keys = {key for _path, key in colliding_storage.uploads}
+    assert second_run_keys == {
+        bench_key(f"{stem}-2.md"),
+        bench_key(f"{stem}-2.json"),
+    }
+    local_paths = {path.name for path, _key in colliding_storage.uploads}
+    assert local_paths == {f"{stem}.md", f"{stem}.json"}
+
+
+def test_upload_hook_logs_and_swallows_a_listing_failure(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    enabled_settings = loaded_settings.model_copy(
+        update={
+            "telemetry": loaded_settings.telemetry.model_copy(
+                update={
+                    "s3": loaded_settings.telemetry.s3.model_copy(
+                        update={"enabled": True}
+                    )
+                }
+            )
+        }
+    )
+    runtime = _FakeRuntime(replies=["idle", "act", "escalate"])
+    _patch_common(monkeypatch, settings=enabled_settings, runtime=runtime)
+    storage = _FakeStorage(raise_on="list")
+    monkeypatch.setattr(heart_main, "build_report_storage", lambda _s3: storage)
+    out_dir = tmp_path / "bench"
+
+    with caplog.at_level("WARNING"):
+        code = heart_main.main(
+            ["--fixtures", str(_fixtures_file(tmp_path)), "--out-dir", str(out_dir)]
+        )
+
+    assert code == 0  # the gate passed; the upload failure never changes this
+    assert storage.uploads == []
+    assert list(out_dir.glob("*.md")) and list(out_dir.glob("*.json"))
+    assert "report upload failed" in caplog.text
+
+
+def test_upload_hook_logs_and_swallows_an_upload_failure(
+    loaded_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    enabled_settings = loaded_settings.model_copy(
+        update={
+            "telemetry": loaded_settings.telemetry.model_copy(
+                update={
+                    "s3": loaded_settings.telemetry.s3.model_copy(
+                        update={"enabled": True}
+                    )
+                }
+            )
+        }
+    )
+    runtime = _FakeRuntime(replies=["idle", "act", "escalate"])
+    _patch_common(monkeypatch, settings=enabled_settings, runtime=runtime)
+    storage = _FakeStorage(raise_on="upload")
+    monkeypatch.setattr(heart_main, "build_report_storage", lambda _s3: storage)
+    out_dir = tmp_path / "bench"
+
+    code = heart_main.main(
+        ["--fixtures", str(_fixtures_file(tmp_path)), "--out-dir", str(out_dir)]
+    )
+
+    assert code == 0
+    assert list(out_dir.glob("*.md")) and list(out_dir.glob("*.json"))

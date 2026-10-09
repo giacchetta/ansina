@@ -106,8 +106,8 @@ suffixed `-2`, `-3`, ... on a same-day collision — never overwritten) via
   the stated caveat: `GET /heart/journal`'s own page cap (500 rows) covers only the
   most recent ~4 hours of an 8-hour run at the default cadence, not the whole thing.
 - **Non-idle journal entries** — every `act`/`escalate` row in the fetched page, with
-  its code-generated note verbatim — the raw material `docs/heart/findings.md`'s
-  genuine-vs-noise review draws from.
+  its code-generated note verbatim — the raw material a genuine-vs-noise review (the
+  PR that lands a given soak run) draws from.
 
 ## If the soak finds a real bug
 
@@ -120,8 +120,14 @@ can't, and deferring a real finding back into a vague TODO defeats that purpose.
 `docs/heart/soak/` is gitignored, not committed — the same decision #58 made for
 `docs/heart/bench/`, for the same reason: a soak's raw `samples.jsonl` plus `run.log`
 can run to hundreds of KiB to low MiB per run, and a corpus that only ever grows
-belongs in an object store, not git history. **Issue #59** (S3-compatible upload,
-currently blocked on #58 and parked in the Backlog milestone) is the intended
-destination; until it lands, `make remote-heart-soak-fetch` writes here for local
-analysis only, and the numbers that matter are copied into
-`docs/heart/findings.md` (committed) and the PR that lands this work.
+belongs in an object store, not git history. **Issue #59** gives it exactly that: set
+`[telemetry.s3]` in `ansina.toml` (bucket/endpoint/region) plus the two
+`ANSINA_TELEMETRY__S3__*` credentials in `.envrc`, then run `make heart-bench-publish`
+to upload every soak artifact set here (and every bench report in `docs/heart/bench/`)
+not already in the bucket — a verified no-op on a second run. With `[telemetry.s3]`
+left disabled (the default), `make remote-heart-soak-fetch` writes here for local
+analysis only, and the numbers that matter are called out in the PR that lands this
+work either way — Ansina itself does not maintain a standing findings/evidence
+write-up; that analysis, if any, is the consumer corpus's own job (see
+`docs/ml/corpus-contract.md`), delivered back as a GitHub issue when it has
+something actionable to say, not as a file this repo carries forward.

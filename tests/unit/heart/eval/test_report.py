@@ -117,6 +117,7 @@ def test_report_to_json_round_trips_through_json_loads() -> None:
     text = report_to_json(report, gate=gate)
     payload = json.loads(text)
 
+    assert payload["suite"] == "tick"
     assert payload["model_repo"] == "mlx-community/Test-Model-4bit"
     assert payload["prompt_variant"] == "baseline"
     assert payload["commit"] == "abc1234"

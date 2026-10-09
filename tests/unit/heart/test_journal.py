@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ansina.auth.clock import iso
-from ansina.heart.journal import HeartJournalRepository, JournalEntry
+from ansina.heart.journal import (
+    BrainEscalationStatus,
+    HeartJournalRepository,
+    JournalEntry,
+)
 from ansina.heart.tick.decision import TickDecision
 from ansina.storage.database import Database
 
@@ -50,6 +54,42 @@ def test_append_returns_a_fully_populated_entry(db: Database) -> None:
     assert entry.note == "daemon_state reported: database unhealthy."
     assert entry.prompt_tokens == 10
     assert entry.duration_seconds == 0.5
+    # No Brain interaction on this row — see the dedicated `brain_*` tests below.
+    assert entry.brain_status is None
+    assert entry.brain_detail == ""
+    assert entry.brain_prompt_tokens is None
+    assert entry.brain_completion_tokens is None
+
+
+def test_append_with_brain_outcome_persists_and_reads_back(db: Database) -> None:
+    """Issue #64's four new optional params — every pre-#64 caller (the test above)
+    is unaffected by their defaults; this is the one test that exercises them.
+    """
+    repository = HeartJournalRepository(db)
+
+    entry = repository.append(
+        created_at=iso(_NOW),
+        tick_number=3,
+        decision=TickDecision.ESCALATE,
+        note="",
+        prompt_tokens=10,
+        duration_seconds=1.5,
+        max_entries=1000,
+        retention_days=365,
+        brain_status=BrainEscalationStatus.CALLED,
+        brain_detail="",
+        brain_prompt_tokens=42,
+        brain_completion_tokens=7,
+    )
+
+    assert entry.brain_status is BrainEscalationStatus.CALLED
+    assert entry.brain_prompt_tokens == 42
+    assert entry.brain_completion_tokens == 7
+
+    reloaded = repository.list_recent(limit=1)[0]
+    assert reloaded.brain_status is BrainEscalationStatus.CALLED
+    assert reloaded.brain_prompt_tokens == 42
+    assert reloaded.brain_completion_tokens == 7
 
 
 def test_append_generates_a_unique_id_per_row(db: Database) -> None:

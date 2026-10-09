@@ -19,7 +19,7 @@ import os
 import re
 import tomllib
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -127,6 +127,16 @@ class TickSettings(BaseModel):
     # stay visible (in the daemon-state snapshot and in logs) either way.
     auto_pause_enabled: bool = True
 
+    # Issue #64: wires an `escalate` decision to `BrainProvider.stream()` (independent
+    # of `[brain] enabled` — a `True` flag with the Brain itself off/misconfigured is
+    # a "declined" journal outcome, not an error). Defaults `False` — "logged/
+    # journal-only" is the byte-for-byte behavior until an operator opts in, mirroring
+    # `[brain] enabled`'s own off-by-default shape. Issue #60's own 8-hour soak (zero
+    # false `escalate`s, a hard call-volume ceiling already enforced by the tick
+    # cadence + the circuit breaker above) is the evidence that no dedup/cooldown rung
+    # is needed before turning this on — see `AGENTS.md`'s M7 #64 entry.
+    escalate_to_brain: bool = False
+
 
 class JournalSettings(BaseModel):
     """The `heart_journal` table's bounded retention and replay size, consumed by
@@ -176,7 +186,9 @@ class HeartSettings(BaseModel):
     # (3-way accuracy >= 0.90, 0 false act/escalate on the obviously-idle subset,
     # 0 parse-fallback rate, p95 latency <= 20% of interval_seconds) — measured
     # against `heart.tick.prompts.DEFAULT_PROMPT_VARIANT` ("strict"), 95.8%
-    # accuracy, see `docs/heart/bench/`. Superseded the M1-era placeholder default.
+    # accuracy, see `docs/heart/bench/` (published to the report bucket once
+    # `make heart-bench-publish` has run, issue #59). Superseded the M1-era
+    # placeholder default.
     model_repo: str = "mlx-community/gemma-4-e2b-it-4bit"
     cache_dir: Path = Path("~/.cache/ansina/models")
     # The blueprint's 8k context budget is a hard ceiling, not a target (issue #10) —
@@ -186,11 +198,12 @@ class HeartSettings(BaseModel):
     max_output_tokens: int = Field(default=512, ge=1)
     # Default `True` (issue #53): every model on the bench ladder is chat/instruct-
     # tuned, and a raw (untemplated) prompt measurably makes one continue the prompt
-    # as free text instead of answering it — see `docs/heart/bench/`'s first (no-
-    # template) report, 100% parse-fallback. `MlxHeartRuntime` applies the loaded
-    # tokenizer's own chat template when this is `True` and the tokenizer exposes
-    # one; `False` is the pre-#53 raw-prompt behavior, kept as an escape hatch for a
-    # future base (non-instruct) model.
+    # as free text instead of answering it — see the first (no-template) report,
+    # `2026-09-29-Qwen3.5-2B-MLX-4bit-baseline-notemplate.{md,json}` (bucket key
+    # `kind=bench/dt=2026-09-29/...`, issue #59), 100% parse-fallback.
+    # `MlxHeartRuntime` applies the loaded tokenizer's own chat template when this
+    # is `True` and the tokenizer exposes one; `False` is the pre-#53 raw-prompt
+    # behavior, kept as an escape hatch for a future base (non-instruct) model.
     apply_chat_template: bool = True
     tick: TickSettings = Field(default_factory=TickSettings)
     journal: JournalSettings = Field(default_factory=JournalSettings)
@@ -576,6 +589,187 @@ class CorsSettings(BaseModel):
         return self
 
 
+class S3Settings(BaseModel):
+    """S3-compatible object store for the Heart bench/soak report corpus, consumed by
+    issue #59's `ansina.heart.eval.storage`. Also the one config surface issue #61's
+    telemetry producer and issue #62's Vector-sidecar supervision are expected to
+    read from, so it lives at `[telemetry.s3]`, not nested under `[heart]`.
+
+    `enabled=False` (the default) means `build_report_storage` returns `None` and
+    nothing in `heart/eval/__main__.py`/`heart/eval/publish.py` attempts a network
+    call — same shape as `[heart]`/`[brain]`/`[security.oidc]`/`[security.cors]`.
+
+    Deliberately **no** `model_validator` refusing `enabled=True` with an incomplete
+    config, unlike `OidcSettings`/`CorsSettings` above: issue #59's own AC requires a
+    missing bucket or bad credentials to degrade to a *logged* failure at upload time,
+    never a boot-time `ConfigError` that would make `make heart-bench`'s own gate
+    verdict unreachable. `build_report_storage` is what validates coherence instead.
+
+    "S3-compatible," not "AWS" — `endpoint_url` lets Cloudflare R2 (the M7 lab/
+    acceptance target), MinIO, Backblaze B2, Wasabi, or GCP Cloud Storage's S3/XML
+    interop stand in for AWS S3 itself, the same way `[brain] base_url` already lets
+    any OpenAI-compatible endpoint stand in for OpenAI. Empty string means "use
+    boto3's own default AWS endpoint resolution."
+
+    `access_key_id`/`secret_access_key` are env-only `SecretStr`s, the same hard
+    "secret in `ansina.toml` is a startup error" rule every other Ansina secret
+    follows (enforced generically by `_AnsinaTomlSource`/`_walk_secret_paths`, no new
+    code needed here). Ansina does not fall back to boto3's ambient credential chain
+    (environment/shared-config/instance-profile) — both fields are required together
+    once `enabled=True`, the same "nothing calls `os.getenv` directly" discipline
+    every other subsystem in this codebase follows.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = False
+    bucket: str = ""
+    endpoint_url: str = ""
+    # Cloudflare R2 requires exactly this value; a real AWS deployment overrides it
+    # with a genuine region name.
+    region: str = "auto"
+    key_prefix: str = ""
+    access_key_id: SecretStr | None = None
+    secret_access_key: SecretStr | None = None
+
+
+class TelemetrySettings(BaseModel):
+    """Umbrella for `[telemetry.*]`: the object store (`s3`, issue #59) plus the
+    flag-gated local producer (issue #61, `ansina.telemetry`) — a continuous,
+    file-only RSS/tick/decision sample stream plus a redacted log mirror, both
+    bounded by the same three-way budget below. `enabled = false` (the default) is
+    a byte-for-byte no-op: no spool directory is created, no log-mirror handler is
+    attached (`ansina.logging.setup.configure_logging`), and no sampling loop starts
+    (`ansina.api.app.create_app`) — same "off means nothing happens" shape
+    `[heart]`/`[security.oidc]`/`[security.cors]` already use. Issue #62's Vector
+    sidecar config will land as a further sibling under this same table, not under
+    `[security]`/`[heart]`.
+
+    Telemetry never writes to SQLite and never uploads anything itself (that's
+    issue #62's sidecar and `s3`'s own `heart.eval.storage`/`heart.eval.publish`) —
+    files only, and strictly local.
+    """
+
+    # `validate_default=True` (unlike the shared `_MODEL_CONFIG`) so the *default*
+    # `spool_dir` goes through `_resolve_spool_dir` too — same reasoning
+    # `DatabaseSettings`/`HeartSettings` already document for their own paths.
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    enabled: bool = False
+
+    # Where rotated sample/log files are written. Never created by this settings
+    # model itself (only resolved to an absolute path) — `enabled = false` must
+    # create nothing, so the directory is only ever made lazily, by
+    # `ansina.telemetry.rotation.SpooledRotatingWriter`'s own first write, and only
+    # when something is actually enabled to write.
+    spool_dir: Path = Path("~/.local/state/ansina/telemetry")
+
+    # Matches `scripts/heart-soak-run.sh`'s own sampling cadence (issue #56).
+    sample_interval_seconds: float = Field(default=60.0, gt=0)
+
+    # Per rotated-file-family budget (one family for samples, one for the log
+    # mirror — see `ansina.telemetry.rotation`'s own module docstring for why each
+    # family is bounded independently rather than sharing one combined pool).
+    # 1 MiB/file, 100 MiB/family total, 7 days — generous headroom against the
+    # issue's own measured ~15 MB/week combined real rate, against a 10 GB/week
+    # target ceiling.
+    max_file_bytes: int = Field(default=1_048_576, gt=0)
+    max_spool_bytes: int = Field(default=104_857_600, gt=0)
+    # Independent of `max_spool_bytes`, mirroring `LoginAttemptRepository.
+    # delete_expired`'s own two-cutoffs reasoning: nothing guarantees one bound is
+    # tighter than the other, so a file failing either test is deleted.
+    retention_hours: int = Field(default=168, ge=1)
+
+    s3: S3Settings = Field(default_factory=S3Settings)
+
+    @field_validator("spool_dir")
+    @classmethod
+    def _resolve_spool_dir(cls, value: Path) -> Path:
+        """Same `~`-expand-and-anchor-to-CWD treatment as
+        `DatabaseSettings._resolve_path`/`HeartSettings._resolve_paths`.
+        """
+        return value.expanduser().resolve()
+
+    @model_validator(mode="after")
+    def _validate_file_fits_in_spool(self) -> TelemetrySettings:
+        """A rotated file that could never fit under its own family's total cap is
+        a configuration error, not something to discover later at rotation time —
+        the same "fail loudly, don't discover this on the first real request"
+        reasoning `CorsSettings`/`OidcSettings` already apply to their own
+        enabled-requires-coherent-config checks. Raised directly (not `ValueError`):
+        a model-level check with no single field `loc`, same pattern those two use.
+        """
+        if self.max_file_bytes > self.max_spool_bytes:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "telemetry.max_file_bytes: must be <= "
+                        "telemetry.max_spool_bytes (got "
+                        f"max_file_bytes={self.max_file_bytes}, "
+                        f"max_spool_bytes={self.max_spool_bytes})"
+                    ]
+                )
+            )
+        return self
+
+
+class DevSettings(BaseModel):
+    """`[dev]` — the lab/pre-customer posture (issue #62), never a default.
+
+    `enabled = false` (the default) is a byte-for-byte no-op: `ansina.dev.dev_mode`
+    yields immediately with nothing logged and nothing spawned. `enabled = true` is
+    set only by `python -m ansina --dev` (`ANSINA_DEV__ENABLED=true` works too, since
+    every setting is env-reachable) — established in `__main__.py` before uvicorn
+    binds a port, never inside `create_app()`/its lifespan, so the app factory and
+    every subprocess-launched test (`tests/e2e`, which never pass `--dev`) see zero
+    change.
+
+    Deliberately **no** `model_validator` refusing `enabled=True` with Vector missing
+    or `[telemetry]`/`[telemetry.s3]` incoherent, the same reasoning `S3Settings`
+    documents for its own `enabled=True`: every one of `ansina.dev.vector.preflight`'s
+    checks is a *logged skip*, never a boot-time `ConfigError` — a lab posture must
+    still boot the daemon normally when its sidecar can't come up.
+
+    `vector_binary` must resolve to a **0.45.x** build — see `ansina.dev.vector`'s
+    own module-level comment for why every later release is incompatible with
+    Cloudflare R2 (an empirical finding, not a guess: reproduced against this
+    project's own bucket, tracked upstream at vectordotdev/vector#23029).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    enabled: bool = False
+
+    # Resolved via `shutil.which` at preflight time, not here — a name (the common
+    # case) must stay a `PATH` lookup, not get silently turned into `None`/an error
+    # by this model just because it isn't yet an absolute path on this machine.
+    vector_binary: str = "vector"
+
+    # The committed, hand-editable sidecar config (issue #62's "Vector config
+    # ownership" — a static file, never daemon-generated, so there is no second copy
+    # to drift). Same `~`-expand-and-anchor-to-CWD treatment as `DatabaseSettings.path`.
+    vector_config: Path = Path("deploy/vector.toml")
+
+    # One post-spawn liveness check, no continuous supervision loop (per the issue's
+    # own "Dev Mode" scope) — this is how long after spawn that one check waits.
+    liveness_delay_seconds: float = Field(default=1.0, gt=0)
+
+    # `terminate()` -> wait this long -> `kill()`, guaranteeing no orphan survives a
+    # deliberate `dev_mode()` exit (SIGKILL to the daemon itself is a separate,
+    # documented limitation — see `ansina.dev.posture`).
+    shutdown_timeout_seconds: float = Field(default=5.0, gt=0)
+
+    # Bounds the one-time `vector validate --no-environment` preflight call — kept
+    # short since it never touches the network (`--no-environment` skips the sinks'
+    # own connectivity check), just config parsing.
+    validate_timeout_seconds: float = Field(default=30.0, gt=0)
+
+    @field_validator("vector_config")
+    @classmethod
+    def _resolve_vector_config(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -854,6 +1048,8 @@ class Settings(BaseSettings):
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     heart: HeartSettings = Field(default_factory=HeartSettings)
     brain: BrainSettings = Field(default_factory=BrainSettings)
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
+    dev: DevSettings = Field(default_factory=DevSettings)
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:
@@ -920,8 +1116,20 @@ def _format_validation_error(
     return _render_report(problems)
 
 
-def load_settings(config_file: str | Path | None = None) -> Settings:
+def load_settings(
+    config_file: str | Path | None = None,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> Settings:
     """Load `Settings` from defaults, `ansina.toml` (or `config_file`), and env vars.
+
+    `overrides` (new, issue #62) is passed as `Settings(**overrides)` — the designed
+    highest-priority source `settings_customise_sources` already ranks `init_settings`
+    as, not a second, parallel override mechanism. `__main__.py`'s `--dev` flag is the
+    one real caller (`overrides={"dev": {"enabled": True}}`): a nested dict merges
+    with env/file values for every other field exactly the way two config sources
+    already merge with each other, so passing `{"dev": {...}}` can never shadow an
+    unrelated table like `[security]`.
 
     Raises `ConfigError` with one aggregated, readable report if anything is invalid —
     never a bare `pydantic.ValidationError` or `tomllib.TOMLDecodeError`.
@@ -929,7 +1137,7 @@ def load_settings(config_file: str | Path | None = None) -> Settings:
     override = Path(config_file) if config_file is not None else None
     token = _config_file_override.set(override)
     try:
-        return Settings()
+        return Settings(**(overrides or {}))
     except ValidationError as exc:
         secret_paths = _walk_secret_paths(Settings)
         raise ConfigError(_format_validation_error(exc, secret_paths)) from exc

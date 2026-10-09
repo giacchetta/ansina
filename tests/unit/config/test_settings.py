@@ -59,6 +59,7 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.tick.enabled is True
     assert settings.heart.tick.interval_seconds == 30.0
     assert settings.heart.tick.jitter_seconds == 3.0
+    assert settings.heart.tick.escalate_to_brain is False
     assert settings.heart.journal.max_entries == 2000
     assert settings.heart.journal.retention_days == 14
     assert settings.heart.journal.recent_entries == 5
@@ -73,6 +74,13 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.brain.retry_max_backoff_seconds == 30.0
     assert settings.brain.price_per_1m_input_tokens is None
     assert settings.brain.price_per_1m_output_tokens is None
+    assert settings.telemetry.s3.enabled is False
+    assert settings.telemetry.s3.bucket == ""
+    assert settings.telemetry.s3.endpoint_url == ""
+    assert settings.telemetry.s3.region == "auto"
+    assert settings.telemetry.s3.key_prefix == ""
+    assert settings.telemetry.s3.access_key_id is None
+    assert settings.telemetry.s3.secret_access_key is None
 
 
 def test_toml_overrides_defaults(clean_env: None, tmp_cwd: Path) -> None:
@@ -1060,3 +1068,241 @@ def test_cors_settings_disabled_accepts_empty_origins_directly() -> None:
 
     assert settings.enabled is False
     assert settings.allowed_origins == ()
+
+
+# --- issue #59: [telemetry.s3] --------------------------------------------------
+
+
+def test_telemetry_s3_secret_in_toml_file_rejected(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[telemetry.s3]\naccess_key_id = "leaked-key-id"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_TELEMETRY__S3__ACCESS_KEY_ID" in message
+    assert "leaked-key-id" not in message
+
+
+def test_telemetry_s3_secret_access_key_in_toml_file_rejected(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[telemetry.s3]\nsecret_access_key = "leaked-secret"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY" in message
+    assert "leaked-secret" not in message
+
+
+def test_telemetry_s3_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__BUCKET", "ansina-heart-corpus")
+    monkeypatch.setenv(
+        "ANSINA_TELEMETRY__S3__ENDPOINT_URL",
+        "https://abc123.r2.cloudflarestorage.com",
+    )
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__REGION", "auto")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__KEY_PREFIX", "prod")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__ACCESS_KEY_ID", "AKIAEXAMPLE")
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY", "s3cr3t-value")
+
+    settings = load_settings()
+
+    s3 = settings.telemetry.s3
+    assert s3.enabled is True
+    assert s3.bucket == "ansina-heart-corpus"
+    assert s3.endpoint_url == "https://abc123.r2.cloudflarestorage.com"
+    assert s3.region == "auto"
+    assert s3.key_prefix == "prod"
+    assert s3.access_key_id is not None
+    assert s3.access_key_id.get_secret_value() == "AKIAEXAMPLE"
+    assert s3.secret_access_key is not None
+    assert s3.secret_access_key.get_secret_value() == "s3cr3t-value"
+    assert "s3cr3t-value" not in repr(settings)
+    assert "s3cr3t-value" not in str(settings)
+
+
+def test_telemetry_s3_enabled_with_no_bucket_still_loads(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #59 AC: a missing/invalid `[telemetry.s3]` config must degrade to a
+    *logged upload failure*, never a boot-time `ConfigError` — unlike
+    `OidcSettings`/`CorsSettings`, `S3Settings` has no `enabled=True`-requires-X
+    `model_validator`. `heart.eval.storage.build_report_storage` is what validates
+    coherence instead, at upload time.
+    """
+    monkeypatch.setenv("ANSINA_TELEMETRY__S3__ENABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.telemetry.s3.enabled is True
+    assert settings.telemetry.s3.bucket == ""
+
+
+def test_telemetry_producer_defaults(clean_env: None, tmp_cwd: Path) -> None:
+    """Issue #61's new top-level `[telemetry]` keys — `enabled = false` is the
+    default, matching `[heart]`/`[security.oidc]`/`[security.cors]`'s own
+    "off means nothing happens" shape.
+    """
+    settings = load_settings()
+
+    telemetry = settings.telemetry
+    assert telemetry.enabled is False
+    assert telemetry.spool_dir.is_absolute()
+    assert telemetry.spool_dir.name == "telemetry"
+    assert telemetry.sample_interval_seconds == 60.0
+    assert telemetry.max_file_bytes == 1_048_576
+    assert telemetry.max_spool_bytes == 104_857_600
+    assert telemetry.retention_hours == 168
+
+
+def test_telemetry_spool_dir_expands_and_resolves_like_database_path(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__SPOOL_DIR", "~/my-telemetry")
+
+    settings = load_settings()
+
+    assert settings.telemetry.spool_dir.is_absolute()
+    assert "~" not in str(settings.telemetry.spool_dir)
+    assert settings.telemetry.spool_dir == Path("~/my-telemetry").expanduser()
+
+
+def test_telemetry_producer_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__SPOOL_DIR", str(tmp_cwd / "spool"))
+    monkeypatch.setenv("ANSINA_TELEMETRY__SAMPLE_INTERVAL_SECONDS", "15")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "2000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_SPOOL_BYTES", "20000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__RETENTION_HOURS", "72")
+
+    settings = load_settings()
+
+    telemetry = settings.telemetry
+    assert telemetry.enabled is True
+    assert telemetry.spool_dir == (tmp_cwd / "spool").resolve()
+    assert telemetry.sample_interval_seconds == 15.0
+    assert telemetry.max_file_bytes == 2000
+    assert telemetry.max_spool_bytes == 20000
+    assert telemetry.retention_hours == 72
+
+
+def test_telemetry_max_file_bytes_exceeding_max_spool_bytes_is_refused(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "2000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_SPOOL_BYTES", "1000")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    message = str(exc_info.value)
+    assert "telemetry.max_file_bytes" in message
+    assert "telemetry.max_spool_bytes" in message
+
+
+def test_telemetry_max_file_bytes_equal_to_max_spool_bytes_is_accepted(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "1000")
+    monkeypatch.setenv("ANSINA_TELEMETRY__MAX_SPOOL_BYTES", "1000")
+
+    settings = load_settings()
+
+    assert settings.telemetry.max_file_bytes == 1000
+    assert settings.telemetry.max_spool_bytes == 1000
+
+
+def test_dev_mode_defaults(clean_env: None, tmp_cwd: Path) -> None:
+    """Issue #62's new top-level `[dev]` keys — `enabled = false` is the default,
+    matching `[heart]`/`[telemetry]`'s own "off means nothing happens" shape.
+    """
+    settings = load_settings()
+
+    dev = settings.dev
+    assert dev.enabled is False
+    assert dev.vector_binary == "vector"
+    assert dev.vector_config.is_absolute()
+    assert dev.vector_config.name == "vector.toml"
+    assert dev.liveness_delay_seconds == 1.0
+    assert dev.shutdown_timeout_seconds == 5.0
+    assert dev.validate_timeout_seconds == 30.0
+
+
+def test_dev_mode_vector_config_expands_and_resolves_like_database_path(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DEV__VECTOR_CONFIG", "~/my-vector.toml")
+
+    settings = load_settings()
+
+    assert settings.dev.vector_config.is_absolute()
+    assert "~" not in str(settings.dev.vector_config)
+    assert settings.dev.vector_config == Path("~/my-vector.toml").expanduser()
+
+
+def test_dev_mode_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_DEV__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_DEV__VECTOR_BINARY", "/opt/vector/bin/vector")
+    monkeypatch.setenv("ANSINA_DEV__VECTOR_CONFIG", str(tmp_cwd / "vector.toml"))
+    monkeypatch.setenv("ANSINA_DEV__LIVENESS_DELAY_SECONDS", "2.5")
+    monkeypatch.setenv("ANSINA_DEV__SHUTDOWN_TIMEOUT_SECONDS", "10")
+    monkeypatch.setenv("ANSINA_DEV__VALIDATE_TIMEOUT_SECONDS", "45")
+
+    settings = load_settings()
+
+    dev = settings.dev
+    assert dev.enabled is True
+    assert dev.vector_binary == "/opt/vector/bin/vector"
+    assert dev.vector_config == (tmp_cwd / "vector.toml").resolve()
+    assert dev.liveness_delay_seconds == 2.5
+    assert dev.shutdown_timeout_seconds == 10.0
+    assert dev.validate_timeout_seconds == 45.0
+
+
+def test_load_settings_overrides_sets_only_the_given_field(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    """`overrides` (issue #62, `__main__.py --dev`'s own seam) must behave like a
+    highest-priority config *source*, not a second, parallel mechanism — every
+    other field keeps resolving from its own default/env/file the normal way.
+    """
+    settings = load_settings(overrides={"dev": {"enabled": True}})
+
+    assert settings.dev.enabled is True
+    assert settings.security.enabled is True  # untouched by the override
+    assert settings.server.host == "127.0.0.1"
+
+
+def test_load_settings_overrides_defaults_to_none(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    settings = load_settings()
+
+    assert settings.dev.enabled is False
+
+
+def test_load_settings_overrides_still_respects_env_for_other_fields(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_SERVER__PORT", "9999")
+
+    settings = load_settings(overrides={"dev": {"enabled": True}})
+
+    assert settings.dev.enabled is True
+    assert settings.server.port == 9999

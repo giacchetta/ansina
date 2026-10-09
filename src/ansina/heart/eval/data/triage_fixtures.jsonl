@@ -1,0 +1,58 @@
+# Labelled request-triage fixtures. See issue #13.
+#
+# 36 fixtures, 12 per class — matching the tick fixture set's size and balance. Each
+# `note` states the labelling rationale, since no real inbound-request traffic exists
+# yet to draw these from (Ansina has no `/chat`, no `POST /requests`): every request
+# below is synthetic, drawn from Ansina's own domain (its REST API, RBAC, Heart/Brain,
+# soak/bench tooling) rather than generic chatbot prompts — a caveat the eventual
+# verdict must carry forward, not a limitation this file can fix on its own.
+#
+# Labelling rules (the only three that matter — `heart.triage.TriageClass`):
+#   trivial   — answerable from the model's own knowledge or a fixed fact; no state
+#               read, no action, no judgment call.
+#   tool-only — needs exactly one deterministic state read or action, and no judgment
+#               once it returns (e.g. "pause the tick loop", "what's the tick count").
+#   complex   — needs reasoning, synthesis, a trade-off, multi-step planning, or a
+#               security/judgment call.
+#
+# Tags: `obviously_trivial` (the `obviously_idle` analogue — a request so clearly
+# trivial that a false `complex` here would indicate a broken prompt, not a hard
+# case), `needs_tool`, `judgment`, `multi_step`, `security`, `ambiguous` (a fixture
+# deliberately worded to sound like one class while actually being another, probing
+# whether the model is pattern-matching surface wording rather than the real rule).
+{"id": "trivial-01", "expect": "trivial", "tags": ["obviously_trivial"], "note": "Standard HTTP semantics anyone can answer from memory; no state read needed.", "request": "What does HTTP status code 404 mean?"}
+{"id": "trivial-02", "expect": "trivial", "tags": ["obviously_trivial"], "note": "General knowledge fact, nothing to do with Ansina's own state.", "request": "What's the capital of France?"}
+{"id": "trivial-03", "expect": "trivial", "tags": ["obviously_trivial"], "note": "A fixed-fact definition, answerable without consulting any system state.", "request": "What does RBAC stand for?"}
+{"id": "trivial-04", "expect": "trivial", "tags": ["obviously_trivial"], "note": "Well-known networking fact.", "request": "What is the default port for HTTPS?"}
+{"id": "trivial-05", "expect": "trivial", "tags": [], "note": "Conceptual explanation from general knowledge, no Ansina-specific state involved.", "request": "Explain the difference between TCP and UDP in one sentence."}
+{"id": "trivial-06", "expect": "trivial", "tags": [], "note": "Fixed definitional fact (OpenID Connect) — even though OIDC is a real Ansina feature, naming it needs no state read.", "request": "What does the acronym OIDC stand for?"}
+{"id": "trivial-07", "expect": "trivial", "tags": ["obviously_trivial"], "note": "Pure arithmetic, no state or tool needed.", "request": "What's 17 multiplied by 6?"}
+{"id": "trivial-08", "expect": "trivial", "tags": [], "note": "A definitional question about REST semantics, not about Ansina's own current state.", "request": "What does idempotent mean in the context of an HTTP PUT request?"}
+{"id": "trivial-09", "expect": "trivial", "tags": [], "note": "General SQLite knowledge; doesn't require reading Ansina's own database.", "request": "In one sentence, what does SQLite's WAL journal mode do?"}
+{"id": "trivial-10", "expect": "trivial", "tags": ["ambiguous"], "note": "Sounds like it's asking about Ansina's own live config, but the answer is a fixed architectural fact (SHA-256+HMAC, because tokens are checked on every request and argon2's work factor has no payoff there) — nothing needs to be read live.", "request": "What hashing algorithm does Ansina use for API tokens, and why not argon2 there?"}
+{"id": "trivial-11", "expect": "trivial", "tags": [], "note": "Standard terminology, answerable without touching Ansina's own state.", "request": "Define 'bearer token' in one sentence."}
+{"id": "trivial-12", "expect": "trivial", "tags": [], "note": "Fixed historical fact.", "request": "What year was OAuth 2.0 (RFC 6749) published?"}
+{"id": "tool-01", "expect": "tool-only", "tags": ["needs_tool", "obviously_trivial"], "note": "Requires one live GET /heart/tick read — the answer can change moment to moment, so no fixed knowledge answers it, but it needs no judgment once read.", "request": "Is the Heart tick loop currently paused right now?"}
+{"id": "tool-02", "expect": "tool-only", "tags": ["needs_tool"], "note": "A single deterministic action (POST /heart/tick/pause) with no judgment once invoked.", "request": "Pause the tick loop."}
+{"id": "tool-03", "expect": "tool-only", "tags": ["needs_tool"], "note": "A live counter only a state read can answer.", "request": "What's the current tick number?"}
+{"id": "tool-04", "expect": "tool-only", "tags": ["needs_tool"], "note": "A single deterministic action, the inverse of pause.", "request": "Resume the tick loop."}
+{"id": "tool-05", "expect": "tool-only", "tags": ["needs_tool"], "note": "A direct GET /auth/me/tokens read, no judgment about which tokens to keep.", "request": "List my currently active API tokens."}
+{"id": "tool-06", "expect": "tool-only", "tags": ["needs_tool"], "note": "A single named action (DELETE) with no ambiguity about target or outcome.", "request": "Revoke my API token with id 42."}
+{"id": "tool-07", "expect": "tool-only", "tags": ["needs_tool"], "note": "A direct GET /auth/me read.", "request": "What roles do I currently hold?"}
+{"id": "tool-08", "expect": "tool-only", "tags": ["needs_tool"], "note": "A direct GET /readyz check, answerable only by reading live state.", "request": "Is the database currently healthy?"}
+{"id": "tool-09", "expect": "tool-only", "tags": ["needs_tool"], "note": "A direct GET /heart/journal read with a fixed limit, no interpretation needed.", "request": "Show me the last 10 heart_journal entries."}
+{"id": "tool-10", "expect": "tool-only", "tags": ["needs_tool"], "note": "A single deterministic action (POST /auth/me/tokens).", "request": "Mint me a new API token."}
+{"id": "tool-11", "expect": "tool-only", "tags": ["needs_tool", "ambiguous"], "note": "Could sound like a fixed fact from a release note, but the correct source of truth is the live GET /version endpoint — the daemon's actual deployed version, not a remembered one, is what's being asked.", "request": "What version of Ansina is currently running?"}
+{"id": "tool-12", "expect": "tool-only", "tags": ["needs_tool"], "note": "A live counter (TickLoop.consecutive_failures) with no judgment about whether that's concerning — that judgment, if asked for separately, would be a complex request.", "request": "How many consecutive tick failures has the daemon recorded so far?"}
+{"id": "complex-01", "expect": "complex", "tags": ["judgment", "security"], "note": "A security trade-off between patching urgency and release-cycle disruption — a judgment call, not a lookup.", "request": "A dependency we use just had a critical CVE disclosed — should we patch immediately or wait for the next scheduled release?"}
+{"id": "complex-02", "expect": "complex", "tags": ["multi_step"], "note": "Multi-step planning across backup, cutover, and rollback strategy — no single tool call answers this.", "request": "Design a migration plan to move our SQLite database to Postgres with no downtime."}
+{"id": "complex-03", "expect": "complex", "tags": ["judgment"], "note": "Requires weighing security against availability, informed by judgment about the specific spike, not a fixed rule.", "request": "Our login throttle is rejecting legitimate users during a traffic spike — how should we retune it?"}
+{"id": "complex-04", "expect": "complex", "tags": ["judgment", "security"], "note": "A least-privilege access decision requiring judgment about the intern's actual duties.", "request": "Should the new intern get the Maintain role or just Read, given they'll be doing onboarding support?"}
+{"id": "complex-05", "expect": "complex", "tags": ["multi_step"], "note": "Requires diagnosing a root cause from multiple signals and proposing a remediation — synthesis, not a single read.", "request": "Analyze why the Heart's tick loop keeps overrunning and recommend a fix."}
+{"id": "complex-06", "expect": "complex", "tags": ["judgment", "security"], "note": "An active-incident security judgment call with multiple possible responses and trade-offs.", "request": "We suspect a credential-stuffing attack against /auth/login — what should we do right now?"}
+{"id": "complex-07", "expect": "complex", "tags": ["multi_step"], "note": "Requires synthesizing multiple data sources (logs, journal, telemetry) into a coherent narrative — well beyond a single read.", "request": "Write a postmortem for last night's outage."}
+{"id": "complex-08", "expect": "complex", "tags": ["judgment"], "note": "A trade-off comparison requiring judgment about which protocol actually fits our requirements.", "request": "Compare OAuth 2.0 and SAML for our upcoming federated-login requirement and recommend one."}
+{"id": "complex-09", "expect": "complex", "tags": ["multi_step", "judgment"], "note": "A multi-factor trade-off (cost vs. data utility) with no fixed right answer.", "request": "Our R2 bucket costs are rising — propose a retention policy that balances cost against the ML team's needs."}
+{"id": "complex-10", "expect": "complex", "tags": ["judgment", "security"], "note": "A security-sensitive policy change requiring judgment about exposure vs. the stated need.", "request": "Should we loosen the CORS policy to support the new third-party dashboard, and what's the security trade-off?"}
+{"id": "complex-11", "expect": "complex", "tags": ["multi_step"], "note": "A multi-step design task spanning several tables/invariants, not answerable from a single state read.", "request": "Plan the schema migration needed to add multi-tenancy to the RBAC model."}
+{"id": "complex-12", "expect": "complex", "tags": ["judgment", "ambiguous"], "note": "Sounds like it only needs a number lookup, but the actual ask is a judgment call about risk tolerance informed by that number — the number alone doesn't answer the question.", "request": "Given the soak test's measured RSS slope, is it safe to lower max_consecutive_failures from 5 to 3?"}

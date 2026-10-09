@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "contract_doc": "docs/ml/corpus-contract.md",
+  "lifecycle": "Ansina is a producer only. It does not read this bucket back and names no consumer. Contract changes arrive as new GitHub issues filed against the ansina repo, never the reverse.",
+  "stability_promise": {
+    "minor_change": "a new family, or a new optional/nullable field on an existing family — does not bump schema_version",
+    "breaking_change": "a field removed, renamed, or changed in type/semantics — bumps schema_version; the prior corpus-schema-v<N>.json is never deleted or overwritten"
+  },
+  "bucket_key_layout": {
+    "bench": "kind=bench/dt=<date>/<stem>.{md,json}",
+    "soak": "kind=soak/dt=<date>/<run_id>/{samples.jsonl,run.log,journal.json,soak-<date>.md,soak-<date>.json}",
+    "telemetry": "kind=telemetry/dt=<date>/<vector-assigned-filename>",
+    "runlog": "kind=runlog/dt=<date>/<vector-assigned-filename>",
+    "contract": "_contract/corpus-schema-v<N>.json",
+    "known_limitations": [
+      "no host= partition and no per-sample host field anywhere in the telemetry or runlog families — two producers shipping to one bucket are indistinguishable as of v1"
+    ]
+  },
+  "families": {
+    "bench_report": {
+      "kind_prefix": "kind=bench/",
+      "producer": "ansina.heart.eval.report.report_to_json",
+      "files": [".md (human-readable rendering, not independently schema'd)", ".json (authoritative)"],
+      "fields": {
+        "suite": "string (\"tick\") — issue #13: present from this issue onward; absent on earlier reports means \"tick\", the only suite that existed then. Discriminates from the sibling triage_bench_report family below, which shares this same kind_prefix.",
+        "model_repo": "string",
+        "prompt_variant": "string",
+        "chat_template": "bool",
+        "generated_at": "string (ISO 8601 UTC)",
+        "host": "string",
+        "commit": "string | null",
+        "branch": "string | null",
+        "mlx_lm_version": "string | null",
+        "max_output_tokens": "int",
+        "fixture_count": "int",
+        "metrics.accuracy": "float [0,1]",
+        "metrics.recall_by_class": "object<string,float>",
+        "metrics.class_counts": "object<string,int>",
+        "metrics.recall_by_tag": "object<string,float>",
+        "metrics.tag_counts": "object<string,int>",
+        "metrics.parse_fallback_rate": "float [0,1]",
+        "metrics.false_act_or_escalate_on_obvious_idle": "int",
+        "metrics.latency_p50_seconds": "float",
+        "metrics.latency_p95_seconds": "float",
+        "metrics.prompt_tokens_min": "int",
+        "metrics.prompt_tokens_median": "float",
+        "metrics.prompt_tokens_max": "int",
+        "metrics.peak_rss_bytes": "int",
+        "gate.passed": "bool",
+        "gate.checks": "object<string,bool>",
+        "gate.latency_threshold_seconds": "float",
+        "results[].id": "string",
+        "results[].expected": "string (idle|act|escalate)",
+        "results[].actual": "string (idle|act|escalate) | null",
+        "results[].correct": "bool",
+        "results[].parse_fallback": "bool",
+        "results[].raw_output": "string (unbounded length)",
+        "results[].latency_seconds": "float",
+        "results[].prompt_tokens": "int",
+        "results[].tags": "string[]"
+      }
+    },
+    "triage_bench_report": {
+      "kind_prefix": "kind=bench/",
+      "producer": "ansina.heart.eval.triage_report.triage_report_to_json",
+      "note": "issue #13, a gated experiment whose port (ansina.heart.triage) is wired into no route or the tick loop — this family's own data proves or refutes adoption, nothing more. Shares kind=bench/ with bench_report above; distinguished by the suite field (\"triage\") and its own field set.",
+      "files": [".md (human-readable rendering, not independently schema'd)", ".json (authoritative)"],
+      "fields": {
+        "suite": "string (\"triage\")",
+        "model_repo": "string",
+        "prompt_variant": "string",
+        "chat_template": "bool",
+        "generated_at": "string (ISO 8601 UTC)",
+        "host": "string",
+        "commit": "string | null",
+        "branch": "string | null",
+        "mlx_lm_version": "string | null",
+        "max_output_tokens": "int",
+        "fixture_count": "int",
+        "metrics.accuracy": "float [0,1]",
+        "metrics.recall_by_class": "object<string,float> (keys: trivial|tool-only|complex)",
+        "metrics.class_counts": "object<string,int> (same keys)",
+        "metrics.recall_by_tag": "object<string,float>",
+        "metrics.tag_counts": "object<string,int>",
+        "metrics.parse_fallback_rate": "float [0,1]",
+        "metrics.misroute_complex_to_trivial": "int (zero-tolerance gate clause)",
+        "metrics.misroute_tool_only_to_trivial": "int (same severity under today's 2-way routing)",
+        "metrics.over_route_count": "int",
+        "metrics.over_route_rate": "float [0,1]",
+        "metrics.brain_calls_saved_fraction": "float [0,1] (vs. the always-escalate baseline, which saves 0; reported, never gated)",
+        "metrics.confusion": "object<string,object<string,int>> (expected class -> actual class or \"unparsed\" -> count)",
+        "metrics.latency_p50_seconds": "float",
+        "metrics.latency_p95_seconds": "float",
+        "metrics.prompt_tokens_min": "int",
+        "metrics.prompt_tokens_median": "float",
+        "metrics.prompt_tokens_max": "int",
+        "metrics.peak_rss_bytes": "int",
+        "gate.passed": "bool",
+        "gate.checks": "object<string,bool>",
+        "gate.latency_threshold_seconds": "float",
+        "results[].id": "string",
+        "results[].expected": "string (trivial|tool-only|complex)",
+        "results[].actual": "string (trivial|tool-only|complex) | null",
+        "results[].correct": "bool",
+        "results[].parse_fallback": "bool",
+        "results[].routed_to_brain": "bool",
+        "results[].under_route": "bool",
+        "results[].over_route": "bool",
+        "results[].raw_output": "string (unbounded length)",
+        "results[].latency_seconds": "float",
+        "results[].prompt_tokens": "int",
+        "results[].tags": "string[]"
+      }
+    },
+    "soak_run": {
+      "kind_prefix": "kind=soak/",
+      "producer": "scripts/heart-soak-run.sh + scripts/heart_soak_report.py",
+      "files": {
+        "samples.jsonl": {
+          "shape": "one JSON object per line",
+          "fields": {
+            "t": "float (unix timestamp)",
+            "elapsed_s": "int",
+            "rss_kib": "int (instantaneous, ps-based)",
+            "ticks": "int",
+            "paused": "bool",
+            "paused_reason": "string | null",
+            "last_decision": "string (idle|act|escalate) | null",
+            "last_duration_seconds": "float | null"
+          },
+          "note": "no circuit-breaker counters — GET /heart/tick doesn't expose them; contrast with telemetry_sample below"
+        },
+        "run.log": {"shape": "same as log_line family below, one JSON object per line"},
+        "journal.json": {"shape": "verbatim GET /heart/journal?limit=500 response body — same shape as JournalPage, see note in contract doc"},
+        "soak-<date>.md": {"shape": "prose report, not independently schema'd"},
+        "soak-<date>.json": {
+          "shape": "small run-metadata summary, not the full report",
+          "fields": {
+            "metadata": "object<string,string> (parsed from run.log, e.g. interval_seconds/jitter_seconds/branch/commit)",
+            "sample_count": "int",
+            "tick_log_line_count": "int",
+            "journal_entry_count": "int"
+          }
+        }
+      }
+    },
+    "telemetry_sample": {
+      "kind_prefix": "kind=telemetry/",
+      "producer": "ansina.telemetry.sampler.TelemetrySample",
+      "shape": "one JSON object per line",
+      "fields": {
+        "t": "float (unix timestamp)",
+        "elapsed_s": "int",
+        "rss_kib": "int | null (peak ru_maxrss, NOT instantaneous — see divergence note)",
+        "ticks": "int | null",
+        "paused": "bool | null",
+        "paused_reason": "string | null",
+        "last_decision": "string (idle|act|escalate) | null",
+        "last_duration_seconds": "float | null",
+        "failures_total": "int | null",
+        "consecutive_failures": "int | null",
+        "consecutive_overruns": "int | null"
+      },
+      "divergence_from_soak_samples_jsonl": [
+        "adds failures_total/consecutive_failures/consecutive_overruns",
+        "rss_kib is peak (monotonically non-decreasing), not instantaneous — not bit-comparable sample-for-sample against soak's samples.jsonl",
+        "every field nullable (sampling runs independently of [heart]/[heart.tick]); soak's samples.jsonl has no such case"
+      ]
+    },
+    "log_line": {
+      "kind_prefix": "kind=runlog/",
+      "producer": "ansina.logging.formatter.JsonFormatter via ansina.telemetry.log_mirror.TelemetryLogHandler",
+      "shape": "one JSON object per line, identical to the daemon's own primary log stream and to soak's run.log",
+      "fields": {
+        "timestamp": "string (ISO 8601 UTC)",
+        "level": "string",
+        "logger": "string",
+        "message": "string (redacted)",
+        "request_id": "string (present only inside an HTTP request's correlation scope)",
+        "extra": "object (present only when the log call passed extra=...; string leaves redacted recursively)",
+        "exception": "string (present only on an exception log, redacted)",
+        "stack": "string (present only when stack info was captured, redacted)"
+      }
+    }
+  },
+  "harness_authority": "ansina.heart.eval remains the authoritative in-repo tick-decision harness; it renders every fixture through the real heart.tick.snapshot.build_prompt and heart.tick.decision.try_parse_decision. No external tool recommended below replaces it — each operates only on finished results this harness already produced.",
+  "analysis_layer_tooling": "evaluated during this issue's planning; the recommendation and reasoning are maintained privately and intentionally not published in this document — see docs/ml/corpus-contract.md's own 'Analysis-layer tooling' section for why",
+  "ml_readiness": {
+    "corpus_as_of_this_version": {
+      "soak_runs": 1,
+      "soak_ticks": 960,
+      "soak_idle_fraction": 1.0,
+      "bench_reports": 24
+    },
+    "supports": [
+      "regression detection",
+      "prompt/model A-B comparison at scale",
+      "operational anomaly detection"
+    ],
+    "does_not_support": "learning a better tick-decision policy — no non-idle ground truth exists in the live corpus",
+    "paths_forward": [
+      "fault-injection fixtures producing labelled non-idle samples at scale",
+      "once issue #64 lands: the Brain's own response to an escalated tick becomes a supervisory label"
+    ]
+  }
+}

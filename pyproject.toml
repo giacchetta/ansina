@@ -69,6 +69,16 @@ mlx = [
     # compatibility, the same reasoning as `openai`'s floor above.
     "huggingface-hub>=1.28",
 ]
+# S3-compatible object storage for the Heart bench/soak report corpus (issue #59,
+# `ansina.heart.eval.storage`) — dev-tooling-only, the same optionality `mlx` above
+# has: never installed in either CI leg (nothing in `src/ansina`'s runtime import
+# graph needs it — `boto3` is imported inside a function body, never at module
+# scope), approved during M7 planning per `.agents/guardrails/forbidden-actions.md`.
+# Floor is the version actually resolved/locked against, the same "floor = tested
+# against" reasoning every other dependency's floor in this file follows.
+s3 = [
+    "boto3>=1.43.108",
+]
 
 [project.scripts]
 ansina = "ansina.__main__:main"
@@ -131,6 +141,14 @@ explicit_package_bases = true
 # of whether the extra is present.
 [[tool.mypy.overrides]]
 module = ["mlx", "mlx.*", "mlx_lm", "mlx_lm.*", "huggingface_hub", "huggingface_hub.*"]
+ignore_missing_imports = true
+
+# `ansina[s3]` is likewise an optional extra CI never installs (issue #59,
+# `heart/eval/storage.py`) — neither `boto3` nor `botocore` ships type stubs (a
+# separate `boto3-stubs` package exists but isn't a dependency here), same reasoning
+# as the `mlx`/`huggingface_hub` override above.
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true
 
 [tool.coverage.report]

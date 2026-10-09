@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from importlib import metadata
 
 import pytest
 
 from ansina.heart.eval.fixtures import TickFixture
-from ansina.heart.eval.runner import FixtureResult, _mlx_lm_version, run_bench
+from ansina.heart.eval.runner import FixtureResult, run_bench
 from ansina.heart.runtime import BaseHeartRuntime
 from ansina.heart.tick.decision import TickDecision
 from ansina.heart.tick.snapshot import SnapshotItem
@@ -309,11 +308,15 @@ def test_run_bench_leaves_rss_unscaled_on_darwin(
 ) -> None:
     """`ru_maxrss` is already bytes on macOS/BSD — forced via monkeypatch so this
     holds regardless of which OS actually runs the suite, the same reasoning
-    `tests/unit/heart/test_selection.py` documents for `_mlx_viable`.
+    `tests/unit/heart/test_selection.py` documents for `_mlx_viable`. The underlying
+    branch itself is `ansina.heart.eval.metrics.read_peak_rss_bytes`'s (issue #13's
+    harness extraction) — this test stays here as proof `run_bench` actually plumbs
+    that function's result into the report, not a re-test of the branch itself (see
+    `tests/unit/heart/eval/test_metrics.py` for that).
     """
-    monkeypatch.setattr("ansina.heart.eval.runner.sys.platform", "darwin")
+    monkeypatch.setattr("ansina.heart.eval.metrics.sys.platform", "darwin")
     monkeypatch.setattr(
-        "ansina.heart.eval.runner.resource.getrusage", lambda _who: _FakeRusage(1000)
+        "ansina.heart.eval.metrics.resource.getrusage", lambda _who: _FakeRusage(1000)
     )
     heart = _FakeHeart(reply="idle")
 
@@ -334,9 +337,9 @@ def test_run_bench_scales_rss_from_kib_to_bytes_off_darwin(
     """`ru_maxrss` is KiB on Linux — forced via monkeypatch for the same reason as
     the darwin case above, so both branches are covered regardless of host OS.
     """
-    monkeypatch.setattr("ansina.heart.eval.runner.sys.platform", "linux")
+    monkeypatch.setattr("ansina.heart.eval.metrics.sys.platform", "linux")
     monkeypatch.setattr(
-        "ansina.heart.eval.runner.resource.getrusage", lambda _who: _FakeRusage(1000)
+        "ansina.heart.eval.metrics.resource.getrusage", lambda _who: _FakeRusage(1000)
     )
     heart = _FakeHeart(reply="idle")
 
@@ -349,24 +352,3 @@ def test_run_bench_scales_rss_from_kib_to_bytes_off_darwin(
     )
 
     assert report.peak_rss_bytes == 1000 * 1024
-
-
-def test_mlx_lm_version_returns_the_installed_version(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "ansina.heart.eval.runner.metadata.version", lambda _name: "0.31.3"
-    )
-
-    assert _mlx_lm_version() == "0.31.3"
-
-
-def test_mlx_lm_version_returns_none_when_not_installed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _raise(_name: str) -> str:
-        raise metadata.PackageNotFoundError("mlx-lm")
-
-    monkeypatch.setattr("ansina.heart.eval.runner.metadata.version", _raise)
-
-    assert _mlx_lm_version() is None

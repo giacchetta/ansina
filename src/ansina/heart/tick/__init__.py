@@ -6,9 +6,11 @@ every tick sends to the Heart, and `heart.tick.decision` turns its raw reply int
 same way it owns `HeartRuntime` and `Database`.
 """
 
+from ansina.heart.tick.brain_escalation_handler import BrainEscalationHandler
 from ansina.heart.tick.decision import TickDecision, parse_decision
 from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.loop import (
+    CompositeDecisionHandler,
     DecisionHandler,
     LoggingDecisionHandler,
     TickController,
@@ -28,6 +30,8 @@ from ansina.heart.tick.snapshot import (
 from ansina.heart.tick.sources import DaemonStateSource, RecentJournalSource
 
 __all__ = [
+    "BrainEscalationHandler",
+    "CompositeDecisionHandler",
     "DaemonStateSource",
     "DecisionHandler",
     "JournalDecisionHandler",

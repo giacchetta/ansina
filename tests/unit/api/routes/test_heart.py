@@ -45,6 +45,12 @@ class _FakeTickLoop:
         self.last_decision: TickDecision | None = TickDecision.IDLE
         self.last_tick_at: str | None = "2026-01-01T00:00:00+00:00"
         self.last_duration_seconds: float | None = 0.012
+        # Issue #61 widened `TickController` with these three — dummy fixed values,
+        # since no route/test here exercises them; present only so this double keeps
+        # satisfying the Protocol `tick_loop_factory` is typed to return.
+        self.failures_total = 0
+        self.consecutive_failures = 0
+        self.consecutive_overruns = 0
 
     @property
     def paused(self) -> bool:
@@ -193,7 +199,12 @@ def test_heart_factory_receives_real_heart_runtime(
     received: list[HeartRuntime] = []
 
     def _tick_loop_factory(
-        _settings: Settings, heart: HeartRuntime, *, db: object, readiness: object
+        _settings: Settings,
+        heart: HeartRuntime,
+        *,
+        db: object,
+        readiness: object,
+        brain: object,
     ) -> TickLoop:
         received.append(heart)
         return TickLoop(heart, interval_seconds=100, max_output_tokens=10)

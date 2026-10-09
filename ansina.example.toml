@@ -93,6 +93,12 @@ overrun_ratio = 0.8
 # counters still accrue and stay visible (daemon-state snapshot, logs) either way.
 auto_pause_enabled = true
 
+# Wires an "escalate" decision to BrainProvider.stream() (issue #64) — a true value
+# with [brain] enabled = false below is a "declined" journal outcome, not an error.
+# false (the default) keeps escalate exactly as log-only/journal-only. Issue #60's
+# 8-hour soak found zero false escalates, so no dedup/cooldown rung gates this.
+escalate_to_brain = false
+
 [heart.journal]
 # A durable, readable trace of what every completed tick decided (issue #55) — one
 # row in the "heart_journal" table per tick, read-only over GET /heart/journal.
@@ -329,3 +335,107 @@ max_age_seconds = 600
 # No allow_credentials setting exists: Ansina authenticates with an Authorization
 # header, never a cookie, so there is nothing for a credentialed CORS mode to
 # protect -- it would only add CSRF surface for no benefit.
+
+[telemetry]
+# The flag-gated local telemetry producer (issue #61): continuously, during
+# ordinary operation, writes the same RSS/tick/decision sample stream
+# scripts/heart-soak-run.sh already produces for a one-off soak, plus a redacted
+# mirror of the daemon's own log stream -- both to rotated files only, never to
+# SQLite, never uploaded by this daemon itself (that's issue #62's Vector sidecar
+# and heart-bench-publish/[telemetry.s3] below). false (the default) is a
+# byte-for-byte no-op -- no spool directory is created, no log-mirror handler is
+# attached, no sampling loop starts.
+enabled = false
+
+# Where rotated sample/log files are written. Resolved the same way
+# [database] path/[heart] cache_dir are: `~` expanded, relative paths anchored
+# to the CWD, once, at load time.
+spool_dir = "~/.local/state/ansina/telemetry"
+
+# How often one RSS/tick/decision sample is appended to samples.jsonl. Matches
+# scripts/heart-soak-run.sh's own default cadence.
+sample_interval_seconds = 60
+
+# Per rotated-file-family budget -- one family for samples.jsonl, one for
+# log.jsonl, each enforced independently (not a combined pool). A family's
+# active file rotates out once it reaches max_file_bytes; the family's total
+# bytes are then capped at max_spool_bytes (oldest rotated file deleted first)
+# and swept by retention_hours (age-based, independent of the byte cap -- a
+# file failing either test is deleted). Defaults below (1 MiB/file, 100 MiB/
+# family, 7 days) are generous headroom against the issue's own measured real
+# rate (~15 MB/week combined, against a 10 GB/week target ceiling).
+max_file_bytes = 1048576
+max_spool_bytes = 104857600
+retention_hours = 168
+
+[telemetry.s3]
+# S3-compatible object store for the Heart bench/soak report corpus (issue #59) --
+# the destination `make heart-bench`/`make remote-heart`/`make heart-bench-publish`
+# upload reports to, instead of (or in addition to) the gitignored
+# docs/heart/bench/ and docs/heart/soak/ directories. false (the default) means
+# none of make heart-bench/make remote-heart's own behavior changes at all -- no
+# client is built, no network call is attempted.
+enabled = false
+
+# The bucket name. Required when enabled = true -- a missing/invalid value
+# degrades to a logged upload failure at bench time, never a boot-time error and
+# never a changed bench exit code (the gate verdict is what matters to a
+# CI-adjacent caller; the upload itself is best-effort).
+bucket = ""
+
+# "S3-compatible," not "AWS": point this at any S3-compatible endpoint --
+# Cloudflare R2 (the verified M7 target), MinIO, Backblaze B2, Wasabi, or GCP
+# Cloud Storage's S3/XML interop (verify, don't assume -- its multipart behavior
+# differs from AWS's, though this module never needs multipart). Leave empty for
+# boto3's own default AWS endpoint resolution.
+endpoint_url = ""
+
+# Cloudflare R2 requires exactly "auto"; a real AWS deployment overrides this with
+# a genuine region name (e.g. "us-east-1").
+region = "auto"
+
+# Every uploaded key is prefixed with this (plus a trailing slash), e.g.
+# "ansina-prod" -> "ansina-prod/kind=bench/dt=2026-10-06/...". Empty means no
+# prefix -- keys start directly at "kind=bench/..."/"kind=soak/...".
+key_prefix = ""
+
+# access_key_id / secret_access_key, like every secret, are env-only -- setting
+# either in this file is a hard startup error. Both are required together when
+# enabled = true (Ansina never falls back to boto3's own ambient AWS credential
+# chain):
+#   ANSINA_TELEMETRY__S3__ACCESS_KEY_ID=...
+#   ANSINA_TELEMETRY__S3__SECRET_ACCESS_KEY=...
+
+[dev]
+# Dev Mode (issue #62): a lab/pre-customer posture, never a default -- enabled
+# only by passing `--dev` on the command line (or ANSINA_DEV__ENABLED=true),
+# never by this file alone. When enabled, the daemon preflights and supervises a
+# Vector sidecar that ships [telemetry]'s rotated sample/log files to the bucket
+# configured under [telemetry.s3] above. Every preflight check that fails is a
+# logged skip, never a crash -- a shipper with nothing to ship is worse than no
+# shipper, so a lab host missing `vector` or real bucket credentials still boots
+# the daemon normally.
+enabled = false
+
+# Resolved via a PATH lookup at preflight time (a bare name, the common case) or
+# used as-is if already absolute.
+vector_binary = "vector"
+
+# The committed, hand-editable Vector sidecar config (deploy/vector.toml) --
+# never daemon-generated, so there's no second copy to drift. Resolved the same
+# way [database] path/[heart] cache_dir are: `~` expanded, relative paths
+# anchored to the CWD, once, at load time.
+vector_config = "deploy/vector.toml"
+
+# How long after spawning the sidecar to wait before checking it's still alive --
+# the one post-spawn liveness check Dev Mode performs (no continuous supervision
+# loop).
+liveness_delay_seconds = 1.0
+
+# terminate() -> wait this long -> kill(), guaranteeing no orphan survives a
+# deliberate shutdown.
+shutdown_timeout_seconds = 5.0
+
+# Bounds the one-time `vector validate` preflight call -- never touches the
+# network itself (healthchecks are skipped), just config parsing.
+validate_timeout_seconds = 30.0

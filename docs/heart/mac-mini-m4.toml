@@ -22,8 +22,8 @@ runtime = "auto"
 # 0.90, zero false act/escalate on the obviously-idle fixture subset, zero parse-
 # fallback rate, p95 latency <= 20% of interval_seconds below) — 95.8% accuracy on
 # the original 24-fixture set, 97.2% on the widened 36-fixture set after issue #54's
-# severity-heuristic fix. See docs/heart/findings.md for the full ladder (Qwen3.5-2B
-# 75.0%, Qwen3.5-4B 83.3%, both gate FAIL, before this rung). Larger rungs on the
+# severity-heuristic fix. The two smaller ladder rungs both gate-FAILed before this
+# one (Qwen3.5-2B 75.0%, Qwen3.5-4B 83.3%). Larger rungs on the
 # ladder (gemma-4-e4b-it-4bit, gemma-4-e4b-it-8bit) were never benched — #53's own
 # "stop at the first rung that clears" rule.
 model_repo = "mlx-community/gemma-4-e2b-it-4bit"
@@ -36,9 +36,8 @@ context_tokens = 8192
 max_output_tokens = 512
 
 # Every model on the ladder is chat/instruct-tuned; a raw, untemplated prompt
-# measured 0% accuracy / 100% parse-fallback (docs/heart/findings.md's "Prompt
-# variant" section) — this must stay true for the Heart to produce a parseable
-# decision at all.
+# measured 0% accuracy / 100% parse-fallback on this same ladder — this must stay
+# true for the Heart to produce a parseable decision at all.
 apply_chat_template = true
 
 [heart.tick]
@@ -51,11 +50,17 @@ interval_seconds = 30.0
 jitter_seconds = 3.0
 
 # Issue #54's circuit breaker, measured safe on the real Mac Mini M4 soak (issue #56)
-# — see docs/heart/findings.md for whether any trip occurred and, if so, under what
-# condition.
+# — zero trips occurred over the full 8-hour run at this interval_seconds/
+# max_consecutive_failures combination.
 max_consecutive_failures = 5
 overrun_ratio = 0.8
 auto_pause_enabled = true
+
+# Left at the built-in default (issue #64 landed after this profile was written) —
+# turning it on also requires a real [brain] endpoint configured below, which this
+# Heart-only profile deliberately doesn't cover. Issue #60's own 8-hour soak (zero
+# false escalates) is the evidence it's safe to flip once [brain] is set up.
+escalate_to_brain = false
 
 [heart.journal]
 # At this interval_seconds, 2000 rows ~= 16.7 hours of continuous-ticking history
@@ -69,5 +74,6 @@ recent_entries = 5
 
 # Measured peak RSS on the real ladder: 3.57 GiB (36-fixture bench run) — well inside
 # this host's 16 GB unified memory, with headroom for the daemon, SQLite, and the OS
-# itself. Issue #56's soak is what confirms this stays flat over hours rather than
-# climbing — see docs/heart/findings.md.
+# itself. Issue #56's 8-hour soak confirmed this stays flat over hours rather than
+# climbing: RSS slope measured +1278 KiB/hour against a ~2.9 GiB resident baseline —
+# noise, not a leak.

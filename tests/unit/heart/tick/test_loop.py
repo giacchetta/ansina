@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from ansina.api.readiness import Readiness
+from ansina.brain.events import BrainErrorClass, BrainErrorEvent
 from ansina.config import load_settings
+from ansina.heart.journal import BrainEscalationStatus, HeartJournalRepository
 from ansina.heart.runtime import BaseHeartRuntime
 from ansina.heart.tick.decision import TickDecision
 from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.loop import (
+    CompositeDecisionHandler,
     DecisionHandler,
     LoggingDecisionHandler,
     TickLoop,
@@ -544,7 +547,7 @@ def test_build_tick_loop_wires_settings_into_the_loop(
     settings = load_settings()
     heart = _FakeHeart()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness())
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
 
     assert loop._interval == 12.5
     assert loop._max_output_tokens == 77
@@ -559,7 +562,7 @@ def test_build_tick_loop_uses_journal_decision_handler_by_default(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness())
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
 
     assert isinstance(loop._handler, JournalDecisionHandler)
 
@@ -570,8 +573,164 @@ def test_build_tick_loop_registers_the_daemon_state_and_recent_journal_sources(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness())
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
 
     assert len(loop._sources) == 2
     assert isinstance(loop._sources[0], DaemonStateSource)
     assert isinstance(loop._sources[1], RecentJournalSource)
+
+
+# --- CompositeDecisionHandler (issue #64) -------------------------------------------
+
+
+async def test_composite_decision_handler_calls_every_handler_in_order() -> None:
+    first = _RecordingHandler()
+    second = _RecordingHandler()
+    composite = CompositeDecisionHandler((first, second))
+    prompt = TickPrompt(text="x", tokens=1, items_included=0, items_dropped=0)
+
+    await composite.handle(
+        TickDecision.ESCALATE, prompt, tick_number=5, duration_seconds=0.2
+    )
+
+    assert first.calls == [(TickDecision.ESCALATE, prompt, 5, 0.2)]
+    assert second.calls == [(TickDecision.ESCALATE, prompt, 5, 0.2)]
+
+
+async def test_composite_decision_handler_stops_at_the_first_raising_handler() -> None:
+    class _RaisingHandler:
+        async def handle(
+            self,
+            decision: TickDecision,
+            prompt: TickPrompt,
+            *,
+            tick_number: int,
+            duration_seconds: float,
+        ) -> None:
+            raise RuntimeError("boom")
+
+    second = _RecordingHandler()
+    composite = CompositeDecisionHandler((_RaisingHandler(), second))
+    prompt = TickPrompt(text="x", tokens=1, items_included=0, items_dropped=0)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await composite.handle(
+            TickDecision.IDLE, prompt, tick_number=1, duration_seconds=0.1
+        )
+
+    assert second.calls == []
+
+
+# --- build_tick_loop: escalate_to_brain gating (issue #64) --------------------------
+
+
+def test_build_tick_loop_escalate_to_brain_defaults_false_bare_journal_handler(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    """`escalate_to_brain = false` (the default) must leave `decision_handler` as the
+    *exact* `JournalDecisionHandler` instance this function has always built — not
+    merely equivalent behavior behind a branch — which is what makes the flag a
+    verified no-op rather than an assumed one.
+    """
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+
+    assert isinstance(loop._handler, JournalDecisionHandler)
+    assert not isinstance(loop._handler, CompositeDecisionHandler)
+
+
+def test_build_tick_loop_escalate_to_brain_true_composes_brain_handler(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__ESCALATE_TO_BRAIN", "true")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+
+
+async def test_escalate_to_brain_false_never_calls_the_brain_end_to_end(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    """End-to-end proof of the "verified no-op" claim: even a `TickLoop` that
+    actually decides `escalate` for real never touches a configured `BrainProvider`
+    when the flag is off.
+    """
+
+    class _FailingBrainProvider:
+        def stream(self, request: object) -> AsyncGenerator[object]:
+            raise AssertionError("BrainProvider.stream must never be called")
+
+        async def aclose(self) -> None:
+            pass
+
+    heart = _FakeHeart(reply="escalate", context_tokens=8192, max_output_tokens=512)
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=_FailingBrainProvider(),  # type: ignore[arg-type]
+    )
+
+    outcome = await loop.tick_once()
+
+    assert outcome.decision is TickDecision.ESCALATE
+    # Only one row: JournalDecisionHandler's own, no second Brain-outcome row.
+    repository = HeartJournalRepository(db)
+    entries = repository.list_recent(limit=10)
+    assert len(entries) == 1
+    assert entries[0].brain_status is None
+
+
+async def test_escalate_to_brain_true_journals_two_rows_and_never_trips_the_breaker(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    """A simulated Brain failure must not pause the loop or increment its failure
+    counters (issue #64's own AC) — a different failure domain from a tick fault.
+    """
+    monkeypatch.setenv("ANSINA_HEART__TICK__ESCALATE_TO_BRAIN", "true")
+
+    class _ErroringBrainProvider:
+        def stream(self, request: object) -> AsyncGenerator[object]:
+            async def _gen() -> AsyncGenerator[object]:
+                yield BrainErrorEvent(
+                    error_class=BrainErrorClass.PROVIDER_SERVER,
+                    message="simulated failure",
+                    retryable=True,
+                )
+
+            return _gen()
+
+        async def aclose(self) -> None:
+            pass
+
+    heart = _FakeHeart(reply="escalate", context_tokens=8192, max_output_tokens=512)
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=_ErroringBrainProvider(),  # type: ignore[arg-type]
+    )
+
+    outcome = await loop.tick_once()
+
+    assert outcome.decision is TickDecision.ESCALATE
+    repository = HeartJournalRepository(db)
+    entries = repository.list_recent(limit=10)
+    assert len(entries) == 2
+    brain_rows = [entry for entry in entries if entry.brain_status is not None]
+    assert len(brain_rows) == 1
+    assert brain_rows[0].brain_status == BrainEscalationStatus.ERROR
+    assert loop.failures_total == 0
+    assert loop.consecutive_failures == 0
+    assert loop.paused is False

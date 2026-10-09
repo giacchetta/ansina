@@ -3,9 +3,13 @@
 `__main__.py` calls `resolve_provenance()` on every run (local or via
 `scripts/remote-heart.sh`), not only remote ones.
 
-`subprocess` stays confined to this one dev-tooling module — the daemon itself never
-shells out, and `ansina.heart.eval` already isn't imported by anything the daemon
-loads at runtime (see `heart/eval/__main__.py`'s own module docstring).
+`subprocess` stays confined to this one dev-tooling module among the daemon's own
+runtime-imported packages — `ansina.heart.eval` already isn't imported by anything
+the daemon loads at runtime (see `heart/eval/__main__.py`'s own module docstring).
+The one deliberate exception anywhere in this codebase is `ansina.dev` (issue #62,
+Dev Mode's Vector sidecar) — confined to that one package, reached only once, at
+boot, from `__main__.py` before uvicorn binds a port, never from `create_app()`,
+its lifespan, a route, or any periodic loop.
 """
 
 from __future__ import annotations
