@@ -11,18 +11,20 @@ adapter.
 
 from __future__ import annotations
 
-import platform
-import resource
 import statistics
-import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from importlib import metadata
-from types import MappingProxyType
 
 from ansina.heart.eval.fixtures import TickFixture
+from ansina.heart.eval.metrics import (
+    host_platform,
+    label_metrics,
+    mlx_lm_version,
+    percentile,
+    read_peak_rss_bytes,
+)
 from ansina.heart.runtime import HeartRuntime
 from ansina.heart.tick.decision import TickDecision, try_parse_decision
 from ansina.heart.tick.prompts import DEFAULT_PROMPT_VARIANT, DEFAULT_TEMPLATE
@@ -61,24 +63,6 @@ class FixtureResult:
         to `OBVIOUSLY_IDLE_TAG`-tagged fixtures.
         """
         return self.actual in (TickDecision.ACT, TickDecision.ESCALATE)
-
-
-def _mlx_lm_version() -> str | None:
-    try:
-        return metadata.version("mlx-lm")
-    except metadata.PackageNotFoundError:
-        return None
-
-
-def _percentile(values: Sequence[float], percentile: float) -> float:
-    """Nearest-rank percentile over `values`, sorted ascending. `values` must be
-    non-empty — callers only reach this once at least one fixture has run.
-    """
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    rank = max(0, min(len(ordered) - 1, round(percentile * (len(ordered) - 1))))
-    return ordered[rank]
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,14 +139,7 @@ def run_bench(
     is unaffected. `perf_counter` is injectable so the unit suite can assert on latency
     math without real timing variance; it defaults to `time.perf_counter`.
     """
-    peak_rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # `ru_maxrss` is bytes on macOS/BSD and KiB on Linux — a `str`-typed local, not a
-    # direct `sys.platform ==` comparison, for the same mypy-unreachable-branch reason
-    # `heart/selection.py`'s `_mlx_viable` documents (CI runs both `ubuntu-24.04` and
-    # `macos-26`, so a direct comparison would statically strand one leg's branch).
-    current_platform: str = sys.platform
-    if current_platform != "darwin":
-        peak_rss_bytes *= 1024
+    peak_rss_bytes = read_peak_rss_bytes()
 
     results: list[FixtureResult] = []
     for fixture in fixtures:
@@ -211,31 +188,8 @@ def _build_report(
     branch: str | None = None,
     peak_rss_bytes: int,
 ) -> BenchReport:
-    correct = sum(1 for r in results if r.correct)
-    accuracy = correct / len(results)
+    metrics = label_metrics(results, labels=TickDecision)
 
-    class_counts: dict[TickDecision, int] = {d: 0 for d in TickDecision}
-    class_correct: dict[TickDecision, int] = {d: 0 for d in TickDecision}
-    for result in results:
-        class_counts[result.expected] += 1
-        if result.correct:
-            class_correct[result.expected] += 1
-    recall_by_class = {
-        d: (class_correct[d] / class_counts[d] if class_counts[d] else 0.0)
-        for d in TickDecision
-    }
-
-    all_tags = sorted({tag for r in results for tag in r.tags})
-    tag_counts = {tag: sum(1 for r in results if tag in r.tags) for tag in all_tags}
-    tag_correct = {
-        tag: sum(1 for r in results if tag in r.tags and r.correct) for tag in all_tags
-    }
-    recall_by_tag = {
-        tag: (tag_correct[tag] / tag_counts[tag] if tag_counts[tag] else 0.0)
-        for tag in all_tags
-    }
-
-    fallback_count = sum(1 for r in results if r.parse_fallback)
     false_on_obvious_idle = sum(
         1 for r in results if OBVIOUSLY_IDLE_TAG in r.tags and r.false_act_or_escalate
     )
@@ -248,21 +202,21 @@ def _build_report(
         prompt_variant=prompt_variant,
         chat_template=chat_template,
         generated_at=datetime.now(UTC).isoformat(),
-        host=platform.platform(),
+        host=host_platform(),
         commit=commit,
         branch=branch,
-        mlx_lm_version=_mlx_lm_version(),
+        mlx_lm_version=mlx_lm_version(),
         max_output_tokens=max_output_tokens,
         results=tuple(results),
-        accuracy=accuracy,
-        recall_by_class=MappingProxyType(recall_by_class),
-        class_counts=MappingProxyType(class_counts),
-        recall_by_tag=MappingProxyType(recall_by_tag),
-        tag_counts=MappingProxyType(tag_counts),
-        parse_fallback_rate=fallback_count / len(results),
+        accuracy=metrics.accuracy,
+        recall_by_class=metrics.recall_by_label,
+        class_counts=metrics.label_counts,
+        recall_by_tag=metrics.recall_by_tag,
+        tag_counts=metrics.tag_counts,
+        parse_fallback_rate=metrics.parse_fallback_rate,
         false_act_or_escalate_on_obvious_idle=false_on_obvious_idle,
-        latency_p50_seconds=_percentile(latencies, 0.50),
-        latency_p95_seconds=_percentile(latencies, 0.95),
+        latency_p50_seconds=percentile(latencies, 0.50),
+        latency_p95_seconds=percentile(latencies, 0.95),
         prompt_tokens_min=min(prompt_tokens),
         prompt_tokens_median=statistics.median(prompt_tokens),
         prompt_tokens_max=max(prompt_tokens),

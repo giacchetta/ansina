@@ -55,6 +55,10 @@ def report_to_json(report: BenchReport, *, gate: GateResult) -> str:
     per-fixture results the markdown table only summarizes.
     """
     payload = {
+        # Issue #13: a bucket consumer's discriminator between this family and the
+        # triage one (`triage_report.triage_report_to_json`), both under the same
+        # `kind=bench/` prefix — distinguishable without parsing the filename.
+        "suite": "tick",
         "model_repo": report.model_repo,
         "prompt_variant": report.prompt_variant,
         "chat_template": report.chat_template,

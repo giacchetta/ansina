@@ -101,12 +101,21 @@ Lifecycle section above.
 
 ### 1. Bench report (`kind=bench/`)
 
-One JSON object per bench run (`ansina.heart.eval.report.report_to_json`), the
-authoritative shape; the paired `.md` is a human-readable rendering of the same
-data, not independently schema'd.
+Two sub-families share this one key prefix, distinguished by the `suite` field below
+— the tick-decision bench (issue #53) and the request-triage bench (issue #13, a
+gated experiment whose port is wired into no route or the tick loop; see
+`ansina.heart.triage`). Both are JSON objects (`ansina.heart.eval.report.
+report_to_json` / `ansina.heart.eval.triage_report.triage_report_to_json`), the
+authoritative shape; each paired `.md` is a human-readable rendering of the same
+data, not independently schema'd. `suite` is additive (issue #13 — every report
+written before it has no such field, which a consumer should treat as `"tick"`,
+the only suite that existed then).
+
+#### 1a. Tick-decision bench report (`suite: "tick"`)
 
 | Field | Type | Notes |
 |---|---|---|
+| `suite` | `"tick"` | present from issue #13 onward; absent on earlier reports |
 | `model_repo` | string | HF repo id benched |
 | `prompt_variant` | string | one of `heart.tick.prompts.PROMPT_VARIANTS` |
 | `chat_template` | bool | whether the tokenizer's chat template was applied |
@@ -134,6 +143,38 @@ data, not independently schema'd.
 | `results[].expected` / `.actual` | string \| null | `"idle"`/`"act"`/`"escalate"`; `actual` is `null` on a parse fallback |
 | `results[].correct` / `.parse_fallback` | bool | |
 | `results[].raw_output` | string | the model's raw reply — **unbounded length**, one run measured 52 KB for a single fixture |
+| `results[].latency_seconds` | float | |
+| `results[].prompt_tokens` | int | |
+| `results[].tags` | string[] | sorted |
+
+#### 1b. Request-triage bench report (`suite: "triage"`)
+
+Shares `model_repo`/`prompt_variant`/`chat_template`/`generated_at`/`host`/`commit`/
+`branch`/`mlx_lm_version`/`max_output_tokens`/`fixture_count`/`gate.*` with 1a above,
+same types; `metrics.*`/`results[].*` differ:
+
+| Field | Type | Notes |
+|---|---|---|
+| `suite` | `"triage"` | |
+| `metrics.accuracy` | float (0–1) | |
+| `metrics.recall_by_class` | object (`"trivial"`/`"tool-only"`/`"complex"` → float) | |
+| `metrics.class_counts` | object (same keys → int) | |
+| `metrics.recall_by_tag` | object (fixture tag → float) | |
+| `metrics.tag_counts` | object (same keys → int) | |
+| `metrics.parse_fallback_rate` | float (0–1) | |
+| `metrics.misroute_complex_to_trivial` | int | the zero-tolerance gate clause: a `complex` fixture answered as `trivial` |
+| `metrics.misroute_tool_only_to_trivial` | int | the same bug on `tool-only`, since today's 2-way routing sends it to the Brain exactly like `complex` |
+| `metrics.over_route_count` / `.over_route_rate` | int / float (0–1) | an efficiency loss (an unnecessary Brain call), never a correctness bug |
+| `metrics.brain_calls_saved_fraction` | float (0–1) | vs. the always-escalate baseline, which saves exactly 0; reported, never gated |
+| `metrics.confusion` | object (expected class → object (actual class or `"unparsed"` → int)) | the full confusion matrix |
+| `metrics.latency_p50_seconds` / `latency_p95_seconds` | float | |
+| `metrics.prompt_tokens_min` / `_median` / `_max` | int / float / int | |
+| `metrics.peak_rss_bytes` | int | |
+| `results[].id` | string | fixture id |
+| `results[].expected` / `.actual` | string \| null | `"trivial"`/`"tool-only"`/`"complex"`; `actual` is `null` on a parse fallback |
+| `results[].correct` / `.parse_fallback` | bool | |
+| `results[].routed_to_brain` / `.under_route` / `.over_route` | bool | |
+| `results[].raw_output` | string | unbounded length, same caveat as 1a |
 | `results[].latency_seconds` | float | |
 | `results[].prompt_tokens` | int | |
 | `results[].tags` | string[] | sorted |
