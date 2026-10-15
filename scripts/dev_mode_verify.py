@@ -37,6 +37,9 @@ _SAMPLE_KEYS = (
     "failures_total",
     "consecutive_failures",
     "consecutive_overruns",
+    "idle_total",
+    "act_total",
+    "escalate_total",
 )
 
 

@@ -1628,6 +1628,9 @@ def test_telemetry_enabled_produces_sample_and_log_files(tmp_path: Path) -> None
         "failures_total",
         "consecutive_failures",
         "consecutive_overruns",
+        "idle_total",
+        "act_total",
+        "escalate_total",
     ):
         assert key in sample
 

@@ -1,18 +1,21 @@
-# Heart corpus contract — `schema_version: 2`
+# Heart corpus contract — `schema_version: 3`
 
 Issue [#63](https://github.com/giacchetta/ansina/issues/63), bumped to
 `schema_version: 2` by issue
 [#67](https://github.com/giacchetta/ansina/issues/67) (host attribution for the
-`kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below). This
-document is the single source of truth for the shape of every artifact Ansina
-writes to its S3-compatible report bucket (`[telemetry.s3]`, issue #59). The
-machine-readable mirror of this exact document is `corpus-schema-v2.json` in this
-same directory, published byte-for-byte to `_contract/corpus-schema-v2.json` in the
-bucket (see "Self-discovery" below) — the two are reviewed together in the same PR
-whenever either changes, so there is never a second, independently-maintained copy
-to drift out of sync. `corpus-schema-v1.json` stays committed, unmodified, per the
-stability promise below — it is simply no longer what this module re-uploads by
-default.
+`kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below) and to
+`schema_version: 3` by issue
+[#68](https://github.com/giacchetta/ansina/issues/68) (exact per-decision counts
+on the telemetry sample — see "Telemetry sample" below). This document is the
+single source of truth for the shape of every artifact Ansina writes to its
+S3-compatible report bucket (`[telemetry.s3]`, issue #59). The machine-readable
+mirror of this exact document is `corpus-schema-v3.json` in this same directory,
+published byte-for-byte to `_contract/corpus-schema-v3.json` in the bucket (see
+"Self-discovery" below) — the two are reviewed together in the same PR whenever
+either changes, so there is never a second, independently-maintained copy to drift
+out of sync. `corpus-schema-v1.json`/`corpus-schema-v2.json` stay committed,
+unmodified, per the stability promise below — neither is what this module
+re-uploads by default any longer.
 
 ## Lifecycle: Ansina is a producer, nothing more
 
@@ -56,7 +59,7 @@ Every version of this contract that has ever shipped is published, unmodified, t
 as part of every `make heart-bench-publish` run — see that module's own docstring).
 A reader needs no access to this repository's source to learn the current schema:
 list `_contract/`, read the highest `<N>`, done. The *currently committed* `<N>` is
-whatever `corpus-schema-v<N>.json` is named in this directory — `v2` as of this
+whatever `corpus-schema-v<N>.json` is named in this directory — `v3` as of this
 writing.
 
 ## Bucket key layout
@@ -254,14 +257,18 @@ field on this record — there is no `host` field here.
 | `failures_total` | int \| null | cumulative since tick loop start |
 | `consecutive_failures` | int \| null | the circuit breaker's own live counter |
 | `consecutive_overruns` | int \| null | the circuit breaker's own live counter |
+| `idle_total` | int \| null | cumulative since tick loop start — issue #68 |
+| `act_total` | int \| null | cumulative since tick loop start — issue #68 |
+| `escalate_total` | int \| null | cumulative since tick loop start — issue #68 |
 
 **This is a different, superset shape from soak's `samples.jsonl` above — do not
 treat the two as the same schema despite the near-identical field names**:
 
 - This family adds `failures_total`/`consecutive_failures`/`consecutive_overruns`
-  (not present in soak's `samples.jsonl` at all), since `GET /heart/tick` — what the
-  soak script reads — doesn't expose them, while this sampler reads the tick loop's
-  own `TickController` in-process.
+  and (issue #68) `idle_total`/`act_total`/`escalate_total` (none present in
+  soak's `samples.jsonl` at all), since `GET /heart/tick` — what the soak script
+  reads — doesn't expose any of them, while this sampler reads the tick loop's own
+  `TickController` in-process.
 - `rss_kib` here is **peak** RSS (`resource.getrusage(RUSAGE_SELF).ru_maxrss`,
   monotonically non-decreasing for the process's whole lifetime), not the soak
   script's **instantaneous** `ps`-based reading. The two are not bit-comparable
@@ -272,6 +279,26 @@ treat the two as the same schema despite the near-identical field names**:
 - Every field here is nullable whenever `[heart]`/`[heart.tick]` are disabled
   (sampling runs independently of the Heart) — soak's `samples.jsonl` has no such
   case, since the soak harness always boots with the Heart enabled.
+
+### Exact decision counts: `idle_total`/`act_total`/`escalate_total` (issue #68)
+
+`[telemetry] sample_interval_seconds` defaults to 60s while the validated
+deployment profile ticks every 30s — `last_decision` alone therefore observes
+roughly every other tick's decision, never every tick's, confirmed directly
+against one real day's telemetry at exactly 2.00 ticks recorded per sample. A
+decision-distribution analysis built over `last_decision` alone is working from
+an unbiased *sample* of the decision stream, not a census of it — fine for a
+steady-state baseline, understated for anything needing an exact count (e.g. a
+true escalate rate).
+
+These three fields are lifetime, monotonically non-decreasing counters — the same
+"running total since the tick loop started" shape `failures_total` already uses,
+never reset by a pause/resume cycle. A reader reconstructs the exact
+idle/act/escalate counts for *any* window by taking the difference between the
+relevant field's value on the sample at the end of that window and its value on
+the sample at (or immediately before) the start of that window — unaffected by a
+missed or delayed sample, since both endpoints are running totals, not deltas
+since the prior sample.
 
 ### 4. Mirrored log line (`host=<id>/kind=runlog/`)
 

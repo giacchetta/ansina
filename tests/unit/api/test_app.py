@@ -97,6 +97,10 @@ class _StubTickLoop:
     failures_total = 0
     consecutive_failures = 0
     consecutive_overruns = 0
+    # Issue #68 widened `TickController` with these three.
+    idle_total = 0
+    act_total = 0
+    escalate_total = 0
 
     def pause(self, *, reason: str | None = None) -> None:
         pass
@@ -250,6 +254,9 @@ def test_tick_loop_started_after_heart_loads_and_stopped_before_heart_unloads(
         failures_total = 0
         consecutive_failures = 0
         consecutive_overruns = 0
+        idle_total = 0
+        act_total = 0
+        escalate_total = 0
 
         def pause(self, *, reason: str | None = None) -> None:
             pass

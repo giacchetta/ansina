@@ -30,6 +30,16 @@ asks), but the two data sources are not bit-comparable sample-for-sample.
 Sampling runs independently of `[heart]`/`[heart.tick]` — an operator may want
 RSS/uptime telemetry on a daemon with the Heart disabled. `tick` is `None` in that
 case, and every tick-derived field renders `null` rather than raising.
+
+**`idle_total`/`act_total`/`escalate_total` (issue #68).** `[telemetry]
+sample_interval_seconds` defaults to 60s against a validated 30s tick cadence, so
+`last_decision` alone observes roughly every other tick's decision — confirmed
+directly against a real day's telemetry at exactly 2.00 ticks per sample. These
+three lifetime, monotonically non-decreasing counters (`TickController.idle_total`
+etc., the same "running total" shape as `failures_total`) let a reader reconstruct
+the exact idle/act/escalate counts for any window by diffing two samples' totals,
+rather than inferring an unbiased-but-undercounted distribution from the
+sampling ratio.
 """
 
 from __future__ import annotations
@@ -83,7 +93,8 @@ def _read_peak_rss_kib() -> int | None:
 class TelemetrySample:
     """One sample — the exact field set `scripts/heart-soak-run.sh` writes to
     `samples.jsonl`, in the same order, plus the three breaker counters it could
-    only read indirectly (via `paused`/`paused_reason`).
+    only read indirectly (via `paused`/`paused_reason`), plus (issue #68) the
+    three per-decision running totals — see the module docstring.
     """
 
     t: float
@@ -97,6 +108,9 @@ class TelemetrySample:
     failures_total: int | None
     consecutive_failures: int | None
     consecutive_overruns: int | None
+    idle_total: int | None
+    act_total: int | None
+    escalate_total: int | None
 
     def to_json_line(self) -> str:
         return dumps(asdict(self), separators=(",", ":"))
@@ -126,6 +140,9 @@ def collect_sample(
             failures_total=None,
             consecutive_failures=None,
             consecutive_overruns=None,
+            idle_total=None,
+            act_total=None,
+            escalate_total=None,
         )
     last_decision = tick.last_decision
     return TelemetrySample(
@@ -140,6 +157,9 @@ def collect_sample(
         failures_total=tick.failures_total,
         consecutive_failures=tick.consecutive_failures,
         consecutive_overruns=tick.consecutive_overruns,
+        idle_total=tick.idle_total,
+        act_total=tick.act_total,
+        escalate_total=tick.escalate_total,
     )
 
 

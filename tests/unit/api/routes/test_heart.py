@@ -51,6 +51,10 @@ class _FakeTickLoop:
         self.failures_total = 0
         self.consecutive_failures = 0
         self.consecutive_overruns = 0
+        # Issue #68 widened `TickController` with these three — same reasoning.
+        self.idle_total = 0
+        self.act_total = 0
+        self.escalate_total = 0
 
     @property
     def paused(self) -> bool:

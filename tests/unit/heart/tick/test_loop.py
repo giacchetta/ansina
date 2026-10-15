@@ -519,6 +519,87 @@ def test_add_source_registers_an_additional_snapshot_source() -> None:
     assert list(loop._sources) == [source]
 
 
+# --- per-decision counters (issue #68) -----------------------------------------------
+
+
+async def test_idle_total_increments_on_an_idle_decision() -> None:
+    loop = TickLoop(
+        _FakeHeart(reply="idle"), interval_seconds=100, max_output_tokens=10
+    )
+
+    await loop.tick_once()
+
+    assert loop.idle_total == 1
+    assert loop.act_total == 0
+    assert loop.escalate_total == 0
+
+
+async def test_act_total_increments_on_an_act_decision() -> None:
+    loop = TickLoop(_FakeHeart(reply="act"), interval_seconds=100, max_output_tokens=10)
+
+    await loop.tick_once()
+
+    assert loop.idle_total == 0
+    assert loop.act_total == 1
+    assert loop.escalate_total == 0
+
+
+async def test_escalate_total_increments_on_an_escalate_decision() -> None:
+    loop = TickLoop(
+        _FakeHeart(reply="escalate", context_tokens=8192, max_output_tokens=512),
+        interval_seconds=100,
+        max_output_tokens=512,
+    )
+
+    await loop.tick_once()
+
+    assert loop.idle_total == 0
+    assert loop.act_total == 0
+    assert loop.escalate_total == 1
+
+
+async def test_per_decision_counters_are_lifetime_totals_across_many_ticks() -> None:
+    """Each counter accrues independently across ticks — the exact property that
+    lets a telemetry reader reconstruct a window's decision distribution by
+    diffing two samples' totals, rather than inferring it from `last_decision`
+    alone.
+    """
+    replies = ["idle", "idle", "act", "idle", "escalate", "act"]
+    calls = {"n": 0}
+
+    class _ScriptedHeart(_FakeHeart):
+        def _generate(self, prompt: str, max_tokens: int) -> str:
+            reply = replies[calls["n"]]
+            calls["n"] += 1
+            self.generate_calls += 1
+            return reply
+
+    loop = TickLoop(_ScriptedHeart(), interval_seconds=100, max_output_tokens=10)
+
+    for _ in replies:
+        await loop.tick_once()
+
+    assert loop.idle_total == 3
+    assert loop.act_total == 2
+    assert loop.escalate_total == 1
+    assert loop.ticks_run == len(replies)
+
+
+async def test_per_decision_counters_are_not_reset_by_resume() -> None:
+    """Lifetime, like `failures_total` — not cleared by `resume()`, unlike the two
+    *consecutive* breaker gauges.
+    """
+    loop = TickLoop(
+        _FakeHeart(reply="idle"), interval_seconds=100, max_output_tokens=10
+    )
+
+    await loop.tick_once()
+    loop.pause()
+    loop.resume()
+
+    assert loop.idle_total == 1
+
+
 # --- the default decision handler and factory ---------------------------------------
 
 

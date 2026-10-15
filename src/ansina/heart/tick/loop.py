@@ -165,6 +165,14 @@ class TickController(TickLifecycle, Protocol):
     `GET /heart/tick` itself is deliberately *not* widened to expose them — M6's
     own open question on this was answered as a telemetry file field (issue #61),
     not a new API surface.
+
+    Issue #68 widens this again with `idle_total`/`act_total`/`escalate_total` —
+    `[telemetry] sample_interval_seconds` defaults to 60s against a 30s tick
+    cadence, so a sample's own `last_decision` observes roughly every other tick's
+    decision, never a census of the stream. Three lifetime, monotonically
+    non-decreasing counters (the same shape as `failures_total`) let a reader
+    reconstruct the exact idle/act/escalate counts for any window by diffing two
+    samples' totals, rather than inferring them from a 2:1 sampling ratio.
     """
 
     @property
@@ -185,6 +193,12 @@ class TickController(TickLifecycle, Protocol):
     def consecutive_failures(self) -> int: ...
     @property
     def consecutive_overruns(self) -> int: ...
+    @property
+    def idle_total(self) -> int: ...
+    @property
+    def act_total(self) -> int: ...
+    @property
+    def escalate_total(self) -> int: ...
 
     def pause(self, *, reason: str | None = None) -> None: ...
     def resume(self) -> None: ...
@@ -328,6 +342,9 @@ class TickLoop:
         self._failures_total = 0
         self._consecutive_failures = 0
         self._consecutive_overruns = 0
+        self._idle_total = 0
+        self._act_total = 0
+        self._escalate_total = 0
 
     def add_source(self, source: StateSnapshotSource) -> None:
         """Register another `StateSnapshotSource` after construction.
@@ -373,6 +390,24 @@ class TickLoop:
         overrun_ratio` — reset by any tick that finishes faster, or by `resume()`.
         """
         return self._consecutive_overruns
+
+    @property
+    def idle_total(self) -> int:
+        """Lifetime count of ticks that decided `idle`, since the loop started —
+        never reset by `resume()`, the same "running total, not since-last-sample"
+        shape as `failures_total`. See issue #68.
+        """
+        return self._idle_total
+
+    @property
+    def act_total(self) -> int:
+        """Lifetime count of ticks that decided `act`, since the loop started."""
+        return self._act_total
+
+    @property
+    def escalate_total(self) -> int:
+        """Lifetime count of ticks that decided `escalate`, since the loop started."""
+        return self._escalate_total
 
     @property
     def last_decision(self) -> TickDecision | None:
@@ -495,6 +530,7 @@ class TickLoop:
             duration = self._clock() - start
             self._ticks_run += 1
             self._last_decision = decision
+            self._record_decision(decision)
             self._last_tick_at = datetime.now(UTC).isoformat()
             self._last_duration_seconds = duration
             self._record_success(duration)
@@ -524,6 +560,18 @@ class TickLoop:
             )
         finally:
             self._in_flight = False
+
+    def _record_decision(self, decision: TickDecision) -> None:
+        """Bumps the lifetime counter matching a completed tick's decision — issue
+        #68. Three mutually-exclusive counters, since a tick decides exactly one of
+        idle/act/escalate; `TickDecision` has no fourth member.
+        """
+        if decision is TickDecision.IDLE:
+            self._idle_total += 1
+        elif decision is TickDecision.ACT:
+            self._act_total += 1
+        else:
+            self._escalate_total += 1
 
     def _record_failure(self) -> None:
         """Called from `run()`'s existing swallow-and-log handler when `tick_once()`
