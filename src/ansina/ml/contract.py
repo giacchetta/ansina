@@ -1,21 +1,28 @@
 """Publishes the corpus contract's machine-readable mirror to the bucket. See issue
-#63.
+#63, bumped to `schema_version: 2` by issue #67.
 
 `docs/ml/corpus-contract.md` is the authoritative, human-readable schema document;
-`docs/ml/corpus-schema-v1.json` is its hand-maintained, byte-for-byte machine-readable
-twin — the two are reviewed together in the same PR whenever either changes, so there
-is never a second, independently-generated copy to drift out of sync with it. This
-module's only job is uploading that committed file to the bucket's `_contract/`
-prefix via issue #59's existing `ReportStorage` port (`ansina.heart.eval.storage`) —
-no analysis, no derivation, per issue #63's own "do not write ML/analysis code" scope
-line. `heart.eval.storage`'s own module docstring already anticipates this: "(The
-`_contract/` schema document itself is issue #63's own concern, published by that
-issue's code, not this module's...)".
+`docs/ml/corpus-schema-v<SCHEMA_VERSION>.json` is its hand-maintained, byte-for-byte
+machine-readable twin — the two are reviewed together in the same PR whenever either
+changes, so there is never a second, independently-generated copy to drift out of
+sync with it. This module's only job is uploading that committed file to the
+bucket's `_contract/` prefix via issue #59's existing `ReportStorage` port
+(`ansina.heart.eval.storage`) — no analysis, no derivation, per issue #63's own "do
+not write ML/analysis code" scope line. `heart.eval.storage`'s own module docstring
+already anticipates this: "(The `_contract/` schema document itself is issue #63's
+own concern, published by that issue's code, not this module's...)".
 
 Deliberately depends only on the `ReportStorage` Protocol, not on
 `build_report_storage`/any concrete adapter — the caller
 (`heart.eval.publish.main`) already owns constructing the one `storage` instance a
 whole run shares; this module never builds its own.
+
+Issue #67 bumped `SCHEMA_VERSION`/`SCHEMA_PATH` from 1 to 2 — a breaking change to
+the `kind=telemetry/`/`kind=runlog/` key layout (a new `host=<id>/` segment ahead
+of `dt=<date>/`, closing v1's own documented "no host attribution" gap), per
+`docs/ml/corpus-contract.md`'s own stability promise. `docs/ml/corpus-schema-v1.json`
+stays committed and is never re-uploaded by this module's own default — the prior
+version, once published, is never deleted or overwritten.
 """
 
 from __future__ import annotations
@@ -27,12 +34,12 @@ from ansina.heart.eval.storage import ReportStorage
 # Bumped only on a breaking change to any artifact family's shape (a field
 # removed/renamed) — see docs/ml/corpus-contract.md's own "stability promise". A
 # new, additive family is not a breaking change and does not bump this.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # The committed, hand-maintained machine-readable schema — relative to the
 # repository root, the same convention `heart/eval/publish.py`'s own
 # `_DEFAULT_BENCH_DIR`/`_DEFAULT_SOAK_DIR` already use.
-SCHEMA_PATH = Path("docs/ml/corpus-schema-v1.json")
+SCHEMA_PATH = Path("docs/ml/corpus-schema-v2.json")
 
 
 def contract_key(schema_version: int = SCHEMA_VERSION) -> str:

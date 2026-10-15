@@ -1159,6 +1159,7 @@ def test_telemetry_producer_defaults(clean_env: None, tmp_cwd: Path) -> None:
 
     telemetry = settings.telemetry
     assert telemetry.enabled is False
+    assert telemetry.host_id == ""
     assert telemetry.spool_dir.is_absolute()
     assert telemetry.spool_dir.name == "telemetry"
     assert telemetry.sample_interval_seconds == 60.0
@@ -1183,6 +1184,7 @@ def test_telemetry_producer_env_vars_round_trip(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__HOST_ID", "mac-mini-m4")
     monkeypatch.setenv("ANSINA_TELEMETRY__SPOOL_DIR", str(tmp_cwd / "spool"))
     monkeypatch.setenv("ANSINA_TELEMETRY__SAMPLE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "2000")
@@ -1193,6 +1195,7 @@ def test_telemetry_producer_env_vars_round_trip(
 
     telemetry = settings.telemetry
     assert telemetry.enabled is True
+    assert telemetry.host_id == "mac-mini-m4"
     assert telemetry.spool_dir == (tmp_cwd / "spool").resolve()
     assert telemetry.sample_interval_seconds == 15.0
     assert telemetry.max_file_bytes == 2000

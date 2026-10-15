@@ -12,6 +12,7 @@ from ansina.dev.sidecar import SupervisedProcess
 from ansina.dev.vector import (
     ENV_AWS_ACCESS_KEY_ID,
     ENV_AWS_SECRET_ACCESS_KEY,
+    ENV_HOST_ID,
     ENV_S3_BUCKET,
     ENV_S3_ENDPOINT_URL,
     ENV_S3_KEY_PREFIX,
@@ -19,9 +20,11 @@ from ansina.dev.vector import (
     ENV_SPOOL_DIR,
     ENV_VECTOR_DATA_DIR,
     _normalize_key_prefix,
+    _sanitize_host_id,
     build_vector_env,
     build_vector_sidecar,
     preflight,
+    resolve_host_id,
 )
 
 
@@ -36,6 +39,7 @@ def _settings(
     vector_config: Path | None = None,
     spool_dir: Path | None = None,
     key_prefix: str = "",
+    host_id: str = "",
 ) -> Settings:
     s3 = S3Settings(
         enabled=s3_enabled,
@@ -49,6 +53,7 @@ def _settings(
     telemetry = TelemetrySettings(
         enabled=telemetry_enabled,
         spool_dir=spool_dir if spool_dir is not None else Path("/tmp/ansina-telemetry"),
+        host_id=host_id,
         s3=s3,
     )
     dev = DevSettings(
@@ -105,6 +110,7 @@ def test_build_vector_env_carries_telemetry_and_s3_fields(tmp_path: Path) -> Non
     assert env[ENV_S3_KEY_PREFIX] == "prod/"
     assert env[ENV_AWS_ACCESS_KEY_ID] == "AKIA"
     assert env[ENV_AWS_SECRET_ACCESS_KEY] == "s3cr3t"
+    assert env[ENV_HOST_ID] == resolve_host_id(settings)
 
 
 def test_build_vector_env_omits_aws_credentials_when_unset() -> None:
@@ -133,6 +139,67 @@ def test_build_vector_env_defaults_to_the_real_process_environment(
 )
 def test_normalize_key_prefix(raw: str, expected: str) -> None:
     assert _normalize_key_prefix(raw) == expected
+
+
+def test_build_vector_env_uses_the_configured_host_id(tmp_path: Path) -> None:
+    settings = _settings(spool_dir=tmp_path / "telemetry", host_id="mac-mini-m4")
+
+    env = build_vector_env(settings, base_env={})
+
+    assert env[ENV_HOST_ID] == "mac-mini-m4"
+
+
+def test_build_vector_env_falls_back_to_the_real_hostname_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("socket.gethostname", lambda: "real-host.local")
+    settings = _settings(spool_dir=tmp_path / "telemetry", host_id="")
+
+    env = build_vector_env(settings, base_env={})
+
+    assert env[ENV_HOST_ID] == "real-host.local"
+
+
+# --- resolve_host_id / _sanitize_host_id ----------------------------------------
+
+
+def test_resolve_host_id_prefers_the_configured_host_id() -> None:
+    settings = _settings(host_id="dev-laptop")
+
+    assert resolve_host_id(settings, hostname_fn=lambda: "should-not-be-used") == (
+        "dev-laptop"
+    )
+
+
+def test_resolve_host_id_falls_back_to_the_hostname_fn_when_unset() -> None:
+    settings = _settings(host_id="")
+
+    assert resolve_host_id(settings, hostname_fn=lambda: "my-host") == "my-host"
+
+
+def test_resolve_host_id_sanitizes_either_source() -> None:
+    configured = _settings(host_id="mac mini/m4")
+    unset = _settings(host_id="")
+
+    assert resolve_host_id(configured, hostname_fn=lambda: "unused") == "mac-mini-m4"
+    assert resolve_host_id(unset, hostname_fn=lambda: "host=weird") == "host-weird"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("mac-mini-m4", "mac-mini-m4"),
+        ("dev.laptop_01", "dev.laptop_01"),
+        ("mac mini/m4", "mac-mini-m4"),
+        ("host=weird", "host-weird"),
+        ("  spaced  ", "spaced"),
+        ("", "unknown-host"),
+        ("   ", "unknown-host"),
+        ("///", "---"),
+    ],
+)
+def test_sanitize_host_id(raw: str, expected: str) -> None:
+    assert _sanitize_host_id(raw) == expected
 
 
 # --- preflight ---------------------------------------------------------------

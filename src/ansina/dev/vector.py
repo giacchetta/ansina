@@ -14,9 +14,11 @@ periodic loop. `TelemetrySampler`'s own per-sample reasoning is unaffected.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import socket
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -71,6 +73,10 @@ ENV_S3_REGION = "ANSINA_TELEMETRY_S3_REGION"
 ENV_S3_KEY_PREFIX = "ANSINA_TELEMETRY_S3_KEY_PREFIX"
 ENV_AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
 ENV_AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
+# Issue #67: the `host=<id>/` key-prefix segment both sinks now interpolate ahead
+# of `kind=.../dt=.../`, so two deployments shipping to one bucket stay
+# distinguishable. See `resolve_host_id` below for how `<id>` is resolved.
+ENV_HOST_ID = "ANSINA_TELEMETRY_HOST_ID"
 
 # Inherited from the daemon's own process environment, unfiltered — everything else
 # in `build_vector_env` is an explicit allow-list. Ansina's own secrets
@@ -108,6 +114,45 @@ def _normalize_key_prefix(key_prefix: str) -> str:
     return f"{key_prefix.rstrip('/')}/" if key_prefix else ""
 
 
+# Issue #67: a raw hostname or operator-supplied `[telemetry] host_id` is pasted
+# directly into `deploy/vector.toml`'s `key_prefix` as a bare `host=<id>/`
+# segment, with no further escaping on Vector's own side — a value containing
+# `/` would silently insert extra partition levels, and one containing `=` would
+# break the `key=value` hive-partition convention itself. Collapsed to a single
+# safe alphabet rather than rejected outright, the same "degrade, don't crash"
+# posture every other Dev Mode preflight check in this module already takes.
+_HOST_ID_UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+_UNKNOWN_HOST_ID = "unknown-host"
+
+
+def _sanitize_host_id(raw: str) -> str:
+    sanitized = _HOST_ID_UNSAFE_CHARS.sub("-", raw.strip())
+    return sanitized or _UNKNOWN_HOST_ID
+
+
+def resolve_host_id(
+    settings: Settings, *, hostname_fn: Callable[[], str] | None = None
+) -> str:
+    """`settings.telemetry.host_id` when the operator set one explicitly (letting
+    a deployment be named something stable and meaningful, e.g. `"mac-mini-m4"`,
+    rather than whatever the OS happens to call the machine); otherwise this
+    host's own `socket.gethostname()`. Either source is run through
+    `_sanitize_host_id` identically, so a malformed config value and an unusual
+    real hostname are both made safe the same way before reaching
+    `build_vector_env`.
+
+    `hostname_fn` defaults to `None`, resolved to `socket.gethostname` inside the
+    function body rather than as the parameter's own default value — a default
+    value is bound once, at module-import time, so a test monkeypatching
+    `socket.gethostname` afterward would silently miss it; resolving here instead
+    reads the current attribute on every call, the same reason `preflight()`
+    calls `shutil.which` directly rather than capturing it as a default.
+    """
+    resolve_hostname = hostname_fn if hostname_fn is not None else socket.gethostname
+    raw = settings.telemetry.host_id or resolve_hostname()
+    return _sanitize_host_id(raw)
+
+
 def build_vector_env(
     settings: Settings, *, base_env: dict[str, str] | None = None
 ) -> dict[str, str]:
@@ -126,6 +171,7 @@ def build_vector_env(
     }
     env[ENV_SPOOL_DIR] = str(telemetry.spool_dir)
     env[ENV_VECTOR_DATA_DIR] = str(telemetry.spool_dir / _VECTOR_DATA_DIR_NAME)
+    env[ENV_HOST_ID] = resolve_host_id(settings)
     env[ENV_S3_BUCKET] = telemetry.s3.bucket
     env[ENV_S3_ENDPOINT_URL] = telemetry.s3.endpoint_url
     env[ENV_S3_REGION] = telemetry.s3.region

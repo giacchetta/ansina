@@ -657,6 +657,18 @@ class TelemetrySettings(BaseModel):
 
     enabled: bool = False
 
+    # Issue #67: the deployment identifier `ansina.dev.vector.resolve_host_id`
+    # injects into the `host=<id>/` key-prefix segment for both Vector sinks
+    # (`kind=telemetry/`, `kind=runlog/`) — without it, two deployments shipping
+    # to the same `[telemetry.s3]` bucket are indistinguishable. Left raw here
+    # (no normalization at this layer, same as `S3Settings.key_prefix`); `""` (the
+    # default) means "resolve this host's own `socket.gethostname()` instead,"
+    # resolved lazily at env-build time, not baked into this default — the same
+    # "resolved by the module that actually needs it, not at settings-load time"
+    # reasoning `DevSettings.vector_binary`'s own docstring already documents for
+    # a bare-name default.
+    host_id: str = ""
+
     # Where rotated sample/log files are written. Never created by this settings
     # model itself (only resolved to an absolute path) — `enabled = false` must
     # create nothing, so the directory is only ever made lazily, by

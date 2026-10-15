@@ -347,6 +347,15 @@ max_age_seconds = 600
 # attached, no sampling loop starts.
 enabled = false
 
+# This deployment's own identifier (issue #67) -- interpolated into the
+# `host=<id>/` segment of the Vector sidecar's two S3 key prefixes
+# (kind=telemetry/, kind=runlog/) ahead of `dt=<date>/`, so two deployments
+# shipping to the same [telemetry.s3] bucket stay distinguishable. Empty (the
+# default) means "use this host's own socket.gethostname() instead" -- set
+# this when you want a stable, meaningful name (e.g. "mac-mini-m4") rather than
+# whatever the OS happens to call the machine.
+host_id = ""
+
 # Where rotated sample/log files are written. Resolved the same way
 # [database] path/[heart] cache_dir are: `~` expanded, relative paths anchored
 # to the CWD, once, at load time.
