@@ -227,12 +227,12 @@ def _publish_kind(
 
 
 def _publish_contract(storage: ReportStorage) -> bool:
-    """Issue #63: always re-uploads the committed `docs/ml/corpus-schema-v1.json` —
-    unlike a bench/soak backlog item, this one small file should always reflect
-    what's currently committed, never skipped because a same-named key already
-    exists. Returns `False` (logged, never raised) on any upload failure, the same
-    best-effort-but-counted-as-failed shape `_publish_kind` already uses for a
-    single item.
+    """Issue #63: always re-uploads the currently committed corpus schema file
+    (`ansina.ml.contract.SCHEMA_PATH`) — unlike a bench/soak backlog item, this one
+    small file should always reflect what's currently committed, never skipped
+    because a same-named key already exists. Returns `False` (logged, never
+    raised) on any upload failure, the same best-effort-but-counted-as-failed
+    shape `_publish_kind` already uses for a single item.
     """
     try:
         publish_contract_schema(storage)

@@ -109,6 +109,49 @@ suffixed `-2`, `-3`, ... on a same-day collision — never overwritten) via
   its code-generated note verbatim — the raw material a genuine-vs-noise review (the
   PR that lands a given soak run) draws from.
 
+## Running a soak with fault injection (issue #72)
+
+Every soak run above — and every day of live telemetry — is 100% `idle`: nothing in
+the harness or the live deployment profile ever makes a real fault happen, so there
+is no non-idle ground truth anywhere in the corpus to score a tick-decision policy
+against. `ansina.heart.tick.fault_injection` closes that gap by forcing real,
+scheduled faults (a readiness check failing, consecutive tick failures, consecutive
+tick overruns) during an otherwise-ordinary soak, so the resulting act/escalate
+decisions have ground truth to compare against — see that module's own docstring for
+the mechanics (it never fabricates snapshot text; every fault is forced for real).
+
+```bash
+export ANSINA_SOAK_FAULT_SCHEDULE=docs/heart/fault-schedules/example.json
+make remote-heart-soak-start ARGS=0.05   # a short validation run first
+```
+
+`docs/heart/fault-schedules/example.json` (committed) is a ready-to-use schedule
+recreating `heart/eval/data/tick_fixtures.jsonl`'s own `self_state_fault`-tagged
+scenarios — a single failure, a persistent failure, a stuck readiness check, an
+overloaded backend, and the "two simultaneous axes" combination — against the
+Mac-validated profile's `interval_seconds`/`overrun_ratio`/`max_consecutive_failures`
+(`docs/heart/mac-mini-m4.toml`). Copy and edit it (or write a new one from scratch,
+following `ansina.heart.tick.fault_injection.FaultWindow`'s own field shape) for a
+longer or differently-shaped run; `[heart.tick] auto_pause_enabled = false` is worth
+setting too (`ANSINA_SOAK_TICK_INTERVAL`'s sibling env vars, or edit the schedule's
+`duration_ticks`) if a window is deliberately long enough to trip the circuit
+breaker and you don't want that to end the run early.
+
+`cmd_start` scp's the schedule to the Mac Mini and `heart-soak-run.sh` boots the
+daemon against it; `cmd_fetch` pulls the schedule back down alongside the usual
+`run.log`/`samples.jsonl`/`journal.json`, and `heart_soak_report.py` adds a **Fault
+injection** section scoring every fetched `GET /heart/journal` row that falls within
+the schedule's own tick range against its `expected_decision` — correct, under-
+reacted (a miss), or over-reacted (a false alarm), the same `idle < act < escalate`
+severity order `ansina.heart.tick.fault_injection` itself uses when two different-kind
+windows overlap. With no `ANSINA_SOAK_FAULT_SCHEDULE` set, this section is simply
+absent — every soak run before this one, unaffected.
+
+Because `GET /heart/journal` returns at most 500 rows per page, point the schedule's
+own tick numbers at the *end* of a long run (or keep the run short) so the window
+you want scored is still inside the fetched page — the same caveat the journal
+cross-check section above already documents.
+
 ## If the soak finds a real bug
 
 Fix it and re-run, the same standing rule #54 and #55 both set on this milestone (see

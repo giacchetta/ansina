@@ -1,13 +1,21 @@
-# Heart corpus contract — `schema_version: 1`
+# Heart corpus contract — `schema_version: 3`
 
-Issue [#63](https://github.com/giacchetta/ansina/issues/63). This document is the
+Issue [#63](https://github.com/giacchetta/ansina/issues/63), bumped to
+`schema_version: 2` by issue
+[#67](https://github.com/giacchetta/ansina/issues/67) (host attribution for the
+`kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below) and to
+`schema_version: 3` by issue
+[#68](https://github.com/giacchetta/ansina/issues/68) (exact per-decision counts
+on the telemetry sample — see "Telemetry sample" below). This document is the
 single source of truth for the shape of every artifact Ansina writes to its
 S3-compatible report bucket (`[telemetry.s3]`, issue #59). The machine-readable
-mirror of this exact document is `corpus-schema-v1.json` in this same directory,
-published byte-for-byte to `_contract/corpus-schema-v1.json` in the bucket (see
+mirror of this exact document is `corpus-schema-v3.json` in this same directory,
+published byte-for-byte to `_contract/corpus-schema-v3.json` in the bucket (see
 "Self-discovery" below) — the two are reviewed together in the same PR whenever
 either changes, so there is never a second, independently-maintained copy to drift
-out of sync.
+out of sync. `corpus-schema-v1.json`/`corpus-schema-v2.json` stay committed,
+unmodified, per the stability promise below — neither is what this module
+re-uploads by default any longer.
 
 ## Lifecycle: Ansina is a producer, nothing more
 
@@ -32,7 +40,8 @@ versioned.
   unknown fields, treating optional ones as optional) are unaffected. It does not
   bump `schema_version`.
 - **Removing or renaming a field**, or changing a field's type or semantics (e.g.
-  `rss_kib` changing from an instantaneous to a cumulative reading), is a
+  `rss_kib` changing from an instantaneous to a cumulative reading), **or changing
+  the bucket key layout** (e.g. issue #67's new `host=<id>/` segment), is a
   **breaking** change. It bumps `schema_version` and publishes a new
   `_contract/corpus-schema-v<N+1>.json` alongside the old one — the old file is
   never deleted or overwritten, so anything still reading the old version keeps
@@ -50,7 +59,7 @@ Every version of this contract that has ever shipped is published, unmodified, t
 as part of every `make heart-bench-publish` run — see that module's own docstring).
 A reader needs no access to this repository's source to learn the current schema:
 list `_contract/`, read the highest `<N>`, done. The *currently committed* `<N>` is
-whatever `corpus-schema-v<N>.json` is named in this directory — `v1` as of this
+whatever `corpus-schema-v<N>.json` is named in this directory — `v3` as of this
 writing.
 
 ## Bucket key layout
@@ -63,8 +72,8 @@ soak share no prefix collision risk with telemetry/runlog:
 s3://<bucket>/<prefix>/kind=bench/dt=<date>/<stem>.{md,json}
 s3://<bucket>/<prefix>/kind=soak/dt=<date>/<run_id>/{samples.jsonl,run.log,
     journal.json,soak-<date>.md,soak-<date>.json}
-s3://<bucket>/<prefix>/kind=telemetry/dt=<date>/<vector-assigned-filename>
-s3://<bucket>/<prefix>/kind=runlog/dt=<date>/<vector-assigned-filename>
+s3://<bucket>/<prefix>/host=<id>/kind=telemetry/dt=<date>/<vector-assigned-filename>
+s3://<bucket>/<prefix>/host=<id>/kind=runlog/dt=<date>/<vector-assigned-filename>
 s3://<bucket>/<prefix>/_contract/corpus-schema-v<N>.json
 ```
 
@@ -78,24 +87,33 @@ assigns it (not a name this repo controls or documents) — contrast with
 `kind=bench/`/`kind=soak/`, where `ansina.heart.eval.storage`'s own `bench_key`/
 `soak_key` name the exact filename.
 
-### Known v1 limitation: no host attribution
+### Host attribution: `host=<id>/` (issue #67)
 
-Neither `kind=telemetry/` nor `kind=runlog/` carries any partition or field
-identifying *which machine* produced a given object, and no field on the telemetry
-sample (below) carries a hostname either. Two hosts shipping to the same bucket
-(e.g. a dev laptop and the Mac Mini M4 deployment target) are today
-indistinguishable in the corpus. This is a real, named gap — not fixed by this
-issue, per its own scope (`heart/eval/storage.py`'s bucket-layout docstring already
-anticipated `_contract/` as this issue's own concern, not a producer-code fix). Two
-concrete fixes exist, named here as the path rather than built:
+`<id>` is `ansina.dev.vector.resolve_host_id`'s result: the operator-configured
+`[telemetry] host_id` when one is set, else this host's own
+`socket.gethostname()` — either way run through the same character-sanitization
+(`[A-Za-z0-9._-]`, anything else collapsed to `-`) before `ansina.dev.vector.
+build_vector_env` injects it as `ANSINA_TELEMETRY_HOST_ID`, which
+`deploy/vector.toml`'s two `key_prefix` values interpolate directly ahead of
+`kind=.../`. This is a key-prefix segment, not a field on either record below —
+`TelemetrySample`/the mirrored log line carry no `host` field themselves, so a
+reader attributes a sample/log line to its producing deployment purely by which
+`host=<id>/` partition it was read from.
 
-1. Add a `host=<id>/` segment to `deploy/vector.toml`'s two `key_prefix` values,
-   injected via `ansina.dev.vector.build_vector_env`.
-2. Add a `host` field to `ansina.telemetry.sampler.TelemetrySample`.
+**v1's own documented gap is what this resolves**: neither `kind=telemetry/` nor
+`kind=runlog/` carried any partition or field identifying *which machine* produced
+a given object, so two hosts shipping to the same bucket (e.g. a dev laptop and the
+Mac Mini M4 deployment target) were indistinguishable in the corpus. Of the two
+concrete fixes v1 named without building either, this issue took the key-prefix
+path — it's the one that attributes *both* affected families (`kind=telemetry/`
+and `kind=runlog/`) uniformly, where a new `TelemetrySample.host` field would have
+left the mirrored-log-line family (produced by the shared `JsonFormatter`, not
+`ansina.telemetry`) just as unattributed as before.
 
-Either is exactly the kind of change that should arrive as a future issue against
-this repo once an actual consumer needs to disambiguate two hosts — per the
-Lifecycle section above.
+Bench/soak reports are unaffected by this issue — each bench/soak report already
+carries its own `host`/`commit`/`branch` provenance fields (see `bench_report`/
+`triage_bench_report` below), a different, already-adequate attribution mechanism
+for those two families.
 
 ## Per-family schema
 
@@ -218,11 +236,13 @@ measurement-rig artifacts, not production traffic.
   "interval_seconds"/"jitter_seconds"/"branch"/"commit"}, "sample_count": int,
   "tick_log_line_count": int, "journal_entry_count": int}`.
 
-### 3. Telemetry sample (`kind=telemetry/`)
+### 3. Telemetry sample (`host=<id>/kind=telemetry/`)
 
 One JSON object per line, written by `ansina.telemetry.sampler.TelemetrySample`
 every `[telemetry] sample_interval_seconds` (default 60s) whenever `[telemetry]
-enabled = true`, shipped to the bucket by the Vector sidecar (issue #62).
+enabled = true`, shipped to the bucket by the Vector sidecar (issue #62). Host
+attribution is via the `host=<id>/` key-prefix segment above (issue #67), not a
+field on this record — there is no `host` field here.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -237,14 +257,18 @@ enabled = true`, shipped to the bucket by the Vector sidecar (issue #62).
 | `failures_total` | int \| null | cumulative since tick loop start |
 | `consecutive_failures` | int \| null | the circuit breaker's own live counter |
 | `consecutive_overruns` | int \| null | the circuit breaker's own live counter |
+| `idle_total` | int \| null | cumulative since tick loop start — issue #68 |
+| `act_total` | int \| null | cumulative since tick loop start — issue #68 |
+| `escalate_total` | int \| null | cumulative since tick loop start — issue #68 |
 
 **This is a different, superset shape from soak's `samples.jsonl` above — do not
 treat the two as the same schema despite the near-identical field names**:
 
 - This family adds `failures_total`/`consecutive_failures`/`consecutive_overruns`
-  (not present in soak's `samples.jsonl` at all), since `GET /heart/tick` — what the
-  soak script reads — doesn't expose them, while this sampler reads the tick loop's
-  own `TickController` in-process.
+  and (issue #68) `idle_total`/`act_total`/`escalate_total` (none present in
+  soak's `samples.jsonl` at all), since `GET /heart/tick` — what the soak script
+  reads — doesn't expose any of them, while this sampler reads the tick loop's own
+  `TickController` in-process.
 - `rss_kib` here is **peak** RSS (`resource.getrusage(RUSAGE_SELF).ru_maxrss`,
   monotonically non-decreasing for the process's whole lifetime), not the soak
   script's **instantaneous** `ps`-based reading. The two are not bit-comparable
@@ -256,13 +280,34 @@ treat the two as the same schema despite the near-identical field names**:
   (sampling runs independently of the Heart) — soak's `samples.jsonl` has no such
   case, since the soak harness always boots with the Heart enabled.
 
-### 4. Mirrored log line (`kind=runlog/`)
+### Exact decision counts: `idle_total`/`act_total`/`escalate_total` (issue #68)
+
+`[telemetry] sample_interval_seconds` defaults to 60s while the validated
+deployment profile ticks every 30s — `last_decision` alone therefore observes
+roughly every other tick's decision, never every tick's, confirmed directly
+against one real day's telemetry at exactly 2.00 ticks recorded per sample. A
+decision-distribution analysis built over `last_decision` alone is working from
+an unbiased *sample* of the decision stream, not a census of it — fine for a
+steady-state baseline, understated for anything needing an exact count (e.g. a
+true escalate rate).
+
+These three fields are lifetime, monotonically non-decreasing counters — the same
+"running total since the tick loop started" shape `failures_total` already uses,
+never reset by a pause/resume cycle. A reader reconstructs the exact
+idle/act/escalate counts for *any* window by taking the difference between the
+relevant field's value on the sample at the end of that window and its value on
+the sample at (or immediately before) the start of that window — unaffected by a
+missed or delayed sample, since both endpoints are running totals, not deltas
+since the prior sample.
+
+### 4. Mirrored log line (`host=<id>/kind=runlog/`)
 
 One JSON object per line — `ansina.logging.formatter.JsonFormatter`'s output,
 mirrored through `ansina.telemetry.log_mirror.TelemetryLogHandler` to a rotated
 file and shipped by Vector. **Identical in shape to the daemon's own primary log
 stream** (the same formatter instance backs both handlers) and to `run.log`'s own
-lines in the soak family above.
+lines in the soak family above. Host attribution is via the `host=<id>/`
+key-prefix segment above (issue #67), not a field on this record either.
 
 | Field | Type | Notes |
 |---|---|---|

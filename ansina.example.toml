@@ -99,6 +99,17 @@ auto_pause_enabled = true
 # 8-hour soak found zero false escalates, so no dedup/cooldown rung gates this.
 escalate_to_brain = false
 
+[heart.tick.fault_injection]
+# A soak/dev-only mode (issue #72) that forces real, scheduled tick faults — a
+# readiness check failing, consecutive tick failures, or consecutive tick overruns
+# — instead of fabricating snapshot text, so the resulting act/escalate decisions
+# have ground truth to score. false (the default) is a byte-for-byte no-op. Never
+# meant for a production deployment: unlike most "enabled = true" sections in this
+# file, a misconfigured schedule_path fails loudly at boot rather than degrading.
+# See docs/heart/soak.md and docs/heart/fault-schedules/example.json.
+enabled = false
+# schedule_path = "docs/heart/fault-schedules/example.json"
+
 [heart.journal]
 # A durable, readable trace of what every completed tick decided (issue #55) — one
 # row in the "heart_journal" table per tick, read-only over GET /heart/journal.
@@ -346,6 +357,15 @@ max_age_seconds = 600
 # byte-for-byte no-op -- no spool directory is created, no log-mirror handler is
 # attached, no sampling loop starts.
 enabled = false
+
+# This deployment's own identifier (issue #67) -- interpolated into the
+# `host=<id>/` segment of the Vector sidecar's two S3 key prefixes
+# (kind=telemetry/, kind=runlog/) ahead of `dt=<date>/`, so two deployments
+# shipping to the same [telemetry.s3] bucket stay distinguishable. Empty (the
+# default) means "use this host's own socket.gethostname() instead" -- set
+# this when you want a stable, meaningful name (e.g. "mac-mini-m4") rather than
+# whatever the OS happens to call the machine.
+host_id = ""
 
 # Where rotated sample/log files are written. Resolved the same way
 # [database] path/[heart] cache_dir are: `~` expanded, relative paths anchored

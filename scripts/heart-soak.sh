@@ -25,6 +25,10 @@ DEST_DIR="docs/heart/soak"
 ANSINA_REMOTE_SHELL="${ANSINA_REMOTE_SHELL:-zsh}"
 ANSINA_REMOTE_SESSION="${ANSINA_SOAK_SESSION:-ansina-soak}"
 HOURS="${ANSINA_SOAK_HOURS:-8}"
+# Issue #72: a local path to a fault-injection schedule (ansina.heart.tick
+# .fault_injection's own JSON shape) — scp'd up before launch when set, empty (the
+# default) runs with fault injection off exactly as every soak before this one did.
+FAULT_SCHEDULE="${ANSINA_SOAK_FAULT_SCHEDULE:-}"
 
 require_config() {
     local missing=0
@@ -89,23 +93,42 @@ cmd_start() {
     sync_cmd+=" && git clean -fd"
     remote_sh "$sync_cmd"
 
+    if [ -n "$FAULT_SCHEDULE" ] && [ ! -f "$FAULT_SCHEDULE" ]; then
+        echo "ANSINA_SOAK_FAULT_SCHEDULE is set but $FAULT_SCHEDULE does not exist." >&2
+        exit 2
+    fi
+
+    echo "Preparing $ANSINA_REMOTE_HOST:$REMOTE_SCRATCH ..." >&2
+    local prep_cmd
+    prep_cmd="rm -rf $(squote "$REMOTE_SCRATCH")"
+    prep_cmd+=" && mkdir -p $(squote "$REMOTE_SCRATCH/reports")"
+    remote_sh "$prep_cmd"
+
+    # Scp'd up *after* the rm -rf/mkdir above (never before — that would wipe it)
+    # and *before* the tmux launch below, so scripts/heart-soak-run.sh finds it
+    # waiting at a known remote path the moment it starts.
+    local remote_schedule=""
+    if [ -n "$FAULT_SCHEDULE" ]; then
+        remote_schedule="$REMOTE_SCRATCH/fault-schedule.json"
+        echo "Copying fault schedule $FAULT_SCHEDULE to $ANSINA_REMOTE_HOST:$remote_schedule ..." >&2
+        scp -q "$FAULT_SCHEDULE" "$ANSINA_REMOTE_HOST:$remote_schedule"
+    fi
+
     echo "Launching an ${HOURS}h soak in tmux session '$ANSINA_REMOTE_SESSION' ..." >&2
     local run_script="$ANSINA_REMOTE_PATH/scripts/heart-soak-run.sh"
     local launch_cmd
-    launch_cmd="rm -rf $(squote "$REMOTE_SCRATCH")"
-    launch_cmd+=" && mkdir -p $(squote "$REMOTE_SCRATCH/reports")"
-    launch_cmd+=" && (tmux kill-session -t $(squote "$ANSINA_REMOTE_SESSION") || true)"
+    launch_cmd="(tmux kill-session -t $(squote "$ANSINA_REMOTE_SESSION") || true)"
     launch_cmd+=" && tmux new-session -d -s $(squote "$ANSINA_REMOTE_SESSION")"
-    # `HOURS` is a plain positional argument, not an env var ahead of `tmux
-    # new-session` — same reasoning scripts/heart-journal-smoke.sh's own comment on
-    # this exact line shape already documents (tmux's environment is a snapshot tied
-    # to its own server lifecycle, not reliably this client's env).
+    # `HOURS`/`remote_schedule` are plain positional arguments, not env vars ahead of
+    # `tmux new-session` — same reasoning scripts/heart-journal-smoke.sh's own comment
+    # on this exact line shape already documents (tmux's environment is a snapshot
+    # tied to its own server lifecycle, not reliably this client's env).
     #
     # tmux's own trailing argument is itself a shell-command string it later hands to
     # a shell — the one place a hand-placed quote pair belongs, left for *that* shell
     # to interpret rather than re-escaped by squote() here (mirrors
     # remote-heart.sh's/heart-journal-smoke.sh's own comment on this exact line shape).
-    launch_cmd+=" '$run_script $HOURS'"
+    launch_cmd+=" '$run_script $HOURS $remote_schedule'"
     remote_sh "$launch_cmd"
 
     cat >&2 <<EOF
@@ -162,9 +185,15 @@ cmd_fetch() {
 
     echo "Rendering the report into $DEST_DIR/ (gitignored — see docs/heart/soak.md) ..." >&2
     mkdir -p "$DEST_DIR"
-    uv run python scripts/heart_soak_report.py \
-        "$LOCAL_DIR/run.log" "$LOCAL_DIR/samples.jsonl" "$LOCAL_DIR/journal.json" \
-        "$DEST_DIR"
+    if [ -f "$LOCAL_DIR/fault-schedule.json" ]; then
+        uv run python scripts/heart_soak_report.py \
+            "$LOCAL_DIR/run.log" "$LOCAL_DIR/samples.jsonl" "$LOCAL_DIR/journal.json" \
+            "$DEST_DIR" "$LOCAL_DIR/fault-schedule.json"
+    else
+        uv run python scripts/heart_soak_report.py \
+            "$LOCAL_DIR/run.log" "$LOCAL_DIR/samples.jsonl" "$LOCAL_DIR/journal.json" \
+            "$DEST_DIR"
+    fi
 }
 
 cmd_tail() {

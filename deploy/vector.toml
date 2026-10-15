@@ -6,8 +6,13 @@
 #
 # Two independent source/sink pairs, matching the hive-partitioned bucket layout
 # `src/ansina/heart/eval/storage.py`'s own module docstring already documents:
-#   samples*.jsonl -> kind=telemetry/dt=<date>/...
-#   log*.jsonl     -> kind=runlog/dt=<date>/...
+#   samples*.jsonl -> host=<id>/kind=telemetry/dt=<date>/...
+#   log*.jsonl     -> host=<id>/kind=runlog/dt=<date>/...
+#
+# `host=<id>/` (issue #67) is what makes two deployments shipping to the same
+# bucket distinguishable — `<id>` is `ANSINA_TELEMETRY_HOST_ID`, resolved by
+# `ansina.dev.vector.resolve_host_id` and injected by `build_vector_env`, never
+# read from this file's own environment directly.
 #
 # Validate with `make vector-validate` (wraps `scripts/vector-validate.sh`) — the
 # daemon's own `ansina.dev.vector.preflight()` runs the identical `vector validate`
@@ -39,7 +44,7 @@ inputs = ["telemetry_samples"]
 bucket = "${ANSINA_TELEMETRY_S3_BUCKET}"
 region = "${ANSINA_TELEMETRY_S3_REGION}"
 endpoint = "${ANSINA_TELEMETRY_S3_ENDPOINT_URL}"
-key_prefix = "${ANSINA_TELEMETRY_S3_KEY_PREFIX}kind=telemetry/dt=%Y-%m-%d/"
+key_prefix = "${ANSINA_TELEMETRY_S3_KEY_PREFIX}host=${ANSINA_TELEMETRY_HOST_ID}/kind=telemetry/dt=%Y-%m-%d/"
 compression = "none"
 force_path_style = true
 # Dev Mode is a lab posture, not a tuned production pipeline — a short batch
@@ -69,7 +74,7 @@ inputs = ["telemetry_log"]
 bucket = "${ANSINA_TELEMETRY_S3_BUCKET}"
 region = "${ANSINA_TELEMETRY_S3_REGION}"
 endpoint = "${ANSINA_TELEMETRY_S3_ENDPOINT_URL}"
-key_prefix = "${ANSINA_TELEMETRY_S3_KEY_PREFIX}kind=runlog/dt=%Y-%m-%d/"
+key_prefix = "${ANSINA_TELEMETRY_S3_KEY_PREFIX}host=${ANSINA_TELEMETRY_HOST_ID}/kind=runlog/dt=%Y-%m-%d/"
 compression = "none"
 force_path_style = true
 batch.timeout_secs = 5

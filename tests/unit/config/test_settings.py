@@ -7,6 +7,7 @@ from ansina.config import ConfigError, load_settings
 from ansina.config.settings import (
     CorsSettings,
     EncryptionSettings,
+    FaultInjectionSettings,
     OidcSettings,
     SecuritySettings,
     ServerSettings,
@@ -60,6 +61,8 @@ def test_defaults_only(clean_env: None, tmp_cwd: Path) -> None:
     assert settings.heart.tick.interval_seconds == 30.0
     assert settings.heart.tick.jitter_seconds == 3.0
     assert settings.heart.tick.escalate_to_brain is False
+    assert settings.heart.tick.fault_injection.enabled is False
+    assert settings.heart.tick.fault_injection.schedule_path is None
     assert settings.heart.journal.max_entries == 2000
     assert settings.heart.journal.retention_days == 14
     assert settings.heart.journal.recent_entries == 5
@@ -1159,6 +1162,7 @@ def test_telemetry_producer_defaults(clean_env: None, tmp_cwd: Path) -> None:
 
     telemetry = settings.telemetry
     assert telemetry.enabled is False
+    assert telemetry.host_id == ""
     assert telemetry.spool_dir.is_absolute()
     assert telemetry.spool_dir.name == "telemetry"
     assert telemetry.sample_interval_seconds == 60.0
@@ -1183,6 +1187,7 @@ def test_telemetry_producer_env_vars_round_trip(
     clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_TELEMETRY__HOST_ID", "mac-mini-m4")
     monkeypatch.setenv("ANSINA_TELEMETRY__SPOOL_DIR", str(tmp_cwd / "spool"))
     monkeypatch.setenv("ANSINA_TELEMETRY__SAMPLE_INTERVAL_SECONDS", "15")
     monkeypatch.setenv("ANSINA_TELEMETRY__MAX_FILE_BYTES", "2000")
@@ -1193,6 +1198,7 @@ def test_telemetry_producer_env_vars_round_trip(
 
     telemetry = settings.telemetry
     assert telemetry.enabled is True
+    assert telemetry.host_id == "mac-mini-m4"
     assert telemetry.spool_dir == (tmp_cwd / "spool").resolve()
     assert telemetry.sample_interval_seconds == 15.0
     assert telemetry.max_file_bytes == 2000
@@ -1306,3 +1312,81 @@ def test_load_settings_overrides_still_respects_env_for_other_fields(
 
     assert settings.dev.enabled is True
     assert settings.server.port == 9999
+
+
+# --- issue #72: [heart.tick.fault_injection] ----------------------------------------
+
+
+def test_fault_injection_disabled_by_default(clean_env: None, tmp_cwd: Path) -> None:
+    settings = load_settings()
+
+    assert settings.heart.tick.fault_injection.enabled is False
+    assert settings.heart.tick.fault_injection.schedule_path is None
+
+
+def test_fault_injection_enabled_with_schedule_path_loads_fine(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", "fault-schedule.json"
+    )
+
+    settings = load_settings()
+
+    assert settings.heart.tick.fault_injection.enabled is True
+    assert settings.heart.tick.fault_injection.schedule_path == (
+        tmp_cwd / "fault-schedule.json"
+    )
+
+
+def test_fault_injection_enabled_without_schedule_path_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "heart.tick.fault_injection.schedule_path" in str(exc_info.value)
+
+
+def test_fault_injection_schedule_path_expands_and_resolves_like_database_path(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", "~/schedules/x.json"
+    )
+
+    settings = load_settings()
+
+    schedule_path = settings.heart.tick.fault_injection.schedule_path
+    assert schedule_path is not None
+    assert schedule_path.is_absolute()
+    assert "~" not in str(schedule_path)
+    assert schedule_path == Path("~/schedules/x.json").expanduser()
+
+
+def test_fault_injection_settings_disabled_accepts_a_none_schedule_path_directly() -> (
+    None
+):
+    """`_validate_enabled_requires_schedule`'s early return for `enabled=False` —
+    `FaultInjectionSettings` can be constructed directly with every field left at
+    its default.
+    """
+    settings = FaultInjectionSettings()
+
+    assert settings.enabled is False
+    assert settings.schedule_path is None
+
+
+def test_fault_injection_schedule_path_validator_passes_through_an_explicit_none() -> (
+    None
+):
+    """`_resolve_schedule_path`'s own `value is None` branch — exercised only when
+    `None` is an *explicit* value to validate, not merely the unvalidated default.
+    """
+    settings = FaultInjectionSettings(schedule_path=None)
+
+    assert settings.schedule_path is None

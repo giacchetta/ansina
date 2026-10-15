@@ -1,0 +1,51 @@
+[
+  {
+    "id": "single-failure",
+    "fault": "tick_failure",
+    "at_tick": 5,
+    "duration_ticks": 1,
+    "expected_decision": "act",
+    "note": "A single, first-time tick failure, not yet a recurring pattern - mirrors heart/eval/data/tick_fixtures.jsonl's self-act-01."
+  },
+  {
+    "id": "persistent-failure",
+    "fault": "tick_failure",
+    "at_tick": 12,
+    "duration_ticks": 4,
+    "expected_decision": "escalate",
+    "note": "4 consecutive tick failures - self-repair is not working, mirrors self-esc-02. Stays below [heart.tick] max_consecutive_failures (5) so it doesn't trip the circuit breaker on the Mac-validated profile."
+  },
+  {
+    "id": "stuck-sensor",
+    "fault": "readiness_check",
+    "at_tick": 20,
+    "duration_ticks": 1,
+    "expected_decision": "escalate",
+    "note": "A readiness check failing alone - mirrors self-esc-04 (the heart readiness check itself failing)."
+  },
+  {
+    "id": "overloaded-backend",
+    "fault": "tick_overrun",
+    "at_tick": 27,
+    "duration_ticks": 3,
+    "expected_decision": "escalate",
+    "sleep_seconds": 26.0,
+    "note": "3 consecutive abnormally slow ticks - mirrors self-esc-06. sleep_seconds (26) clears interval_seconds * overrun_ratio (30 * 0.8 = 24) on the Mac-validated profile without blowing past interval_seconds itself."
+  },
+  {
+    "id": "two-axis-readiness",
+    "fault": "readiness_check",
+    "at_tick": 34,
+    "duration_ticks": 2,
+    "expected_decision": "escalate",
+    "note": "Overlaps two-axis-failure below on purpose - a different FaultKind, which load_fault_schedule allows to overlap. Mirrors self-esc-01/self-esc-03's 'two simultaneous axes'."
+  },
+  {
+    "id": "two-axis-failure",
+    "fault": "tick_failure",
+    "at_tick": 35,
+    "duration_ticks": 2,
+    "expected_decision": "escalate",
+    "note": "See two-axis-readiness above."
+  }
+]

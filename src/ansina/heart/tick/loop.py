@@ -20,11 +20,16 @@ from typing import Protocol
 import anyio.to_thread
 
 from ansina.brain.provider import BrainProvider
-from ansina.config.settings import Settings
+from ansina.config.settings import Settings, TickSettings
 from ansina.heart.journal import HeartJournalRepository
 from ansina.heart.runtime import HeartRuntime
 from ansina.heart.tick.brain_escalation_handler import BrainEscalationHandler
 from ansina.heart.tick.decision import TickDecision, parse_decision
+from ansina.heart.tick.fault_injection import (
+    FaultInjector,
+    FaultKind,
+    load_fault_schedule,
+)
 from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.snapshot import (
     StateSnapshotSource,
@@ -32,7 +37,7 @@ from ansina.heart.tick.snapshot import (
     build_prompt,
     collect_items,
 )
-from ansina.heart.tick.sources.daemon_state import DaemonStateSource, ReadinessProbe
+from ansina.heart.tick.sources.daemon_state import DaemonStateSource, ReadinessRegistry
 from ansina.heart.tick.sources.recent_journal import RecentJournalSource
 from ansina.logging import get_logger
 from ansina.storage.database import Database
@@ -138,7 +143,12 @@ class TickLoopFactory(Protocol):
     before the tick loop (reordered for this issue), so passing it through needs no new
     construction, the same reasoning `db`/`readiness` were added on. `None` is a
     legitimate value here (`[brain] enabled = false`), not an error — see
-    `BrainEscalationHandler`'s own `brain is None` branch.
+    `BrainEscalationHandler`'s own `brain is None` branch. Issue #72 widens `readiness`
+    once more, from `ReadinessProbe` to the wider structural `ReadinessRegistry` —
+    `build_tick_loop` needs `.register()`, not just `.snapshot()`, to add the
+    fault-injection readiness check when `[heart.tick.fault_injection] enabled` is
+    `True`. `create_app`'s own concrete `Readiness` already satisfies the wider
+    Protocol with no change to that module.
     """
 
     def __call__(
@@ -148,7 +158,7 @@ class TickLoopFactory(Protocol):
         /,
         *,
         db: Database,
-        readiness: ReadinessProbe,
+        readiness: ReadinessRegistry,
         brain: BrainProvider | None,
     ) -> TickController: ...
 
@@ -165,6 +175,14 @@ class TickController(TickLifecycle, Protocol):
     `GET /heart/tick` itself is deliberately *not* widened to expose them — M6's
     own open question on this was answered as a telemetry file field (issue #61),
     not a new API surface.
+
+    Issue #68 widens this again with `idle_total`/`act_total`/`escalate_total` —
+    `[telemetry] sample_interval_seconds` defaults to 60s against a 30s tick
+    cadence, so a sample's own `last_decision` observes roughly every other tick's
+    decision, never a census of the stream. Three lifetime, monotonically
+    non-decreasing counters (the same shape as `failures_total`) let a reader
+    reconstruct the exact idle/act/escalate counts for any window by diffing two
+    samples' totals, rather than inferring them from a 2:1 sampling ratio.
     """
 
     @property
@@ -185,6 +203,12 @@ class TickController(TickLifecycle, Protocol):
     def consecutive_failures(self) -> int: ...
     @property
     def consecutive_overruns(self) -> int: ...
+    @property
+    def idle_total(self) -> int: ...
+    @property
+    def act_total(self) -> int: ...
+    @property
+    def escalate_total(self) -> int: ...
 
     def pause(self, *, reason: str | None = None) -> None: ...
     def resume(self) -> None: ...
@@ -328,6 +352,9 @@ class TickLoop:
         self._failures_total = 0
         self._consecutive_failures = 0
         self._consecutive_overruns = 0
+        self._idle_total = 0
+        self._act_total = 0
+        self._escalate_total = 0
 
     def add_source(self, source: StateSnapshotSource) -> None:
         """Register another `StateSnapshotSource` after construction.
@@ -373,6 +400,24 @@ class TickLoop:
         overrun_ratio` — reset by any tick that finishes faster, or by `resume()`.
         """
         return self._consecutive_overruns
+
+    @property
+    def idle_total(self) -> int:
+        """Lifetime count of ticks that decided `idle`, since the loop started —
+        never reset by `resume()`, the same "running total, not since-last-sample"
+        shape as `failures_total`. See issue #68.
+        """
+        return self._idle_total
+
+    @property
+    def act_total(self) -> int:
+        """Lifetime count of ticks that decided `act`, since the loop started."""
+        return self._act_total
+
+    @property
+    def escalate_total(self) -> int:
+        """Lifetime count of ticks that decided `escalate`, since the loop started."""
+        return self._escalate_total
 
     @property
     def last_decision(self) -> TickDecision | None:
@@ -495,6 +540,7 @@ class TickLoop:
             duration = self._clock() - start
             self._ticks_run += 1
             self._last_decision = decision
+            self._record_decision(decision)
             self._last_tick_at = datetime.now(UTC).isoformat()
             self._last_duration_seconds = duration
             self._record_success(duration)
@@ -524,6 +570,18 @@ class TickLoop:
             )
         finally:
             self._in_flight = False
+
+    def _record_decision(self, decision: TickDecision) -> None:
+        """Bumps the lifetime counter matching a completed tick's decision — issue
+        #68. Three mutually-exclusive counters, since a tick decides exactly one of
+        idle/act/escalate; `TickDecision` has no fourth member.
+        """
+        if decision is TickDecision.IDLE:
+            self._idle_total += 1
+        elif decision is TickDecision.ACT:
+            self._act_total += 1
+        else:
+            self._escalate_total += 1
 
     def _record_failure(self) -> None:
         """Called from `run()`'s existing swallow-and-log handler when `tick_once()`
@@ -575,16 +633,44 @@ class TickLoop:
             self.pause(reason=reason)
 
 
+def _warn_if_fault_schedule_may_trip_breaker(
+    injector: FaultInjector, tick_settings: TickSettings
+) -> None:
+    """A `TICK_FAILURE`/`TICK_OVERRUN` window whose own `duration_ticks` reaches
+    `max_consecutive_failures` will trip issue #54's circuit breaker partway through
+    the window, auto-pausing the loop (when `auto_pause_enabled`, the default) before
+    every window scheduled after it ever runs. Logged, not refused — proving the
+    breaker itself trips correctly under an injected fault is a legitimate thing to
+    schedule on purpose.
+    """
+    if not tick_settings.auto_pause_enabled:
+        return
+    for window in injector.schedule:
+        if (
+            window.fault in (FaultKind.TICK_FAILURE, FaultKind.TICK_OVERRUN)
+            and window.duration_ticks >= tick_settings.max_consecutive_failures
+        ):
+            logger.warning(
+                "heart tick: fault injection window may trip the circuit breaker "
+                "before its own duration completes, pausing every later window",
+                extra={
+                    "window": window.id,
+                    "duration_ticks": window.duration_ticks,
+                    "max_consecutive_failures": tick_settings.max_consecutive_failures,
+                },
+            )
+
+
 def build_tick_loop(
     settings: Settings,
     heart: HeartRuntime,
     *,
     db: Database,
-    readiness: ReadinessProbe,
+    readiness: ReadinessRegistry,
     brain: BrainProvider | None,
 ) -> TickLoop:
     """The default `tick_loop_factory` for `create_app` — wires a `TickLoop` to
-    `settings.heart.tick`, then registers two snapshot sources and the default
+    `settings.heart.tick`, then registers its snapshot sources and the default
     `DecisionHandler`:
 
     - `DaemonStateSource` (issue #54) — the daemon's own live state (`db`/`readiness`)
@@ -594,25 +680,33 @@ def build_tick_loop(
       .recent_entries` `heart_journal` rows, giving the Heart short-term memory of its
       own past decisions. Registered even when `recent_entries == 0`; the source
       itself stays silent in that case (see its own docstring).
+    - `FaultInjector` (issue #72) — only when `settings.heart.tick.fault_injection
+      .enabled` is `True`; see that module's own docstring. Plays all three of its
+      roles: a `StateSnapshotSource` (`add_source`, for `TICK_OVERRUN`), a
+      `DecisionHandler` (composed below, for `TICK_FAILURE`), and a registered
+      `Readiness` check (`readiness.register`, for `READINESS_CHECK`).
 
     Ships with `JournalDecisionHandler` (issue #55, replacing issue #11's
     `LoggingDecisionHandler`) as the default, writing one `heart_journal` row per
     completed tick via the same `HeartJournalRepository` the source above reads from.
-    Issue #64: when `settings.heart.tick.escalate_to_brain` is `True`, a second handler
-    — `BrainEscalationHandler` — is composed alongside it via `CompositeDecisionHandler`
-    (`JournalDecisionHandler` first, so the tick's own row always precedes any
-    Brain-call-outcome row for the same tick). When it's `False` (the default),
-    `decision_handler` stays the bare `JournalDecisionHandler` instance — the exact
-    object graph this function has always built, not merely equivalent behavior, which
-    is what makes `escalate_to_brain = false` a *verified* no-op rather than an
-    assumed one.
+    Issue #64: when `settings.heart.tick.escalate_to_brain` is `True`,
+    `BrainEscalationHandler` is composed alongside it; issue #72: when
+    `fault_injection.enabled` is `True`, the `FaultInjector` is composed last, so an
+    injected failure is always recorded as the tick's outcome, never evidence it never
+    happened. `CompositeDecisionHandler` only wraps `decision_handler` when more than
+    one handler is actually in play — with neither flag set, `decision_handler` stays
+    the bare `JournalDecisionHandler` instance, the exact object graph this function
+    has always built when both are off, not merely equivalent behavior, which is what
+    makes that combination a *verified* no-op rather than an assumed one.
 
     `db`/`readiness` widen this signature beyond issue #11's original
     `(settings, heart)` — both already exist in `create_app` before the tick loop is
     built, so this needs no new construction of its own. Issue #55 widens `db` again,
     from a structural `HealthProbe` to a concrete `Database` — see `TickLoopFactory`'s
     own docstring for why that's not a layering violation. Issue #64 widens this once
-    more with `brain` — see `TickLoopFactory`'s own docstring for that one too.
+    more with `brain` — see `TickLoopFactory`'s own docstring for that one too. Issue
+    #72 widens `readiness` from `ReadinessProbe` to `ReadinessRegistry` — same
+    docstring, same reasoning.
     """
     tick_settings = settings.heart.tick
     journal_settings = settings.heart.journal
@@ -622,21 +716,33 @@ def build_tick_loop(
         max_entries=journal_settings.max_entries,
         retention_days=journal_settings.retention_days,
     )
-    decision_handler: DecisionHandler = journal_handler
+    handlers: list[DecisionHandler] = [journal_handler]
     if tick_settings.escalate_to_brain:
-        decision_handler = CompositeDecisionHandler(
-            (
-                journal_handler,
-                BrainEscalationHandler(
-                    brain,
-                    journal_repository,
-                    model=settings.brain.model,
-                    max_output_tokens=settings.brain.max_output_tokens,
-                    max_entries=journal_settings.max_entries,
-                    retention_days=journal_settings.retention_days,
-                ),
+        handlers.append(
+            BrainEscalationHandler(
+                brain,
+                journal_repository,
+                model=settings.brain.model,
+                max_output_tokens=settings.brain.max_output_tokens,
+                max_entries=journal_settings.max_entries,
+                retention_days=journal_settings.retention_days,
             )
         )
+
+    fault_injector: FaultInjector | None = None
+    fault_settings = tick_settings.fault_injection
+    if fault_settings.enabled:
+        # `schedule_path` is required when `enabled = true` —
+        # `FaultInjectionSettings._validate_enabled_requires_schedule` already refused
+        # to boot otherwise.
+        assert fault_settings.schedule_path is not None
+        schedule = load_fault_schedule(fault_settings.schedule_path)
+        fault_injector = FaultInjector(schedule)
+        handlers.append(fault_injector)
+
+    decision_handler: DecisionHandler = (
+        handlers[0] if len(handlers) == 1 else CompositeDecisionHandler(tuple(handlers))
+    )
     loop = TickLoop(
         heart,
         interval_seconds=tick_settings.interval_seconds,
@@ -653,4 +759,9 @@ def build_tick_loop(
             journal_repository, recent_entries=journal_settings.recent_entries
         )
     )
+    if fault_injector is not None:
+        fault_injector.bind(loop)
+        loop.add_source(fault_injector)
+        readiness.register(fault_injector.name, fault_injector.readiness_ok)
+        _warn_if_fault_schedule_may_trip_breaker(fault_injector, tick_settings)
     return loop

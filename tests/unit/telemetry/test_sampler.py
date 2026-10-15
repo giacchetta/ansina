@@ -37,6 +37,9 @@ class _FakeTick:
         failures_total: int = 1,
         consecutive_failures: int = 0,
         consecutive_overruns: int = 0,
+        idle_total: int = 5,
+        act_total: int = 1,
+        escalate_total: int = 1,
     ) -> None:
         self.ticks_run = ticks_run
         self.paused = paused
@@ -47,6 +50,9 @@ class _FakeTick:
         self.failures_total = failures_total
         self.consecutive_failures = consecutive_failures
         self.consecutive_overruns = consecutive_overruns
+        self.idle_total = idle_total
+        self.act_total = act_total
+        self.escalate_total = escalate_total
 
     def pause(self, *, reason: str | None = None) -> None:
         pass
@@ -130,6 +136,9 @@ def test_telemetry_sample_to_json_line_round_trips() -> None:
         failures_total=0,
         consecutive_failures=0,
         consecutive_overruns=0,
+        idle_total=3,
+        act_total=0,
+        escalate_total=0,
     )
 
     line = sample.to_json_line()
@@ -148,6 +157,9 @@ def test_telemetry_sample_to_json_line_round_trips() -> None:
         "failures_total": 0,
         "consecutive_failures": 0,
         "consecutive_overruns": 0,
+        "idle_total": 3,
+        "act_total": 0,
+        "escalate_total": 0,
     }
 
 
@@ -165,6 +177,9 @@ def test_collect_sample_with_no_tick_renders_every_tick_field_null() -> None:
     assert sample.failures_total is None
     assert sample.consecutive_failures is None
     assert sample.consecutive_overruns is None
+    assert sample.idle_total is None
+    assert sample.act_total is None
+    assert sample.escalate_total is None
 
 
 def test_collect_sample_with_a_tick_reads_every_field_through() -> None:
@@ -177,6 +192,9 @@ def test_collect_sample_with_a_tick_reads_every_field_through() -> None:
         failures_total=2,
         consecutive_failures=1,
         consecutive_overruns=3,
+        idle_total=10,
+        act_total=4,
+        escalate_total=2,
     )
 
     sample = collect_sample(now=200.0, elapsed_s=60, rss_kib=5555, tick=tick)
@@ -189,6 +207,9 @@ def test_collect_sample_with_a_tick_reads_every_field_through() -> None:
     assert sample.failures_total == 2
     assert sample.consecutive_failures == 1
     assert sample.consecutive_overruns == 3
+    assert sample.idle_total == 10
+    assert sample.act_total == 4
+    assert sample.escalate_total == 2
 
 
 def test_collect_sample_with_a_tick_and_no_decision_yet() -> None:
