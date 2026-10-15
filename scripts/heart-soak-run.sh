@@ -11,6 +11,14 @@
 # Deliberately `set -uo pipefail` without `-e`, same reasoning as every other
 # `*-run.sh` script here: a failure partway through an 8-hour run must still be
 # captured into `.exit`, never abort this script before that write happens.
+#
+# An optional 2nd positional argument (issue #72) is a fault-injection schedule file
+# already present on this host (scripts/heart-soak.sh's cmd_start scp's it here
+# before launching, since tmux's environment is a snapshot that can't carry a
+# freshly-set env var reliably -- same reasoning HOURS below is positional, not
+# ANSINA_SOAK_HOURS read directly). When given, this boots the daemon with
+# [heart.tick.fault_injection] enabled against it and copies it into reports/ so
+# scripts/heart_soak_report.py can score the run against it afterward.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -31,6 +39,9 @@ PORT="${ANSINA_SOAK_PORT:-8098}"
 # client's env). May be fractional (e.g. "0.05" for a quick end-to-end validation
 # run) — computed via python3 below rather than bash integer arithmetic.
 HOURS="${1:-${ANSINA_SOAK_HOURS:-8}}"
+# Issue #72: a fault-injection schedule path already on this host, or empty (the
+# default) to run with fault injection off, exactly as every soak before this one did.
+FAULT_SCHEDULE="${2:-}"
 SAMPLE_INTERVAL="${ANSINA_SOAK_SAMPLE_INTERVAL:-60}"
 TICK_INTERVAL="${ANSINA_SOAK_TICK_INTERVAL:-30}"
 # The Mac-validated profile's own jitter value (docs/heart/mac-mini-m4.toml) — not a
@@ -62,6 +73,15 @@ rm -f "$SCRATCH"/ansina.db* "$SAMPLES_FILE"
     export ANSINA_HEART__MODEL_REPO="$MODEL_REPO"
     export ANSINA_HEART__TICK__INTERVAL_SECONDS="$TICK_INTERVAL"
     export ANSINA_HEART__TICK__JITTER_SECONDS="$TICK_JITTER"
+    if [ -n "$FAULT_SCHEDULE" ]; then
+        echo "fault schedule: $FAULT_SCHEDULE"
+        export ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED=true
+        export ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH="$FAULT_SCHEDULE"
+        # Copied into reports/ (not just left at $FAULT_SCHEDULE) so the local
+        # driver's one `scp .../reports/*` fetches it alongside everything else
+        # `scripts/heart_soak_report.py` needs in a single round-trip.
+        cp "$FAULT_SCHEDULE" "$REPORTS/fault-schedule.json"
+    fi
 
     base="http://127.0.0.1:$PORT"
 

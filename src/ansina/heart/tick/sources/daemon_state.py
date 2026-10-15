@@ -44,6 +44,18 @@ class ReadinessProbe(Protocol):
     def snapshot(self) -> Mapping[str, bool]: ...
 
 
+class ReadinessRegistry(ReadinessProbe, Protocol):
+    """`ReadinessProbe` plus the ability to register a new named check — the wider
+    capability `build_tick_loop` needs (issue #72) to add the fault-injection
+    readiness check only when `[heart.tick.fault_injection] enabled` is `True`.
+    Satisfied structurally by the concrete `api.readiness.Readiness` with no change to
+    that module at all — the same "widen the Protocol, not the layering" move
+    `TickLoopFactory`'s own docstring documents for `db` (issue #55).
+    """
+
+    def register(self, name: str, check: Callable[[], bool]) -> None: ...
+
+
 class HealthProbe(Protocol):
     """The one method this source needs from `storage.Database` — structural, mirroring
     `ReadinessProbe` above.

@@ -99,6 +99,17 @@ auto_pause_enabled = true
 # 8-hour soak found zero false escalates, so no dedup/cooldown rung gates this.
 escalate_to_brain = false
 
+[heart.tick.fault_injection]
+# A soak/dev-only mode (issue #72) that forces real, scheduled tick faults — a
+# readiness check failing, consecutive tick failures, or consecutive tick overruns
+# — instead of fabricating snapshot text, so the resulting act/escalate decisions
+# have ground truth to score. false (the default) is a byte-for-byte no-op. Never
+# meant for a production deployment: unlike most "enabled = true" sections in this
+# file, a misconfigured schedule_path fails loudly at boot rather than degrading.
+# See docs/heart/soak.md and docs/heart/fault-schedules/example.json.
+enabled = false
+# schedule_path = "docs/heart/fault-schedules/example.json"
+
 [heart.journal]
 # A durable, readable trace of what every completed tick decided (issue #55) — one
 # row in the "heart_journal" table per tick, read-only over GET /heart/journal.

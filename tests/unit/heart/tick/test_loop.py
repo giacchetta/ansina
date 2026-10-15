@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import threading
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -14,6 +16,7 @@ from ansina.config import load_settings
 from ansina.heart.journal import BrainEscalationStatus, HeartJournalRepository
 from ansina.heart.runtime import BaseHeartRuntime
 from ansina.heart.tick.decision import TickDecision
+from ansina.heart.tick.fault_injection import FaultInjector, FaultKind, FaultWindow
 from ansina.heart.tick.journal_handler import JournalDecisionHandler
 from ansina.heart.tick.loop import (
     CompositeDecisionHandler,
@@ -815,3 +818,301 @@ async def test_escalate_to_brain_true_journals_two_rows_and_never_trips_the_brea
     assert loop.failures_total == 0
     assert loop.consecutive_failures == 0
     assert loop.paused is False
+
+
+# --- build_tick_loop: fault injection wiring (issue #72) ----------------------------
+
+
+def _write_schedule(path: Path, windows: list[dict[str, object]]) -> None:
+    path.write_text(json.dumps(windows), encoding="utf-8")
+
+
+def test_build_tick_loop_fault_injection_disabled_by_default_is_a_noop(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    """`[heart.tick.fault_injection] enabled = false` (the default) must leave the
+    exact object graph `build_tick_loop` has always built — no third source, no
+    registered readiness check, the bare `JournalDecisionHandler` instance.
+    """
+    heart = _FakeHeart()
+    settings = load_settings()
+    readiness = Readiness()
+
+    loop = build_tick_loop(settings, heart, db=db, readiness=readiness, brain=None)
+
+    assert isinstance(loop._handler, JournalDecisionHandler)
+    assert not isinstance(loop._handler, CompositeDecisionHandler)
+    assert len(loop._sources) == 2
+    assert "fault_injection" not in readiness.snapshot()
+
+
+def test_build_tick_loop_fault_injection_enabled_composes_injector(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    schedule_path = tmp_cwd / "schedule.json"
+    _write_schedule(
+        schedule_path,
+        [
+            {
+                "id": "x",
+                "fault": "readiness_check",
+                "at_tick": 1,
+                "duration_ticks": 5,
+                "expected_decision": "escalate",
+            }
+        ],
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", str(schedule_path)
+    )
+    heart = _FakeHeart()
+    settings = load_settings()
+    readiness = Readiness()
+
+    loop = build_tick_loop(settings, heart, db=db, readiness=readiness, brain=None)
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    assert len(loop._sources) == 3
+    assert isinstance(loop._sources[2], FaultInjector)
+    # Registered fresh, read live — the window covers tick 1, the upcoming tick with
+    # no ticks run yet, so the check is already failing the moment it's registered.
+    assert readiness.snapshot()["fault_injection"] is False
+
+
+def test_build_tick_loop_fault_injection_composes_after_the_brain_handler(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    """Order matters: the injected failure must be recorded as the tick's own
+    outcome, never evidence it never happened — `JournalDecisionHandler` always runs
+    first, `FaultInjector` always runs last.
+    """
+    schedule_path = tmp_cwd / "schedule.json"
+    _write_schedule(schedule_path, [])
+    monkeypatch.setenv("ANSINA_HEART__TICK__ESCALATE_TO_BRAIN", "true")
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", str(schedule_path)
+    )
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    handlers = loop._handler._handlers
+    assert len(handlers) == 3
+    assert isinstance(handlers[0], JournalDecisionHandler)
+    assert isinstance(handlers[2], FaultInjector)
+
+
+def test_build_tick_loop_warns_when_a_fault_window_may_trip_the_breaker(
+    clean_env: None,
+    tmp_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db: Database,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    schedule_path = tmp_cwd / "schedule.json"
+    _write_schedule(
+        schedule_path,
+        [
+            {
+                "id": "long-failure",
+                "fault": "tick_failure",
+                "at_tick": 1,
+                "duration_ticks": 5,
+                "expected_decision": "escalate",
+            }
+        ],
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", str(schedule_path)
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__MAX_CONSECUTIVE_FAILURES", "5")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    with caplog.at_level(logging.WARNING):
+        build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+
+    assert any(
+        "may trip the circuit breaker" in record.message for record in caplog.records
+    )
+
+
+def test_build_tick_loop_does_not_warn_when_auto_pause_is_disabled(
+    clean_env: None,
+    tmp_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db: Database,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    schedule_path = tmp_cwd / "schedule.json"
+    _write_schedule(
+        schedule_path,
+        [
+            {
+                "id": "long-failure",
+                "fault": "tick_failure",
+                "at_tick": 1,
+                "duration_ticks": 5,
+                "expected_decision": "escalate",
+            }
+        ],
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", str(schedule_path)
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__MAX_CONSECUTIVE_FAILURES", "5")
+    monkeypatch.setenv("ANSINA_HEART__TICK__AUTO_PAUSE_ENABLED", "false")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    with caplog.at_level(logging.WARNING):
+        build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+
+    assert not any(
+        "may trip the circuit breaker" in record.message for record in caplog.records
+    )
+
+
+async def test_fault_injection_end_to_end_prompt_reports_a_real_readiness_failure(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    """Proves the module's own central claim: the injected fault is reported by
+    `DaemonStateSource` exactly the way it reports a real one, because — as far as
+    that source can tell — it is one. No fabricated snapshot text anywhere.
+    """
+    schedule_path = tmp_cwd / "schedule.json"
+    _write_schedule(
+        schedule_path,
+        [
+            {
+                "id": "stuck-sensor",
+                "fault": "readiness_check",
+                "at_tick": 1,
+                "duration_ticks": 1,
+                "expected_decision": "escalate",
+            }
+        ],
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", str(schedule_path)
+    )
+    captured_prompts: list[str] = []
+
+    class _CapturingHeart(_FakeHeart):
+        def _generate(self, prompt: str, max_tokens: int) -> str:
+            captured_prompts.append(prompt)
+            return super()._generate(prompt, max_tokens)
+
+    heart = _CapturingHeart(context_tokens=8192, max_output_tokens=512)
+    settings = load_settings()
+
+    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    await loop.tick_once()
+
+    assert len(captured_prompts) == 1
+    assert "fault_injection" in captured_prompts[0]
+
+
+# --- FaultInjector wired directly into TickLoop: real counter effects (issue #72) ---
+
+
+async def test_fault_injector_tick_failure_bumps_real_failure_counters_end_to_end() -> (
+    None
+):
+    """The `DecisionHandler` role really does propagate out of `tick_once()` into
+    `run()`'s own swallow-and-log handler — `_drive_ticks` mirrors that handler the
+    same way the circuit-breaker tests above do.
+    """
+    window = FaultWindow(
+        id="recurring",
+        fault=FaultKind.TICK_FAILURE,
+        at_tick=2,
+        duration_ticks=2,
+        expected_decision=TickDecision.ESCALATE,
+    )
+    injector = FaultInjector((window,))
+    heart = _FakeHeart(reply="idle")
+    loop = TickLoop(
+        heart,
+        interval_seconds=100,
+        max_output_tokens=10,
+        decision_handler=CompositeDecisionHandler((_RecordingHandler(), injector)),
+        max_consecutive_failures=10,
+    )
+    injector.bind(loop)
+
+    await _drive_ticks(loop, 4)  # ticks 1(ok) 2(forced) 3(forced) 4(ok)
+
+    assert loop.ticks_run == 4
+    assert loop.failures_total == 2
+    assert loop.consecutive_failures == 0
+
+
+async def test_fault_injector_tick_overrun_role_triggers_a_real_measured_overrun() -> (
+    None
+):
+    """The `collect()` role doesn't fabricate the overrun itself — `TickLoop` still
+    measures real elapsed time (scripted here, the same way
+    `test_breaker_trips_on_consecutive_overruns_independent_of_failures` avoids real
+    sleeping) and the counter it bumps is `TickLoop`'s own, never set directly by
+    `FaultInjector`.
+    """
+    sleeps: list[float] = []
+    window = FaultWindow(
+        id="slow",
+        fault=FaultKind.TICK_OVERRUN,
+        at_tick=1,
+        duration_ticks=1,
+        expected_decision=TickDecision.ESCALATE,
+        sleep_seconds=42.0,
+    )
+    injector = FaultInjector((window,), sleep=sleeps.append)
+    clock_values = iter([0.0, 30.0])  # duration 30s >= overrun_ratio * interval (8.0)
+    loop = TickLoop(
+        _FakeHeart(reply="idle"),
+        interval_seconds=10,
+        max_output_tokens=10,
+        overrun_ratio=0.8,
+        clock=lambda: next(clock_values),
+    )
+    injector.bind(loop)
+    loop.add_source(injector)
+
+    await _drive_ticks(loop, 1)
+
+    assert sleeps == [42.0]  # the role was actually invoked for the active window
+    assert loop.consecutive_overruns == 1  # TickLoop's own real measurement
+
+
+async def test_fault_injector_readiness_role_reflects_window_boundaries() -> None:
+    window = FaultWindow(
+        id="stuck-sensor",
+        fault=FaultKind.READINESS_CHECK,
+        at_tick=2,
+        duration_ticks=1,
+        expected_decision=TickDecision.ESCALATE,
+    )
+    injector = FaultInjector((window,))
+    loop = TickLoop(
+        _FakeHeart(reply="idle"),
+        interval_seconds=100,
+        max_output_tokens=10,
+    )
+    injector.bind(loop)
+
+    assert injector.readiness_ok() is True  # upcoming tick 1, before the window
+
+    await _drive_ticks(loop, 1)
+
+    assert injector.readiness_ok() is False  # upcoming tick 2, inside the window
+
+    await _drive_ticks(loop, 1)
+
+    assert injector.readiness_ok() is True  # upcoming tick 3, after the window

@@ -96,6 +96,56 @@ class DatabaseSettings(BaseModel):
         return value.expanduser().resolve()
 
 
+class FaultInjectionSettings(BaseModel):
+    """A soak/dev-only mode that forces real, scheduled tick faults instead of
+    fabricating snapshot text — consumed by issue #72's
+    `ansina.heart.tick.fault_injection`. See that module's own docstring for how each
+    fault kind is forced for real, and why: every soak run and every day of live
+    telemetry published to the bucket before this issue was 100% `idle` — there is no
+    non-idle ground truth anywhere in the live corpus to score a tick-decision policy
+    against.
+
+    `enabled=False` (the default) is a byte-for-byte no-op — `build_tick_loop` never
+    constructs a `FaultInjector`, the exact object graph every pre-#72 caller already
+    builds, the same "verified no-op" shape `TickSettings.escalate_to_brain` already
+    uses. This is a dev/soak tool, never meant for a production deployment, so
+    `enabled=True` with no `schedule_path` fails loudly at boot instead of degrading —
+    the same `OidcSettings._validate_enabled_requires_credentials` reasoning, not the
+    `S3Settings`/`DevSettings` "misconfigured means a logged skip" shape.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    enabled: bool = False
+    schedule_path: Path | None = None
+
+    @field_validator("schedule_path")
+    @classmethod
+    def _resolve_schedule_path(cls, value: Path | None) -> Path | None:
+        """Same `~`-expand-and-anchor-to-CWD treatment as
+        `HeartSettings._resolve_paths` — a relative `schedule_path` must not silently
+        track wherever the process happens to be launched from.
+        """
+        if value is None:
+            return None
+        return value.expanduser().resolve()
+
+    @model_validator(mode="after")
+    def _validate_enabled_requires_schedule(self) -> FaultInjectionSettings:
+        if self.enabled and self.schedule_path is None:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "heart.tick.fault_injection.schedule_path: required when "
+                        "heart.tick.fault_injection.enabled = true (set "
+                        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH, or leave "
+                        "heart.tick.fault_injection.enabled = false)"
+                    ]
+                )
+            )
+        return self
+
+
 class TickSettings(BaseModel):
     """The autonomic tick loop's cadence, consumed by issue #11's `ansina.heart.tick`.
 
@@ -136,6 +186,12 @@ class TickSettings(BaseModel):
     # cadence + the circuit breaker above) is the evidence that no dedup/cooldown rung
     # is needed before turning this on — see `AGENTS.md`'s M7 #64 entry.
     escalate_to_brain: bool = False
+
+    # Issue #72: forces real, scheduled faults during a soak run so the resulting
+    # act/escalate decisions have ground truth to score — see `FaultInjectionSettings`.
+    fault_injection: FaultInjectionSettings = Field(
+        default_factory=FaultInjectionSettings
+    )
 
 
 class JournalSettings(BaseModel):

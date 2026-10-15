@@ -17,8 +17,17 @@ Output lands in a *gitignored* directory (`docs/heart/soak/`), auto-suffixed (`-
 documents why. `make heart-bench-publish` (issue #59, `[telemetry.s3]`) is the
 S3-compatible upload for this directory and `docs/heart/bench/` both.
 
+Issue #72's fault-injection schedule (an optional 5th argument, a JSON file in
+`ansina.heart.tick.fault_injection`'s own schedule shape) adds one more section,
+scoring every fetched journal row's real decision against the schedule's
+`expected_decision` — a ground-truth label a correctly-behaving Heart should have
+reached, not something this script invents. Deliberately reimplements its own tiny
+reader rather than importing `ansina.heart.tick.fault_injection`: this module stays
+plain stdlib, no `ansina` import, the same discipline every other `scripts/*.py` tool
+here follows.
+
 Usage: python scripts/heart_soak_report.py <run.log> <samples.jsonl> <journal.json> \
-    <dest_dir>
+    <dest_dir> [fault_schedule.json]
 """
 
 from __future__ import annotations
@@ -518,14 +527,123 @@ def _journal_crosscheck_section(
     return "\n".join(lines)
 
 
+# Mirrors `ansina.heart.tick.decision.TickDecision`'s own ordering — ascending
+# severity, so "which covering window's expected_decision wins" and "did the real
+# decision under- or over-react" both reduce to a plain integer comparison.
+_SEVERITY = {"idle": 0, "act": 1, "escalate": 2}
+
+
+def _load_fault_schedule(path: Path) -> list[dict[str, Any]]:
+    """A best-effort reader of `ansina.heart.tick.fault_injection`'s own schedule
+    JSON shape — the daemon's own `load_fault_schedule` already validated this file
+    at boot, so this doesn't re-validate, only reads what it needs for scoring
+    (`id`/`fault`/`at_tick`/`duration_ticks`/`expected_decision`).
+    """
+    if not path.exists():
+        return []
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _expected_decision(schedule: list[dict[str, Any]], tick_number: int) -> str:
+    """The most severe `expected_decision` among every window covering `tick_number`
+    — idle when none do. Different-kind windows may legitimately overlap (see
+    `ansina.heart.tick.fault_injection`'s own module docstring), so "most severe
+    wins" is the one sane combination rule for scoring a single tick's outcome.
+    """
+    best = "idle"
+    for window in schedule:
+        at_tick = window.get("at_tick")
+        duration_ticks = window.get("duration_ticks")
+        expected = window.get("expected_decision")
+        if not isinstance(at_tick, int) or not isinstance(duration_ticks, int):
+            continue
+        if not (at_tick <= tick_number <= at_tick + duration_ticks - 1):
+            continue
+        if isinstance(expected, str) and _SEVERITY.get(expected, 0) > _SEVERITY.get(
+            best, 0
+        ):
+            best = expected
+    return best
+
+
+def _fault_injection_section(
+    journal_entries: list[dict[str, Any]], schedule: list[dict[str, Any]]
+) -> str:
+    rows: list[tuple[int, str, str]] = []
+    for entry in journal_entries:
+        tick = entry.get("tick_number")
+        actual = entry.get("decision")
+        if not isinstance(tick, int) or not isinstance(actual, str):
+            continue
+        rows.append((tick, _expected_decision(schedule, tick), actual))
+
+    max_scheduled_tick = max(
+        (
+            w.get("at_tick", 0) + w.get("duration_ticks", 1) - 1
+            for w in schedule
+            if isinstance(w.get("at_tick"), int)
+            and isinstance(w.get("duration_ticks"), int)
+        ),
+        default=0,
+    )
+    scored = [row for row in rows if row[0] <= max_scheduled_tick]
+
+    lines = ["## Fault injection (issue #72)", ""]
+    if not schedule:
+        lines.append("No fault schedule was supplied for this run.")
+        lines.append("")
+        return "\n".join(lines)
+    if not scored:
+        lines.append(
+            "A fault schedule was supplied, but no fetched journal row falls within "
+            "its scheduled tick range (the page may not reach back that far)."
+        )
+        lines.append("")
+        return "\n".join(lines)
+
+    correct = sum(1 for _, expected, actual in scored if expected == actual)
+    under = [
+        row for row in scored if _SEVERITY.get(row[2], 0) < _SEVERITY.get(row[1], 0)
+    ]
+    over = [
+        row for row in scored if _SEVERITY.get(row[2], 0) > _SEVERITY.get(row[1], 0)
+    ]
+
+    lines += [
+        f"- Windows scheduled: {len(schedule)}",
+        f"- Ticks scored (within the scheduled range, present in the fetched page): "
+        f"{len(scored)}",
+        f"- Correct: {correct} ({correct / len(scored) * 100:.1f}%)",
+        f"- Under-reacted (expected worse than actual — a miss): {len(under)}",
+        f"- Over-reacted (expected better than actual — a false alarm): {len(over)}",
+        "",
+    ]
+    if under or over:
+        lines.append("Mismatches (tick | expected | actual):")
+        lines.append("")
+        lines.append("| tick | expected | actual |")
+        lines.append("|---|---|---|")
+        for tick, expected, actual in sorted(under + over):
+            lines.append(f"| {tick} | {expected} | {actual} |")
+        lines.append("")
+    else:
+        lines.append("Every scored tick matched its schedule's expected decision.")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main() -> int:
-    if len(sys.argv) != 5:
+    if len(sys.argv) not in (5, 6):
         print(__doc__, file=sys.stderr)
         return 2
     run_log_path = Path(sys.argv[1])
     samples_path = Path(sys.argv[2])
     journal_path = Path(sys.argv[3])
     dest_dir = Path(sys.argv[4])
+    fault_schedule_path = Path(sys.argv[5]) if len(sys.argv) == 6 else None
 
     run_log_text = run_log_path.read_text(encoding="utf-8")
     metadata = _parse_run_metadata(run_log_text)
@@ -542,21 +660,28 @@ def main() -> int:
     interval_seconds = float(metadata.get("interval_seconds", 30.0))
     jitter_seconds = float(metadata.get("jitter_seconds", 3.0))
 
+    fault_schedule = (
+        _load_fault_schedule(fault_schedule_path)
+        if fault_schedule_path is not None
+        else []
+    )
+
     run_date = _run_date(samples, tick_log_lines)
     dest_dir.mkdir(parents=True, exist_ok=True)
     stem = _unique_stem(dest_dir, f"soak-{run_date}")
 
-    report_md = "\n".join(
-        [
-            _header(metadata, samples, run_date),
-            _rss_section(samples),
-            _duration_section(tick_log_lines),
-            _drift_section(tick_log_lines, interval_seconds, jitter_seconds),
-            _decision_section(journal_entries),
-            _breaker_section(all_log_lines, samples),
-            _journal_crosscheck_section(journal_entries, tick_log_lines),
-        ]
-    )
+    sections = [
+        _header(metadata, samples, run_date),
+        _rss_section(samples),
+        _duration_section(tick_log_lines),
+        _drift_section(tick_log_lines, interval_seconds, jitter_seconds),
+        _decision_section(journal_entries),
+        _breaker_section(all_log_lines, samples),
+        _journal_crosscheck_section(journal_entries, tick_log_lines),
+    ]
+    if fault_schedule_path is not None:
+        sections.append(_fault_injection_section(journal_entries, fault_schedule))
+    report_md = "\n".join(sections)
 
     md_path = dest_dir / f"{stem}.md"
     md_path.write_text(report_md, encoding="utf-8")
@@ -566,6 +691,7 @@ def main() -> int:
         "sample_count": len(samples),
         "tick_log_line_count": len(tick_log_lines),
         "journal_entry_count": len(journal_entries),
+        "fault_schedule_window_count": len(fault_schedule),
     }
     json_path = dest_dir / f"{stem}.json"
     json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
