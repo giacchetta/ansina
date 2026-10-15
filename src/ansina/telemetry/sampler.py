@@ -81,7 +81,10 @@ def _read_peak_rss_kib() -> int | None:
     """
     try:
         peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    except OSError, ValueError:
+    # ruff 0.16.3 @ target-version py314 rewrites an unbound multi-exception
+    # `except (A, B):` into the invalid Python-2 `except A, B:` — the parens
+    # are load-bearing, not a style choice, hence `fmt: skip` below.
+    except (OSError, ValueError):  # fmt: skip
         return None
     current_platform: str = sys.platform
     if current_platform != "darwin":
