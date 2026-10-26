@@ -2,12 +2,22 @@
 
 `[opencode] enabled = true` is M9's starting point — Ansina hosting
 [OpenCode](https://opencode.ai) (`anomalyco/opencode`) as an external, subprocess-
-driven, workspace-confined executor rather than building one. This issue (#74) ships
-the foundation only: workspace provisioning, generated per-run config, an allow-list
-child environment, and a logged-skip preflight. **Nothing here spawns a real
-`opencode` child** — a follow-up issue's `AgentRunner`/`OpencodeCliRunner` is the
-first thing that does. `[opencode] enabled = false` (the default) is a byte-for-byte
-no-op: no directory is created, no file is written, nothing is logged.
+driven, workspace-confined executor rather than building one. Issue #74 shipped the
+foundation: workspace provisioning, generated per-run config, an allow-list child
+environment, and a logged-skip preflight — with no spawn at all beyond `preflight()`'s
+own two readiness checks (`--version`, `debug config`). Issue #75's
+`ansina.opencode.runner.OpencodeCliRunner` is the first thing that actually spawns a
+real `opencode` child to do work: a one-shot `opencode run --format json --dir
+<workspace> ...` subprocess per call, streaming its line-delimited JSON events into a
+callback as they arrive, enforcing a wall-clock timeout (terminate→kill) and a
+concurrency/backlog bound, and never raising once that spawn has been attempted —
+every failure (a bad spawn, a non-zero exit, a timeout, an output-size cap) resolves
+into a typed `RunOutcome` instead. `build_opencode_service(settings)` is the one
+factory: `None` on a failed preflight (unchanged from #74), a real, ready-to-call
+`OpencodeCliRunner` on a clean pass. **Still wired into no route or tick-loop caller**
+as of #75 — see "Verifying it" below for how to drive a real run by hand.
+`[opencode] enabled = false` (the default) is a byte-for-byte no-op: no directory is
+created, no file is written, nothing is logged, and no subprocess is ever spawned.
 
 **Ansina targets OpenCode v2**, not v1 — the two are materially different CLIs (see
 "Installing it" below for why that matters even at install time, before any Ansina
@@ -108,7 +118,9 @@ from a layer above Ansina's own. This is the check that actually catches that ca
 everything else here only makes the *common* case (an ordinary global config file)
 unreachable.
 
-## Verifying it (no real executor exists yet)
+## Verifying it
+
+Preflight-only, with no real binary (works on any machine, including CI):
 
 ```bash
 uv run python -c "
@@ -124,15 +136,47 @@ With `[opencode] enabled = false` (the default), this prints `None` and creates 
 directory — it does log one `WARNING` line naming the skip reason, the same way
 `ansina.dev.vector.preflight()` already logs a specific reason for *every* skip,
 including "disabled." That's calling the preflight function directly, though; nothing
-in the daemon's own boot sequence calls it yet (no executor exists to wire in), so an
-ordinary `uv run ansina` with the default config logs nothing about OpenCode at all.
-With `enabled = true` and `[telemetry] enabled = true`, this snippet preflights for
-real: binary resolution, an optional pinned-version check, workspace provisioning,
+in the daemon's own boot sequence calls it yet (no route or tick-loop caller exists),
+so an ordinary `uv run ansina` with the default config logs nothing about OpenCode at
+all. With `enabled = true` and `[telemetry] enabled = true`, this snippet preflights
+for real: binary resolution, an optional pinned-version check, workspace provisioning,
 the generated `opencode.json`'s own round-trip, and the effective-permission
 assertion above — returning `None` (with a specific logged skip reason) on any failed
-check, or a result carrying the resolved `opencode` path on a clean pass. Neither CI
-leg installs `opencode` (same reasoning as Vector — see `docs/dev-mode.md`), so both
-always exercise the "binary not found" skip path for real.
+check, or (issue #75) a real, ready-to-call `OpencodeCliRunner` on a clean pass.
+Neither CI leg installs `opencode` (same reasoning as Vector — see
+`docs/dev-mode.md`), so both always exercise the "binary not found" skip path for real.
+
+Driving a real run, once a pinned `opencode` binary is installed (see "Installing it"
+above) and `[opencode] enabled = true`/`[telemetry] enabled = true` are configured:
+
+```bash
+uv run python -c "
+import asyncio
+
+from ansina.config import load_settings
+from ansina.opencode import RunRequest, build_opencode_service
+
+settings = load_settings()
+service = build_opencode_service(settings)
+if service is None:
+    raise SystemExit('preflight failed — see the logged WARNING for why')
+
+outcome = asyncio.run(
+    service.run(RunRequest(prompt='say hello'), lambda event: print(event))
+)
+print(outcome)
+"
+```
+
+Every classified event prints as it arrives (`RunEvent.type`/`raw_type`/`payload` —
+`payload` already truncated to `[opencode] max_event_bytes` and redacted); the final
+`RunOutcome` reports `status` (`completed`/`failed`/`timeout`), the real exit code, and
+counts of emitted/skipped events. `RunEventType`'s own lookup table is intentionally
+empty as of #75 (see `ansina.opencode.events`'s module docstring) — every event
+normalizes to `RunEventType.OTHER` today, with `raw_type` carrying the real,
+as-emitted string regardless; a captured sample from a real run like this one is what
+a future change would use to populate that table with confirmed, not guessed, OpenCode
+event-type literals.
 
 ## Config reference
 
@@ -141,4 +185,13 @@ setting inline, including why `enabled = true` requires `[telemetry] enabled = t
 and how to pin `required_version_prefix` against a specific OpenCode v2 release (a
 raw-prefix match against the trimmed `--version` output, e.g. `"opencode v2."` —
 never a v1 release, which this project doesn't target and whose own `--version`
-output shape differs, as "Installing it" above explains).
+output shape differs, as "Installing it" above explains). Issue #75 adds the keys
+`OpencodeCliRunner` itself reads: `run_timeout_seconds`/`shutdown_timeout_seconds`
+(the per-run wall-clock cap and its terminate→kill grace window),
+`max_concurrent_runs`/`queue_max_depth` (how many children may run at once, and how
+large a backlog of admitted-but-not-yet-running calls is allowed before a further one
+is refused with `OpencodeBusyError`), `max_prompt_chars`/`max_event_bytes`/
+`max_run_output_bytes` (three independent size caps — the request itself, one
+captured JSON line, and the whole run's own output), and `model`/`agent`/
+`auto_approve` (per-run `--model`/`--agent`/`--auto` defaults, overridable per call via
+`RunRequest`).

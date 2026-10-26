@@ -6,10 +6,17 @@
 `subprocess` stays confined to this one dev-tooling module among the daemon's own
 runtime-imported packages — `ansina.heart.eval` already isn't imported by anything
 the daemon loads at runtime (see `heart/eval/__main__.py`'s own module docstring).
-The one deliberate exception anywhere in this codebase is `ansina.dev` (issue #62,
-Dev Mode's Vector sidecar) — confined to that one package, reached only once, at
-boot, from `__main__.py` before uvicorn binds a port, never from `create_app()`,
-its lifespan, a route, or any periodic loop.
+Two deliberate exceptions exist elsewhere in this codebase, each with its own
+shape, named together here rather than leaving this module's own text stale now
+that a second one exists: `ansina.dev` (issue #62, Dev Mode's Vector sidecar) is
+confined to that one package, reached only once, at boot, from `__main__.py`
+before uvicorn binds a port, never from `create_app()`, its lifespan, a route, or
+any periodic loop; `ansina.opencode` (issue #75, `OpencodeCliRunner.run()`) is the
+wider-shaped second exception — confined to that one package too, but reached at
+*runtime*, *repeatedly*, triggered by a request or a tick rather than once at
+boot. Neither narrowing is reached from an arbitrary module, and the two don't
+conflict — see `ansina.process.handles`'s and `ansina.opencode`'s own module
+docstrings for the full statement of both.
 """
 
 from __future__ import annotations

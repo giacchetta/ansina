@@ -94,3 +94,47 @@ class TelemetryError(AnsinaError):
     """
 
     code: ClassVar[str] = "ansina.telemetry.error"
+
+
+class OpencodeError(AnsinaError):
+    """The OpenCode-hosted executor ("Hands") failed. See `ansina.opencode`
+    (issue #74's foundation, issue #75's `AgentRunner`/`OpencodeCliRunner`).
+    """
+
+    code: ClassVar[str] = "ansina.opencode.error"
+
+
+class OpencodeUnavailableError(OpencodeError):
+    """`OpencodeCliRunner.run()` was called on a runner with no resolved
+    `opencode_path` — in practice unreachable once `build_opencode_service`
+    (`ansina.opencode.preflight`) is the only real constructor, since it never
+    hands out a runner on a failed preflight; kept as a defensive, never-
+    silently-trust-the-caller guard rather than an assumption, the same
+    `ansina.opencode.preflight` posture already applies to its own checks.
+    """
+
+    code: ClassVar[str] = "ansina.opencode.unavailable"
+
+
+class OpencodeBusyError(OpencodeError):
+    """`[opencode] queue_max_depth` would be exceeded by admitting this call.
+    Raised synchronously at the top of `OpencodeCliRunner.run()`, before any
+    subprocess is spawned — the one case issue #75's own acceptance criteria
+    describe as refused "at the port," the explicit exception to `run()`'s
+    otherwise-never-raises-after-invocation rule. Mapped to a problem response
+    by a follow-up issue, not here (no route exists yet to map it from).
+    """
+
+    code: ClassVar[str] = "ansina.opencode.busy"
+
+
+class OpencodeRunFailedError(OpencodeError):
+    """A run request was rejected before any subprocess was spawned — today,
+    only a `request.prompt` longer than `[opencode] max_prompt_chars`. Raised
+    synchronously at the top of `OpencodeCliRunner.run()`, the same
+    admission-control phase `OpencodeBusyError` occupies; once a subprocess is
+    actually spawned (or its spawn is attempted), every failure resolves into
+    a terminal `RunOutcome` instead (`ansina.opencode.events`), never a raise.
+    """
+
+    code: ClassVar[str] = "ansina.opencode.run_failed"

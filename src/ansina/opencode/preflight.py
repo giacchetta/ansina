@@ -1,14 +1,18 @@
-"""Preflight checks for the OpenCode child, and the `None`-when-off factory
-`ansina.opencode` hands to a follow-up issue. See issue #74.
+"""Preflight checks for the OpenCode child, and `build_opencode_service` — the
+`None`-when-off factory that is the real `ansina.opencode` entry point. See
+issue #74 (the checks themselves) and issue #75 (the runner they gate).
 
-No executor is spawned by this module, or anywhere in issue #74 — `preflight`
-only ever confirms the child *could* run; issue #75's `OpencodeCliRunner` is
-the first thing that actually spawns a real `opencode` process to do work.
-`preflight()` itself does call out to the real binary twice (`opencode
---version`, `opencode debug config`) — the first module in this codebase to
-shell out from outside `ansina.dev`'s boot-time exception or `heart.eval`'s
-dev-tooling boundary; see `ansina.opencode`'s own module docstring for the
-further-widened invariant issue #75 introduces for the actual runner.
+No executor is spawned by `preflight()` itself, in this issue or the next —
+it only ever confirms the child *could* run (`opencode --version`, `opencode
+debug config`); `OpencodeCliRunner.run()` (`ansina.opencode.runner`, issue
+#75) is the first thing that actually spawns a real `opencode` process to do
+work, and `build_opencode_service` below is what hands a caller one, already
+wired to the preflight-resolved `opencode_path` — a failed preflight still
+means `None`, the same shape it always has. `preflight()` itself does call
+out to the real binary twice — the first module in this codebase to shell out
+from outside `ansina.dev`'s boot-time exception or `heart.eval`'s dev-tooling
+boundary; see `ansina.opencode`'s own module docstring for the further-
+widened invariant issue #75 introduces for the actual runner.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from ansina.config.settings import Settings
 from ansina.logging import get_logger
 from ansina.opencode.config import render_opencode_config, write_opencode_config
 from ansina.opencode.env import build_opencode_env
+from ansina.opencode.runner import OpencodeCliRunner
 from ansina.opencode.workspace import ensure_workspace
 
 logger = get_logger(__name__)
@@ -231,15 +236,17 @@ def preflight(
 
 def build_opencode_service(
     settings: Settings, *, runner: VersionRunner = subprocess.run
-) -> OpencodePreflightResult | None:
+) -> OpencodeCliRunner | None:
     """`None` on any failed preflight check — the `build_vector_sidecar`/
     `build_heart_runtime`/`build_brain_provider`/`build_report_storage`
-    no-op shape. Returns the preflight-result sentinel on a clean pass; this
-    issue ships no executor at all, so there is nothing yet to wrap that
-    result in — a follow-up issue (#75) swaps this return for a real
-    `OpencodeCliRunner`, with no change to any call site.
+    no-op shape. Returns a real `OpencodeCliRunner`, already constructed
+    with the preflight-resolved `opencode_path`, on a clean pass — issue #75
+    swaps what was, through issue #74, a bare `OpencodePreflightResult`
+    sentinel for this real runner, with no change to this function's own
+    `None`-when-off contract or to any existing call site (every one of
+    which only ever checked the result for `None`).
     """
     result = preflight(settings, runner=runner)
     if result.opencode_path is None:
         return None
-    return result
+    return OpencodeCliRunner(settings, opencode_path=result.opencode_path)

@@ -954,10 +954,14 @@ class OpencodeSettings(BaseModel):
     `enabled=False` (the default) is a byte-for-byte no-op: `ansina.opencode`'s
     own `preflight`/`ensure_workspace`/`build_opencode_service` create no
     directory, write no file, and log nothing — the same "`None`/no-op when
-    off" shape `[heart]`/`[brain]`/`[security.oidc]` already use. This issue
-    ships no executor at all (nothing ever spawns a real `opencode` child) — see
-    `ansina/opencode/`'s own module docstrings for the factory this issue hands
-    to a follow-up issue.
+    off" shape `[heart]`/`[brain]`/`[security.oidc]` already use. Issue #74
+    shipped this confinement foundation with no executor at all; issue #75's
+    `ansina.opencode.runner.OpencodeCliRunner` is the first thing that actually
+    spawns a real `opencode` child to do work, consuming `run_timeout_seconds`/
+    `shutdown_timeout_seconds`/`max_concurrent_runs`/`queue_max_depth`/
+    `max_prompt_chars`/`max_event_bytes`/`max_run_output_bytes`/`model`/`agent`/
+    `auto_approve` below — still wired into no route or tick-loop caller as of
+    that issue (see `ansina/opencode/`'s own module docstrings).
 
     `workspace_dir` goes through the same `~`-expand-and-`.resolve()`
     `field_validator` as `DatabaseSettings.path`/`TelemetrySettings.spool_dir`,
@@ -1021,9 +1025,90 @@ class OpencodeSettings(BaseModel):
     # uses. See `_looks_unsafe_to_inherit` above for what's refused outright.
     inherit_env_names: tuple[str, ...] = ()
     preflight_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Issue #75 (`ansina.opencode.runner`) — a run's own wall-clock cap, and the
+    # terminate->kill grace window once it's hit. `shutdown_timeout_seconds`
+    # mirrors `[dev] shutdown_timeout_seconds`'s own name/shape (`ansina.dev.
+    # sidecar.SupervisedProcess.stop`) — same terminate-then-bounded-wait-then-
+    # kill discipline, applied to a per-run child instead of one long-lived
+    # sidecar.
+    run_timeout_seconds: float = Field(default=900.0, gt=0)
+    shutdown_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Issue #75 — `asyncio.Semaphore(max_concurrent_runs)` bounds how many
+    # `opencode` children may actually be running at once; `queue_max_depth`
+    # bounds the total number of `OpencodeCliRunner.run()` calls admitted
+    # (waiting on that semaphore, or already running) before a further call is
+    # refused outright (`OpencodeBusyError`) rather than queued unboundedly.
+    # `queue_max_depth >= max_concurrent_runs` is enforced below — a backlog
+    # smaller than the concurrency it's meant to queue behind would make no
+    # call ever actually wait, silently turning the queue into a no-op.
+    max_concurrent_runs: int = Field(default=1, ge=1)
+    queue_max_depth: int = Field(default=10, ge=1)
+    # Issue #75 — three independent size caps, each guarding a different
+    # resource: `max_prompt_chars` refuses an oversized request before any
+    # subprocess exists at all (`OpencodeRunFailedError`); `max_event_bytes`
+    # bounds what a single captured JSON line contributes to a `RunEvent`
+    # after truncation+redaction (`ansina.opencode.events.parse_run_event`);
+    # `max_run_output_bytes` bounds the whole run's own captured output.
+    # `max_event_bytes <= max_run_output_bytes` is enforced below — a single
+    # line allowed to exceed the whole-run cap would make that cap
+    # unenforceable on its very first oversized line.
+    max_prompt_chars: int = Field(default=100_000, gt=0)
+    max_event_bytes: int = Field(default=65_536, gt=0)
+    max_run_output_bytes: int = Field(default=10_485_760, gt=0)
+    # Issue #75 — per-run `--model`/`--agent` defaults; `""` omits the flag
+    # entirely (the same "empty means unset" shape `provider_api_key_env`
+    # above already uses), letting `opencode` fall back to its own configured
+    # default. `ansina.opencode.events.RunRequest.model`/`.agent` override
+    # these per call without changing this section's own configured default.
+    model: str = ""
+    agent: str = ""
+    # Issue #75 — maps to `opencode run --auto` ("auto-approve permissions
+    # that are not explicitly denied"). Defaults to `True`, not `False` like
+    # every other `[opencode]`/`[dev]`/`[telemetry]` `enabled` flag in this
+    # file: a headless, non-interactive run has nobody to answer a prompt
+    # `--auto` would otherwise leave standing — `ansina.opencode.preflight`'s
+    # own module docstring already reasons as if `--auto` is always passed
+    # ("a headless `--auto` run has nobody to answer a prompt, so even one
+    # surviving `'ask'` ... would hang a real run until its own timeout").
+    # The deny-by-default permission floor and the effective-permission
+    # preflight check are what actually confine the child; `--auto` only
+    # changes whether an already-resolved allow/deny needs a human to confirm
+    # it, which this deployment shape never has.
+    auto_approve: bool = True
     permission: OpencodePermissionSettings = Field(
         default_factory=OpencodePermissionSettings
     )
+
+    @model_validator(mode="after")
+    def _validate_run_limits(self) -> OpencodeSettings:
+        """Two cross-field invariants, same `TelemetrySettings.max_file_bytes
+        <= max_spool_bytes` shape — each pairs a tighter-scoped cap with the
+        broader one it must never exceed, or the broader cap could never
+        actually bind.
+        """
+        if self.queue_max_depth < self.max_concurrent_runs:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "opencode.queue_max_depth: must be >= "
+                        "opencode.max_concurrent_runs (got "
+                        f"queue_max_depth={self.queue_max_depth}, "
+                        f"max_concurrent_runs={self.max_concurrent_runs})"
+                    ]
+                )
+            )
+        if self.max_event_bytes > self.max_run_output_bytes:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "opencode.max_event_bytes: must be <= "
+                        "opencode.max_run_output_bytes (got "
+                        f"max_event_bytes={self.max_event_bytes}, "
+                        f"max_run_output_bytes={self.max_run_output_bytes})"
+                    ]
+                )
+            )
+        return self
 
     @field_validator("workspace_dir")
     @classmethod

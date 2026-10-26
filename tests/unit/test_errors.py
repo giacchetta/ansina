@@ -8,6 +8,10 @@ from ansina.errors import (
     ConfigurationError,
     FixtureError,
     HeartError,
+    OpencodeBusyError,
+    OpencodeError,
+    OpencodeRunFailedError,
+    OpencodeUnavailableError,
     StorageError,
 )
 
@@ -55,3 +59,23 @@ def test_heart_error_has_stable_code() -> None:
 def test_fixture_error_has_stable_code() -> None:
     assert issubclass(FixtureError, HeartError)
     assert FixtureError.code == "ansina.heart.fixture_invalid"
+
+
+def test_opencode_error_has_stable_code() -> None:
+    assert issubclass(OpencodeError, AnsinaError)
+    assert OpencodeError.code == "ansina.opencode.error"
+
+
+def test_opencode_unavailable_error_has_stable_code() -> None:
+    assert issubclass(OpencodeUnavailableError, OpencodeError)
+    assert OpencodeUnavailableError.code == "ansina.opencode.unavailable"
+
+
+def test_opencode_busy_error_has_stable_code() -> None:
+    assert issubclass(OpencodeBusyError, OpencodeError)
+    assert OpencodeBusyError.code == "ansina.opencode.busy"
+
+
+def test_opencode_run_failed_error_has_stable_code() -> None:
+    assert issubclass(OpencodeRunFailedError, OpencodeError)
+    assert OpencodeRunFailedError.code == "ansina.opencode.run_failed"

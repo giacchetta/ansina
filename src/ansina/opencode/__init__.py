@@ -1,26 +1,35 @@
-"""OpenCode as Ansina's confined, subprocess-driven executor ("Hands") — the
-foundation this issue (#74) ships, with no executor yet: confined workspace
+"""OpenCode as Ansina's confined, subprocess-driven executor ("Hands").
+Issue #74 shipped the foundation with no executor yet: confined workspace
 provisioning, generated per-run config, an allow-list child environment, and
-a logged-skip preflight. Nothing in this package spawns a real `opencode`
-child that does work — issue #75's `OpencodeCliRunner` is the first thing
-that does; `preflight()` here only ever invokes the binary to answer a
-yes/no readiness question (`--version`, `debug config`), never to run a
-prompt.
+a logged-skip preflight. Issue #75's `ansina.opencode.runner.
+OpencodeCliRunner` is the first thing that spawns a real `opencode` child to
+do work — `build_opencode_service` below returns one, already constructed
+against the preflight-resolved binary, on a clean preflight pass;
+`preflight()` itself still only ever invokes the binary to answer a yes/no
+readiness question (`--version`, `debug config`), never to run a prompt.
 
 This is also where the "the daemon itself never shells out" invariant
 (`heart.eval.provenance`'s own module docstring, already narrowed to
 `ansina.dev`-at-boot — see `ansina.process.handles`'s own module docstring)
 is narrowed a second, differently-shaped way, named here rather than left
 implicit: issue #75 widens it to *runtime*, *repeated*, request- and
-tick-triggered subprocess use, confined to this package only. The two
-narrowings don't conflict — `ansina.dev` stays a one-time, boot-only
-exception; `ansina.opencode` is a second, independent exception with its own
-(wider) shape.
+tick-triggered subprocess use (`OpencodeCliRunner.run()`), confined to this
+package only. The two narrowings don't conflict — `ansina.dev` stays a
+one-time, boot-only exception; `ansina.opencode` is a second, independent
+exception with its own (wider) shape.
 """
 
 from ansina.opencode.config import render_opencode_config, write_opencode_config
 from ansina.opencode.env import build_opencode_env
+from ansina.opencode.events import (
+    RunEvent,
+    RunEventType,
+    RunOutcome,
+    RunRequest,
+    RunStatus,
+)
 from ansina.opencode.preflight import build_opencode_service
+from ansina.opencode.runner import AgentRunner, OpencodeCliRunner
 from ansina.opencode.workspace import ensure_workspace, isolated_home
 
 # Deliberately does *not* re-export `preflight`/`OpencodePreflightResult` from
@@ -37,7 +46,16 @@ from ansina.opencode.workspace import ensure_workspace, isolated_home
 # `PreflightResult`. A caller that needs either imports them from
 # `ansina.opencode.preflight` directly, the same way
 # `tests/unit/dev/test_vector.py` imports `ansina.dev.vector`'s own `preflight`.
+# `runner`/`events` carry no such risk — neither submodule's own name
+# collides with anything this file re-exports from it.
 __all__ = [
+    "AgentRunner",
+    "OpencodeCliRunner",
+    "RunEvent",
+    "RunEventType",
+    "RunOutcome",
+    "RunRequest",
+    "RunStatus",
     "build_opencode_env",
     "build_opencode_service",
     "ensure_workspace",

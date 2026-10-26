@@ -11,12 +11,12 @@ import ansina.opencode.preflight as preflight_module
 from ansina.config.settings import OpencodeSettings, Settings, TelemetrySettings
 from ansina.opencode.config import render_opencode_config
 from ansina.opencode.preflight import (
-    OpencodePreflightResult,
     _find_looser_than_configured,
     _scan_for_ask,
     build_opencode_service,
     preflight,
 )
+from ansina.opencode.runner import OpencodeCliRunner
 
 
 def _settings(
@@ -486,13 +486,19 @@ def test_build_opencode_service_returns_none_on_a_failed_preflight(
     assert build_opencode_service(settings) is None
 
 
-def test_build_opencode_service_returns_the_preflight_result_on_success(
+def test_build_opencode_service_returns_a_runner_on_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Issue #75: `build_opencode_service` now returns a real
+    `OpencodeCliRunner`, already constructed against the preflight-resolved
+    binary, rather than the bare `OpencodePreflightResult` sentinel issue
+    #74 shipped — the `None`-when-off contract itself is unchanged (see the
+    failed-preflight test above).
+    """
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/opencode")
     settings = _settings(tmp_path)
 
     service = build_opencode_service(settings, runner=_make_runner())
 
-    assert isinstance(service, OpencodePreflightResult)
+    assert isinstance(service, OpencodeCliRunner)
     assert service.opencode_path == "/usr/opencode"

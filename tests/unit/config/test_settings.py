@@ -1413,6 +1413,16 @@ def test_opencode_defaults(clean_env: None, tmp_cwd: Path) -> None:
     assert opencode.provider_api_key is None
     assert opencode.inherit_env_names == ()
     assert opencode.preflight_timeout_seconds == 30.0
+    assert opencode.run_timeout_seconds == 900.0
+    assert opencode.shutdown_timeout_seconds == 10.0
+    assert opencode.max_concurrent_runs == 1
+    assert opencode.queue_max_depth == 10
+    assert opencode.max_prompt_chars == 100_000
+    assert opencode.max_event_bytes == 65_536
+    assert opencode.max_run_output_bytes == 10_485_760
+    assert opencode.model == ""
+    assert opencode.agent == ""
+    assert opencode.auto_approve is True
 
     permission = opencode.permission
     assert permission.default == "deny"
@@ -1478,6 +1488,16 @@ def test_opencode_env_vars_round_trip(
         "ANSINA_OPENCODE__INHERIT_ENV_NAMES", '["CUSTOM_PROXY", "HTTP_PROXY"]'
     )
     monkeypatch.setenv("ANSINA_OPENCODE__PREFLIGHT_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("ANSINA_OPENCODE__RUN_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("ANSINA_OPENCODE__SHUTDOWN_TIMEOUT_SECONDS", "3")
+    monkeypatch.setenv("ANSINA_OPENCODE__MAX_CONCURRENT_RUNS", "2")
+    monkeypatch.setenv("ANSINA_OPENCODE__QUEUE_MAX_DEPTH", "4")
+    monkeypatch.setenv("ANSINA_OPENCODE__MAX_PROMPT_CHARS", "500")
+    monkeypatch.setenv("ANSINA_OPENCODE__MAX_EVENT_BYTES", "1024")
+    monkeypatch.setenv("ANSINA_OPENCODE__MAX_RUN_OUTPUT_BYTES", "2048")
+    monkeypatch.setenv("ANSINA_OPENCODE__MODEL", "anthropic/claude")
+    monkeypatch.setenv("ANSINA_OPENCODE__AGENT", "build")
+    monkeypatch.setenv("ANSINA_OPENCODE__AUTO_APPROVE", "false")
 
     settings = load_settings()
 
@@ -1492,6 +1512,16 @@ def test_opencode_env_vars_round_trip(
     assert opencode.provider_api_key.get_secret_value() == "sk-real-key-0123456789"
     assert opencode.inherit_env_names == ("CUSTOM_PROXY", "HTTP_PROXY")
     assert opencode.preflight_timeout_seconds == 45.0
+    assert opencode.run_timeout_seconds == 120.0
+    assert opencode.shutdown_timeout_seconds == 3.0
+    assert opencode.max_concurrent_runs == 2
+    assert opencode.queue_max_depth == 4
+    assert opencode.max_prompt_chars == 500
+    assert opencode.max_event_bytes == 1024
+    assert opencode.max_run_output_bytes == 2048
+    assert opencode.model == "anthropic/claude"
+    assert opencode.agent == "build"
+    assert opencode.auto_approve is False
 
 
 def test_opencode_permission_env_vars_round_trip(
@@ -1733,6 +1763,49 @@ def test_opencode_enabled_with_telemetry_enabled_loads_fine(
 
     assert settings.opencode.enabled is True
     assert settings.telemetry.enabled is True
+
+
+def test_opencode_queue_max_depth_below_max_concurrent_runs_rejected() -> None:
+    """`OpencodeSettings._validate_run_limits` — a backlog smaller than the
+    concurrency it's meant to queue behind would make no call ever actually
+    wait, silently turning `queue_max_depth` into a no-op. Checked
+    unconditionally, the same `TelemetrySettings._validate_file_fits_in_spool`
+    shape — not gated on `enabled`, since a nonsensical pair of limits is
+    wrong regardless of whether the section is in use.
+    """
+    with pytest.raises(ConfigError) as exc_info:
+        OpencodeSettings(max_concurrent_runs=4, queue_max_depth=2)
+
+    assert "opencode.queue_max_depth" in str(exc_info.value)
+    assert "opencode.max_concurrent_runs" in str(exc_info.value)
+
+
+def test_opencode_max_event_bytes_above_max_run_output_bytes_rejected() -> None:
+    """A single line allowed to exceed the whole-run cap would make that cap
+    unenforceable on its very first oversized line.
+    """
+    with pytest.raises(ConfigError) as exc_info:
+        OpencodeSettings(max_event_bytes=2048, max_run_output_bytes=1024)
+
+    assert "opencode.max_event_bytes" in str(exc_info.value)
+    assert "opencode.max_run_output_bytes" in str(exc_info.value)
+
+
+def test_opencode_run_limits_accept_the_equal_boundary() -> None:
+    """`queue_max_depth == max_concurrent_runs` and `max_event_bytes ==
+    max_run_output_bytes` are both legitimate (every call always waits on the
+    semaphore briefly; one line may consume the whole run's own cap) — only
+    `<`/`>` are refused, not `<=`/`>=`.
+    """
+    settings = OpencodeSettings(
+        max_concurrent_runs=2,
+        queue_max_depth=2,
+        max_event_bytes=1024,
+        max_run_output_bytes=1024,
+    )
+
+    assert settings.queue_max_depth == settings.max_concurrent_runs
+    assert settings.max_event_bytes == settings.max_run_output_bytes
 
 
 def test_opencode_settings_disabled_accepts_direct_construction() -> None:

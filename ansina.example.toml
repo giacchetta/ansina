@@ -461,12 +461,16 @@ shutdown_timeout_seconds = 5.0
 validate_timeout_seconds = 30.0
 
 [opencode]
-# M9's "Hands": OpenCode as a confined, subprocess-driven executor (issue #74).
-# This section ships the foundation only -- workspace provisioning, generated
-# per-run config, an allow-list child environment, and a logged-skip preflight
-# -- nothing here spawns a real `opencode` child yet (that's a follow-up
-# issue's own AgentRunner adapter). false (the default) is a byte-for-byte
-# no-op -- no directory is created, no file is written, nothing is logged.
+# M9's "Hands": OpenCode as a confined, subprocess-driven executor. Issue #74
+# shipped the foundation -- workspace provisioning, generated per-run config,
+# an allow-list child environment, and a logged-skip preflight. Issue #75's
+# OpencodeCliRunner (ansina.opencode.runner) is the first thing that actually
+# spawns a real `opencode` child to do work, consuming every key below from
+# run_timeout_seconds onward -- still wired into no route or tick-loop caller
+# as of that issue (see docs/opencode.md's "Verifying it" for how to drive a
+# real run by hand). false (the default) is a byte-for-byte no-op -- no
+# directory is created, no file is written, nothing is logged, nothing is
+# spawned.
 #
 # enabled = true REQUIRES [telemetry] enabled = true below, unlike every other
 # `[section] enabled` flag in this file: an executor Ansina cannot observe is
@@ -536,6 +540,53 @@ inherit_env_names = []
 # preflight makes (--version, debug config) -- never touches the network
 # itself.
 preflight_timeout_seconds = 30.0
+
+# The rest of this section (issue #75) is read by OpencodeCliRunner itself,
+# not by preflight() -- each one bounds a different resource a repeatedly-
+# spawned, request-triggered child could otherwise exhaust.
+
+# A run's own wall-clock cap, and the terminate->kill grace window once it's
+# hit -- shutdown_timeout_seconds mirrors [dev] shutdown_timeout_seconds's own
+# name/shape, applied here to a per-run child instead of one long-lived
+# sidecar.
+run_timeout_seconds = 900.0
+shutdown_timeout_seconds = 10.0
+
+# How many `opencode` children may actually be running at once
+# (max_concurrent_runs), and how many OpencodeCliRunner.run() calls may be
+# admitted in total -- waiting on that concurrency limit, or already running
+# -- before a further call is refused outright with OpencodeBusyError rather
+# than queued unboundedly (queue_max_depth). Must have queue_max_depth >=
+# max_concurrent_runs, or the backlog could never actually bind.
+max_concurrent_runs = 1
+queue_max_depth = 10
+
+# Three independent size caps: max_prompt_chars refuses an oversized request
+# before any subprocess exists at all (OpencodeRunFailedError); max_event_bytes
+# bounds what a single captured JSON line contributes to a classified event,
+# after truncation and redaction; max_run_output_bytes bounds the whole run's
+# own captured output. Must have max_event_bytes <= max_run_output_bytes, or a
+# single oversized line could make the whole-run cap unenforceable.
+max_prompt_chars = 100000
+max_event_bytes = 65536
+max_run_output_bytes = 10485760
+
+# Per-run `--model`/`--agent` defaults -- empty (the default for each) omits
+# the flag entirely, letting `opencode` fall back to its own configured
+# default. A RunRequest's own model/agent fields override these per call
+# without changing this section's own configured default.
+model = ""
+agent = ""
+
+# Maps to `opencode run --auto` ("auto-approve permissions that are not
+# explicitly denied"). true (the default) -- not false, unlike every other
+# `[section] enabled`-shaped flag in this file -- because a headless,
+# non-interactive run has nobody to answer a prompt --auto would otherwise
+# leave standing. The deny-by-default permission floor below and the
+# effective-permission preflight check are what actually confine the child;
+# --auto only changes whether an already-resolved allow/deny needs a human to
+# confirm it, which this deployment shape never has.
+auto_approve = true
 
 [opencode.permission]
 # The deny-by-default permission block rendered into the generated
