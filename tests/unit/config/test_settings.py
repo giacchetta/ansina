@@ -9,6 +9,8 @@ from ansina.config.settings import (
     EncryptionSettings,
     FaultInjectionSettings,
     OidcSettings,
+    OpencodePermissionSettings,
+    OpencodeSettings,
     SecuritySettings,
     ServerSettings,
     _token_entropy_bits_per_char,
@@ -1390,3 +1392,359 @@ def test_fault_injection_schedule_path_validator_passes_through_an_explicit_none
     settings = FaultInjectionSettings(schedule_path=None)
 
     assert settings.schedule_path is None
+
+
+# --- issue #74: [opencode] / [opencode.permission] ------------------------------
+
+
+def test_opencode_defaults(clean_env: None, tmp_cwd: Path) -> None:
+    """`enabled = false` is the default, matching `[heart]`/`[telemetry]`/`[dev]`'s
+    own "off means nothing happens" shape.
+    """
+    settings = load_settings()
+
+    opencode = settings.opencode
+    assert opencode.enabled is False
+    assert opencode.binary == "opencode"
+    assert opencode.required_version_prefix == ""
+    assert opencode.workspace_dir.is_absolute()
+    assert opencode.isolate_home is True
+    assert opencode.provider_api_key_env == ""
+    assert opencode.provider_api_key is None
+    assert opencode.inherit_env_names == ()
+    assert opencode.preflight_timeout_seconds == 30.0
+
+    permission = opencode.permission
+    assert permission.default == "deny"
+    assert permission.read == "allow"
+    assert permission.edit == "workspace"
+    assert permission.bash == "allowlist"
+    assert permission.bash_allowlist == (
+        "git status*",
+        "git diff*",
+        "git log*",
+        "ls*",
+        "cat*",
+        "rg*",
+    )
+    assert permission.bash_denylist == (
+        "rm *",
+        "sudo *",
+        "curl *",
+        "wget *",
+        "ssh *",
+        "git push*",
+    )
+    assert permission.webfetch == "deny"
+    assert permission.websearch == "deny"
+    assert permission.external_directory == "deny"
+    assert permission.additional == {}
+
+
+def test_opencode_workspace_dir_expands_user_home(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_OPENCODE__WORKSPACE_DIR", "~/opencode-workspace")
+
+    settings = load_settings()
+
+    assert settings.opencode.workspace_dir == Path.home() / "opencode-workspace"
+
+
+def test_opencode_workspace_dir_resolves_relative_to_cwd(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_OPENCODE__WORKSPACE_DIR", "nested/opencode-workspace")
+
+    settings = load_settings()
+
+    assert settings.opencode.workspace_dir == tmp_cwd / "nested" / "opencode-workspace"
+
+
+def test_opencode_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__BINARY", "/opt/opencode/bin/opencode")
+    monkeypatch.setenv("ANSINA_OPENCODE__REQUIRED_VERSION_PREFIX", "1.")
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__WORKSPACE_DIR", str(tmp_cwd / "opencode-workspace")
+    )
+    monkeypatch.setenv("ANSINA_OPENCODE__ISOLATE_HOME", "false")
+    monkeypatch.setenv("ANSINA_OPENCODE__PROVIDER_API_KEY_ENV", "ANTHROPIC_API_KEY")
+    monkeypatch.setenv("ANSINA_OPENCODE__PROVIDER_API_KEY", "sk-real-key-0123456789")
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__INHERIT_ENV_NAMES", '["CUSTOM_PROXY", "HTTP_PROXY"]'
+    )
+    monkeypatch.setenv("ANSINA_OPENCODE__PREFLIGHT_TIMEOUT_SECONDS", "45")
+
+    settings = load_settings()
+
+    opencode = settings.opencode
+    assert opencode.enabled is True
+    assert opencode.binary == "/opt/opencode/bin/opencode"
+    assert opencode.required_version_prefix == "1."
+    assert opencode.workspace_dir == (tmp_cwd / "opencode-workspace").resolve()
+    assert opencode.isolate_home is False
+    assert opencode.provider_api_key_env == "ANTHROPIC_API_KEY"
+    assert opencode.provider_api_key is not None
+    assert opencode.provider_api_key.get_secret_value() == "sk-real-key-0123456789"
+    assert opencode.inherit_env_names == ("CUSTOM_PROXY", "HTTP_PROXY")
+    assert opencode.preflight_timeout_seconds == 45.0
+
+
+def test_opencode_permission_env_vars_round_trip(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__DEFAULT", "allow")
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__READ", "deny")
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__EDIT", "deny")
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__BASH", "allow")
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__PERMISSION__BASH_ALLOWLIST", '["git *", "ls*"]'
+    )
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__BASH_DENYLIST", '["rm *"]')
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__WEBFETCH", "allow")
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__WEBSEARCH", "allow")
+    monkeypatch.setenv("ANSINA_OPENCODE__PERMISSION__EXTERNAL_DIRECTORY", "allow")
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__PERMISSION__ADDITIONAL", '{"glob": "allow", "grep": "deny"}'
+    )
+
+    settings = load_settings()
+
+    permission = settings.opencode.permission
+    assert permission.default == "allow"
+    assert permission.read == "deny"
+    assert permission.edit == "deny"
+    assert permission.bash == "allow"
+    assert permission.bash_allowlist == ("git *", "ls*")
+    assert permission.bash_denylist == ("rm *",)
+    assert permission.webfetch == "allow"
+    assert permission.websearch == "allow"
+    assert permission.external_directory == "allow"
+    assert permission.additional == {"glob": "allow", "grep": "deny"}
+
+
+def test_opencode_provider_api_key_in_toml_file_rejected(
+    clean_env: None, tmp_cwd: Path
+) -> None:
+    (tmp_cwd / "ansina.toml").write_text(
+        '[opencode]\nprovider_api_key = "sk-leaked-in-toml"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "opencode.provider_api_key" in str(exc_info.value)
+    assert "sk-leaked-in-toml" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "unsafe_name",
+    [
+        "ANSINA_SECURITY__API_TOKEN",
+        "ansina_brain__api_key",  # case-insensitive ANSINA_ prefix
+        "AWS_SECRET_ACCESS_KEY",
+        "aws_access_key_id",  # case-insensitive AWS_ prefix
+        "STRIPE_API_KEY",
+        "MY_APP_SECRET",
+        "GITHUB_TOKEN",
+    ],
+)
+def test_opencode_inherit_env_names_rejects_an_unsafe_name(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, unsafe_name: str
+) -> None:
+    monkeypatch.setenv("ANSINA_OPENCODE__INHERIT_ENV_NAMES", f'["{unsafe_name}"]')
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "opencode.inherit_env_names" in str(exc_info.value)
+
+
+def test_opencode_inherit_env_names_accepts_a_safe_name(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_OPENCODE__INHERIT_ENV_NAMES", '["CUSTOM_PROXY"]')
+
+    settings = load_settings()
+
+    assert settings.opencode.inherit_env_names == ("CUSTOM_PROXY",)
+
+
+def test_opencode_workspace_inside_an_ansina_checkout_is_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A synthetic checkout, not the real one this code runs from — isolates
+    `_validate_workspace_outside_ansina_checkout`'s first probe (walking *up*
+    from `workspace_dir` itself) from its second.
+    """
+    fake_checkout = tmp_cwd / "fake-ansina"
+    fake_checkout.mkdir()
+    (fake_checkout / "pyproject.toml").write_text(
+        '[project]\nname = "ansina"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__WORKSPACE_DIR", str(fake_checkout / "nested" / "workspace")
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "opencode.workspace_dir" in str(exc_info.value)
+    assert "is, or is inside, an ansina checkout" in str(exc_info.value)
+
+
+def test_opencode_workspace_containing_this_running_checkout_is_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Isolates the second probe (does *this running code's own* checkout sit
+    inside `workspace_dir`?) by pointing `workspace_dir` at the real
+    checkout's own parent directory — found the same way the implementation
+    itself finds it (`_repo_root_named`, walking up from `settings.py`'s own
+    file), never a hardcoded path, so this test is host-independent.
+    """
+    import ansina.config.settings as settings_module
+
+    checkout_root = settings_module._repo_root_named(
+        Path(settings_module.__file__).resolve(), "ansina"
+    )
+    assert checkout_root is not None, "this test must run from a real ansina checkout"
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__WORKSPACE_DIR", str(checkout_root.parent))
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "opencode.workspace_dir" in str(exc_info.value)
+    assert "contains this running ansina checkout" in str(exc_info.value)
+
+
+def test_opencode_workspace_check_ignores_a_malformed_pyproject_toml(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed/unparseable `pyproject.toml` sitting above `workspace_dir`
+    must never crash the check (`_project_name_at`'s own `except` branch) —
+    it's treated as a non-match, same as any file that doesn't name this
+    project at all.
+    """
+    unrelated = tmp_cwd / "unrelated-project"
+    unrelated.mkdir()
+    (unrelated / "pyproject.toml").write_text("not valid toml [[[", encoding="utf-8")
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__WORKSPACE_DIR", str(unrelated / "workspace"))
+
+    settings = load_settings()
+
+    assert settings.opencode.workspace_dir == unrelated / "workspace"
+
+
+def test_opencode_workspace_check_ignores_a_pyproject_toml_with_no_project_table(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unrelated = tmp_cwd / "no-project-table"
+    unrelated.mkdir()
+    (unrelated / "pyproject.toml").write_text(
+        "[tool.something]\nkey = 1\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__WORKSPACE_DIR", str(unrelated / "workspace"))
+
+    settings = load_settings()
+
+    assert settings.opencode.workspace_dir == unrelated / "workspace"
+
+
+def test_opencode_workspace_check_ignores_a_pyproject_toml_naming_another_project(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unrelated = tmp_cwd / "other-project"
+    unrelated.mkdir()
+    (unrelated / "pyproject.toml").write_text(
+        '[project]\nname = "some-other-project"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__WORKSPACE_DIR", str(unrelated / "workspace"))
+
+    settings = load_settings()
+
+    assert settings.opencode.workspace_dir == unrelated / "workspace"
+
+
+def test_opencode_workspace_check_is_skipped_when_disabled(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`opencode.enabled = false` (the default) must never fail to load just
+    because `workspace_dir` happens to sit inside an unrelated checkout on
+    this machine — the check is gated on `enabled`, not unconditional.
+    """
+    fake_checkout = tmp_cwd / "fake-ansina"
+    fake_checkout.mkdir()
+    (fake_checkout / "pyproject.toml").write_text(
+        '[project]\nname = "ansina"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__WORKSPACE_DIR", str(fake_checkout / "workspace")
+    )
+
+    settings = load_settings()
+
+    assert settings.opencode.enabled is False
+    assert settings.opencode.workspace_dir == fake_checkout / "workspace"
+
+
+def test_opencode_enabled_without_telemetry_rejected(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Settings._refuse_unobserved_executor` — the `OidcSettings`/
+    `CorsSettings` fail-loudly posture, not `S3Settings`/`DevSettings`'s
+    degrade-gracefully one: an unobserved executor is refused outright.
+    """
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__WORKSPACE_DIR", str(tmp_cwd / "opencode-workspace")
+    )
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_settings()
+
+    assert "opencode.enabled" in str(exc_info.value)
+    assert "telemetry.enabled" in str(exc_info.value)
+
+
+def test_opencode_enabled_with_telemetry_enabled_loads_fine(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_TELEMETRY__ENABLED", "true")
+    monkeypatch.setenv("ANSINA_OPENCODE__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_OPENCODE__WORKSPACE_DIR", str(tmp_cwd / "opencode-workspace")
+    )
+
+    settings = load_settings()
+
+    assert settings.opencode.enabled is True
+    assert settings.telemetry.enabled is True
+
+
+def test_opencode_settings_disabled_accepts_direct_construction() -> None:
+    """`OpencodeSettings`/`OpencodePermissionSettings` can be constructed
+    directly with every field left at its default — the same "disabled
+    accepts directly" shape `FaultInjectionSettings()`/`CorsSettings()`/
+    `OidcSettings()` already exercise above, proving neither model's own
+    validators require a `Settings` tree around them to run (`ansina.
+    dev.vector`-style modules build `Settings(opencode=OpencodeSettings(...))`
+    directly in their own unit tests, never through `load_settings()`).
+    """
+    settings = OpencodeSettings()
+
+    assert settings.enabled is False
+    assert isinstance(settings.permission, OpencodePermissionSettings)

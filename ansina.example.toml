@@ -459,3 +459,122 @@ shutdown_timeout_seconds = 5.0
 # Bounds the one-time `vector validate` preflight call -- never touches the
 # network itself (healthchecks are skipped), just config parsing.
 validate_timeout_seconds = 30.0
+
+[opencode]
+# M9's "Hands": OpenCode as a confined, subprocess-driven executor (issue #74).
+# This section ships the foundation only -- workspace provisioning, generated
+# per-run config, an allow-list child environment, and a logged-skip preflight
+# -- nothing here spawns a real `opencode` child yet (that's a follow-up
+# issue's own AgentRunner adapter). false (the default) is a byte-for-byte
+# no-op -- no directory is created, no file is written, nothing is logged.
+#
+# enabled = true REQUIRES [telemetry] enabled = true below, unlike every other
+# `[section] enabled` flag in this file: an executor Ansina cannot observe is
+# refused outright at boot (a ConfigError, not a logged skip) -- every run's
+# full lifecycle is meant to be captured as telemetry, so there is no local
+# file to re-ship later the way a missed bench/soak report can be.
+enabled = false
+
+# Resolved via a PATH lookup at preflight time (a bare name, the common case)
+# or used as-is if already absolute -- the same `[dev] vector_binary` shape.
+binary = "opencode"
+
+# Pin a known-good release the way `[dev] vector_binary`'s own docstring pins
+# Vector to 0.45.x after finding a real incompatibility the hard way. Ansina
+# targets OpenCode v2, not v1 -- install it via `make opencode-install
+# ARGS='--version <v>'` (see docs/opencode.md). A RAW-PREFIX match against
+# the trimmed `opencode --version` output, not a semver comparison -- that
+# output's own shape is not stable across OpenCode major versions (v1 prints
+# a bare "1.19.3"; v2 prints "opencode v2.1.1", with the binary name and a
+# leading "v"), so the expected v2 shape is e.g. "opencode v2." -- a bare
+# "2." would never match it. Empty (the default) skips the check entirely,
+# and stays that way until a real v2 release has actually been validated
+# against Ansina.
+required_version_prefix = ""
+
+# The confined directory OpenCode runs in -- resolved the same way [database]
+# path/[heart] cache_dir are (`~` expanded, relative paths anchored to the
+# CWD, once, at load time). Refused at boot if it is, is inside, or contains
+# this ansina checkout itself (a concrete check: does a `pyproject.toml`
+# naming "ansina" sit at or above this path, in either direction?) -- OpenCode's
+# own `bash`/`edit` reach inside this directory is broad even under
+# [opencode.permission]'s own confinement below, so pointing it at Ansina's own
+# source would defeat every other control in this section.
+workspace_dir = "~/.local/state/ansina/opencode"
+
+# Redirects the child's own HOME into an isolated directory inside
+# workspace_dir. true (the default) for a real security reason, not just
+# tidiness: OpenCode's own documented config precedence MERGES every config
+# source together rather than replacing one with another, with the global
+# ~/.config/opencode/opencode.json merging in *under* project config -- so an
+# ambient operator-level config on this host could otherwise silently loosen
+# this section's own deny-by-default block for any permission key the
+# generated opencode.json doesn't explicitly name. Redirecting HOME removes
+# that one file from the merge chain entirely.
+isolate_home = true
+
+# The env var name (inside the CHILD's own environment, not this file) that
+# carries the provider API key -- e.g. "ANTHROPIC_API_KEY". Empty (the
+# default) means no key is passed at all.
+provider_api_key_env = ""
+
+# provider_api_key, like every secret, is env-only -- setting it in this file
+# is a hard startup error:
+#   ANSINA_OPENCODE__PROVIDER_API_KEY=...
+
+# Operator-named extra environment variables to forward verbatim from the
+# daemon's own environment into the child's -- empty (the default) is the
+# usual "explicit allow-list, never os.environ wholesale" shape every other
+# Dev-Mode-adjacent child env builder in this codebase uses. Refused outright
+# at boot if any entry is ANSINA_-prefixed or secret-shaped (AWS_*,
+# *_API_KEY, *SECRET*, *TOKEN*, case-insensitive) -- this allow-list can never
+# be used to smuggle a secret into the child's environment under cover of a
+# legitimate-looking name.
+inherit_env_names = []
+
+# Bounds every real call out to the `opencode` binary this section's own
+# preflight makes (--version, debug config) -- never touches the network
+# itself.
+preflight_timeout_seconds = 30.0
+
+[opencode.permission]
+# The deny-by-default permission block rendered into the generated
+# opencode.json (and, as defense in depth, into the OPENCODE_CONFIG_CONTENT
+# env var above project config in OpenCode's own merge order). Every value
+# below is Ansina's OWN typed vocabulary, not OpenCode's raw glob-map shape --
+# `ansina.opencode.config` is what translates it. "ask" is unrepresentable
+# anywhere here by construction: a headless --auto run has nobody to answer a
+# prompt, so an "ask" value would hang a real run until its own timeout.
+
+# The floor for every permission key this section doesn't otherwise mention
+# explicitly (OpenCode's own "*" key) -- allow|deny.
+default = "deny"
+
+# Reading files -- allow|deny.
+read = "allow"
+
+# Editing files -- deny|allow|workspace. "workspace" (the default) confines
+# edits to inside workspace_dir above and nowhere else.
+edit = "workspace"
+
+# Running shell commands -- deny|allow|allowlist. "allowlist" (the default)
+# renders the deny floor, then every bash_allowlist glob below, then every
+# bash_denylist glob LAST -- OpenCode's own documented bash/edit glob-map
+# precedence is "last matching rule wins," so a denylist glob always beats an
+# overlapping allowlist one, never the reverse.
+bash = "allowlist"
+bash_allowlist = ["git status*", "git diff*", "git log*", "ls*", "cat*", "rg*"]
+bash_denylist = ["rm *", "sudo *", "curl *", "wget *", "ssh *", "git push*"]
+
+# Fetching/searching the web, and reaching outside workspace_dir -- each
+# allow|deny.
+webfetch = "deny"
+websearch = "deny"
+external_directory = "deny"
+
+# Reaches any other OpenCode permission key this section doesn't name
+# explicitly (e.g. glob, grep, task, todowrite, skill, lsp, question,
+# doom_loop) with no code change -- each value must still be allow|deny,
+# never ask, same reasoning as above. Appended after every named key above,
+# so an operator-named key here is never silently overridden by one of them.
+additional = {}

@@ -838,6 +838,262 @@ class DevSettings(BaseModel):
         return value.expanduser().resolve()
 
 
+_ANSINA_PROJECT_NAME = "ansina"
+
+
+def _project_name_at(pyproject_path: Path) -> str | None:
+    """`[project] name` from a `pyproject.toml`, or `None` on anything that
+    doesn't parse as one — a malformed/foreign TOML file at that path must never
+    raise out of a settings validator, only fail to match.
+    """
+    try:
+        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+        return None
+    project = data.get("project")
+    if isinstance(project, dict):
+        name = project.get("name")
+        if isinstance(name, str):
+            return name
+    return None
+
+
+def _repo_root_named(start: Path, name: str) -> Path | None:
+    """Walks `start` and every parent looking for a `pyproject.toml` whose
+    `[project] name` is exactly `name`, returning the directory that holds it —
+    or `None` once the walk reaches the filesystem root with no match. Bounded
+    (one `pyproject.toml` read per directory on the path to `/`), never an
+    unbounded subtree scan.
+    """
+    for candidate in (start, *start.parents):
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file() and _project_name_at(pyproject) == name:
+            return candidate
+    return None
+
+
+class OpencodePermissionSettings(BaseModel):
+    """`[opencode.permission]` — the deny-by-default permission block
+    `ansina.opencode.config` renders into OpencodeConfig's own `opencode.json`,
+    consumed by issue #74's `ansina.opencode.config`.
+
+    Ansina's own typed vocabulary, not OpenCode's: `edit`/`bash` are
+    `"deny"`/`"allow"`/one Ansina-defined confinement mode (`"workspace"`,
+    `"allowlist"`) rather than OpenCode's raw glob-map shape — `opencode.config`
+    is what translates this into OpenCode's own `{"*": ..., "<glob>": ...}`
+    object. Every other key is plain `"allow"`/`"deny"`. `"ask"` is
+    unrepresentable by construction anywhere in this model — a headless
+    `--auto` run has nobody to answer a prompt, so an `"ask"` value would hang
+    until the timeout rather than fail fast; `additional` (below) is typed the
+    same restrictive way for the identical reason.
+
+    `additional` reaches any of OpenCode's other documented permission keys
+    (`glob`, `grep`, `task`, `todowrite`, `skill`, `lsp`, `question`,
+    `doom_loop`, ...) this model doesn't name explicitly, without a code change
+    — forward-compatible with a new OpenCode permission kind the same way
+    `heart.triage`'s `other` event-type fallback is forward-compatible with a
+    new OpenCode *event* kind.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    default: Literal["allow", "deny"] = "deny"
+    read: Literal["allow", "deny"] = "allow"
+    edit: Literal["deny", "allow", "workspace"] = "workspace"
+    bash: Literal["deny", "allow", "allowlist"] = "allowlist"
+    bash_allowlist: tuple[str, ...] = (
+        "git status*",
+        "git diff*",
+        "git log*",
+        "ls*",
+        "cat*",
+        "rg*",
+    )
+    bash_denylist: tuple[str, ...] = (
+        "rm *",
+        "sudo *",
+        "curl *",
+        "wget *",
+        "ssh *",
+        "git push*",
+    )
+    webfetch: Literal["allow", "deny"] = "deny"
+    websearch: Literal["allow", "deny"] = "deny"
+    external_directory: Literal["allow", "deny"] = "deny"
+    additional: Mapping[str, Literal["allow", "deny"]] = Field(default_factory=dict)
+
+
+# Refused in `inherit_env_names` below — Ansina's own settings-env namespace,
+# never meant to reach a child process under cover of an operator-named
+# allow-list entry.
+_INHERIT_ENV_FORBIDDEN_PREFIX = "ANSINA_"
+# Secret-shaped, regardless of namespace — the same credential-smell patterns
+# `ansina.logging.redaction` (naming, not pattern-matching) and
+# `ansina.dev.vector.build_vector_env`'s own hand-picked allow-list already treat
+# as sensitive. Matched case-insensitively against the *whole* name, not just a
+# prefix/suffix — `secrets.token_urlsafe` isn't the only way a name can carry a
+# credential.
+_INHERIT_ENV_SECRET_SHAPED_PATTERNS = (
+    re.compile(r"^AWS_", re.IGNORECASE),
+    re.compile(r"_API_KEY$", re.IGNORECASE),
+    re.compile(r"SECRET", re.IGNORECASE),
+    re.compile(r"TOKEN", re.IGNORECASE),
+)
+
+
+def _looks_unsafe_to_inherit(name: str) -> bool:
+    if name.upper().startswith(_INHERIT_ENV_FORBIDDEN_PREFIX):
+        return True
+    return any(pattern.search(name) for pattern in _INHERIT_ENV_SECRET_SHAPED_PATTERNS)
+
+
+class OpencodeSettings(BaseModel):
+    """`[opencode]` — the confined OpenCode workspace/config/env foundation for
+    M9's "Hands" executor, consumed by issue #74's `ansina.opencode`.
+
+    `enabled=False` (the default) is a byte-for-byte no-op: `ansina.opencode`'s
+    own `preflight`/`ensure_workspace`/`build_opencode_service` create no
+    directory, write no file, and log nothing — the same "`None`/no-op when
+    off" shape `[heart]`/`[brain]`/`[security.oidc]` already use. This issue
+    ships no executor at all (nothing ever spawns a real `opencode` child) — see
+    `ansina/opencode/`'s own module docstrings for the factory this issue hands
+    to a follow-up issue.
+
+    `workspace_dir` goes through the same `~`-expand-and-`.resolve()`
+    `field_validator` as `DatabaseSettings.path`/`TelemetrySettings.spool_dir`,
+    `validate_default=True` for the same reason those two document (the
+    *default* path must resolve too, not just an explicit one). A further
+    `model_validator` (`_validate_workspace_outside_ansina_checkout` below)
+    refuses a `workspace_dir` that is, is inside, or contains an ansina
+    checkout — OpenCode's own `bash`/`edit` reach inside this directory is
+    broad even under `[opencode.permission]`'s own confinement, so pointing it
+    at Ansina's own source would defeat every other control in this file.
+
+    `provider_api_key` is env-only, the same "`SecretStr` in TOML is a startup
+    error" rule every other Ansina secret follows (`_AnsinaTomlSource`/
+    `_walk_secret_paths` already enforce this generically — no new code is
+    needed for it here). `inherit_env_names` is validated the opposite
+    direction: it refuses an entry that could smuggle a secret into the
+    child's environment under cover of this allow-list (see
+    `_looks_unsafe_to_inherit` above).
+
+    See `Settings._refuse_unobserved_executor` for the cross-section rule this
+    model's own `enabled` flag participates in — `[opencode] enabled = true`
+    with `[telemetry] enabled = false` is refused at the `Settings` level, not
+    here, since this model alone can't see `[telemetry]`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    enabled: bool = False
+    binary: str = "opencode"
+    # Empty means "accept whatever `opencode --version` reports" — set this to
+    # pin a known-good release the way `[dev].vector_binary`'s own docstring
+    # pins Vector to 0.45.x after finding a real incompatibility the hard way.
+    # Ansina targets OpenCode v2, not v1 (see `make opencode-install`/`docs/
+    # opencode.md`) — a raw-prefix match against the trimmed `--version`
+    # output, not a semver comparison, since the output's own shape is not
+    # stable across OpenCode major versions (v1 prints a bare `"1.19.3"`; v2
+    # prints `"opencode v2.1.1"`, with the binary name and a leading `v`).
+    # `"opencode v2."` is the expected shape once a v2 release is actually
+    # validated against Ansina; `ansina.opencode.preflight`'s own module
+    # docstring states the general rule plainly rather than assuming one
+    # shape, since a bare numeric prefix (e.g. `"2."`) would never match v2's
+    # own output.
+    required_version_prefix: str = ""
+    workspace_dir: Path = Path("~/.local/state/ansina/opencode")
+    # `True` redirects the child's own `HOME` into an isolated directory inside
+    # `workspace_dir` — see `ansina.opencode.env`'s own module docstring for why
+    # this matters beyond tidiness: OpenCode's global
+    # `~/.config/opencode/opencode.json` merges *under* project config, so an
+    # ambient operator-level config on the host could otherwise loosen this
+    # deny-by-default block for every key our own generated config doesn't
+    # explicitly name.
+    isolate_home: bool = True
+    # The env var name (inside the *child's* environment) that names the
+    # provider API key — e.g. "ANTHROPIC_API_KEY". Empty means "no key passed."
+    provider_api_key_env: str = ""
+    provider_api_key: SecretStr | None = Field(default=None)
+    # Operator-named extra environment variables to forward verbatim from the
+    # daemon's own environment into the child's — empty by default, the same
+    # "explicit allow-list, never the daemon's own os.environ wholesale" shape
+    # `ansina.dev.vector.build_vector_env`'s `_INHERITED_ENV_NAMES` already
+    # uses. See `_looks_unsafe_to_inherit` above for what's refused outright.
+    inherit_env_names: tuple[str, ...] = ()
+    preflight_timeout_seconds: float = Field(default=30.0, gt=0)
+    permission: OpencodePermissionSettings = Field(
+        default_factory=OpencodePermissionSettings
+    )
+
+    @field_validator("workspace_dir")
+    @classmethod
+    def _resolve_workspace_dir(cls, value: Path) -> Path:
+        """Same `~`-expand-and-anchor-to-CWD treatment as
+        `DatabaseSettings._resolve_path`/`TelemetrySettings._resolve_spool_dir`.
+        """
+        return value.expanduser().resolve()
+
+    @field_validator("inherit_env_names")
+    @classmethod
+    def _validate_inherit_env_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        rejected = [name for name in value if _looks_unsafe_to_inherit(name)]
+        if rejected:
+            raise ValueError(
+                "opencode.inherit_env_names must not include an ANSINA_-prefixed "
+                "or secret-shaped (AWS_*/*_API_KEY/*SECRET*/*TOKEN*) name — "
+                f"rejected: {', '.join(rejected)}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_workspace_outside_ansina_checkout(self) -> OpencodeSettings:
+        """`workspace_dir` is handed to a repeatedly-spawned external child with
+        broad `bash`/`edit` reach inside it — pointing it at (or around) this
+        very checkout would let that child read or modify Ansina's own source,
+        defeating every other confinement control in this file. Gated on
+        `enabled`: an unused default must never fail to load just because it
+        happens to sit near an unrelated checkout on this machine.
+
+        Two independent, bounded probes, never an unbounded subtree scan: (1)
+        does `workspace_dir` itself sit at or inside a directory that is an
+        ansina checkout (walking *up* from it)? (2) does this running code's
+        own checkout (walking up from this very file — deliberately not
+        `Path.cwd()`, which a test's own `monkeypatch.chdir` would otherwise
+        make this check silently miss, and which a real deployment's own
+        working directory need not be the checkout at all) sit inside
+        `workspace_dir`? Either direction is refused as a `ConfigError`
+        (model-level, no single field `loc` — the
+        `_validate_enabled_requires_schedule` pattern).
+        """
+        if not self.enabled:
+            return self
+        workspace = self.workspace_dir
+        if _repo_root_named(workspace, _ANSINA_PROJECT_NAME) is not None:
+            raise ConfigError(
+                _render_report(
+                    [
+                        f"opencode.workspace_dir: {workspace} is, or is inside, "
+                        "an ansina checkout — point it at a directory with no "
+                        "ansina source in it or above it"
+                    ]
+                )
+            )
+        this_repo_root = _repo_root_named(
+            Path(__file__).resolve(), _ANSINA_PROJECT_NAME
+        )
+        if this_repo_root is not None and this_repo_root.is_relative_to(workspace):
+            raise ConfigError(
+                _render_report(
+                    [
+                        f"opencode.workspace_dir: {workspace} contains this "
+                        f"running ansina checkout ({this_repo_root}) — point it "
+                        "at a directory with no ansina source in it or above it"
+                    ]
+                )
+            )
+        return self
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -1118,6 +1374,7 @@ class Settings(BaseSettings):
     brain: BrainSettings = Field(default_factory=BrainSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
     dev: DevSettings = Field(default_factory=DevSettings)
+    opencode: OpencodeSettings = Field(default_factory=OpencodeSettings)
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:
@@ -1144,6 +1401,43 @@ class Settings(BaseSettings):
                         f"{self.server.host!r} (not loopback) with "
                         "security.enabled = false; set ANSINA_SECURITY__ENABLED=true "
                         "or bind [server] host back to 127.0.0.1"
+                    ]
+                )
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _refuse_unobserved_executor(self) -> Settings:
+        """`[opencode] enabled = true` with `[telemetry] enabled = false` must
+        never boot — the `OidcSettings`/`CorsSettings` fail-loudly posture,
+        deliberately **not** the `S3Settings`/`DevSettings` degrade-gracefully
+        one those two models' own docstrings document.
+
+        The difference in posture is deliberate, not an inconsistency: every
+        other "degrade gracefully" subsystem in this file (`[telemetry.s3]`,
+        `[dev]`) only ever *ships* something that was already captured — a
+        missing bucket or a dead sidecar means a bench/soak report or a
+        telemetry file sits unshipped, recoverable later (`heart-bench-
+        publish`'s whole job). An unobserved OpenCode run is different in kind:
+        every tool call, permission denial, and outcome it produces is
+        emitted *as telemetry or nothing at all* (issue #76) — there is no
+        local file sitting around to re-ship after the fact. A run that
+        happens with telemetry off is not merely unshipped, it never existed
+        anywhere Ansina can account for it, which is the one thing this
+        milestone refuses to allow for an executor with real `bash`/`edit`
+        reach. Raised as `ConfigError` directly (model-level, no single field
+        `loc`) — the same pattern `_refuse_unsafe_bind` above and
+        `OidcSettings`/`CorsSettings`'s own `enabled`-pairing checks use.
+        """
+        if self.opencode.enabled and not self.telemetry.enabled:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "opencode.enabled: refusing to start — "
+                        "telemetry.enabled must be true whenever opencode.enabled "
+                        "is true (an executor Ansina cannot observe is refused "
+                        "outright); set ANSINA_TELEMETRY__ENABLED=true or leave "
+                        "opencode.enabled = false"
                     ]
                 )
             )

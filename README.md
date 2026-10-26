@@ -109,6 +109,8 @@ through any OpenAI-compatible endpoint — configure `[brain] base_url`/`api_key
   hours on real hardware and measure steady-state behavior.
 - [`docs/dev-mode.md`](docs/dev-mode.md) — `ansina --dev`: auto-ship the daemon's
   own telemetry to the report bucket via a supervised Vector sidecar.
+- [`docs/opencode.md`](docs/opencode.md) — `[opencode]`: the confined workspace/
+  config/env foundation for M9's "Hands" executor (no executor ships yet).
 
 ```bash
 make check         # everything CI runs: lint, format-check, mypy --strict, full test suite
@@ -122,4 +124,5 @@ Run `make help` for the full target list.
 - [`docs/architecture/blueprint.md`](docs/architecture/blueprint.md) — architecture rationale, the OpenClaw comparison this design departs from, and the full roadmap.
 - [`tui/README.md`](tui/README.md) — the `ansina-tui` control surface: every command, flag, and config file in full.
 - [`docs/heart/bench.md`](docs/heart/bench.md) / [`docs/heart/soak.md`](docs/heart/soak.md) / [`docs/dev-mode.md`](docs/dev-mode.md) — Heart bench/soak tooling and Dev Mode.
+- [`docs/opencode.md`](docs/opencode.md) — the OpenCode "Hands" foundation: confinement model, the config-merge finding, config reference.
 - [`docs/ml/corpus-contract.md`](docs/ml/corpus-contract.md) — the versioned schema for every bucket artifact family (bench report, soak run, telemetry sample, mirrored log line).

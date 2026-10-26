@@ -1,0 +1,144 @@
+# OpenCode: the confined "Hands" foundation
+
+`[opencode] enabled = true` is M9's starting point — Ansina hosting
+[OpenCode](https://opencode.ai) (`anomalyco/opencode`) as an external, subprocess-
+driven, workspace-confined executor rather than building one. This issue (#74) ships
+the foundation only: workspace provisioning, generated per-run config, an allow-list
+child environment, and a logged-skip preflight. **Nothing here spawns a real
+`opencode` child** — a follow-up issue's `AgentRunner`/`OpencodeCliRunner` is the
+first thing that does. `[opencode] enabled = false` (the default) is a byte-for-byte
+no-op: no directory is created, no file is written, nothing is logged.
+
+**Ansina targets OpenCode v2**, not v1 — the two are materially different CLIs (see
+"Installing it" below for why that matters even at install time, before any Ansina
+code runs).
+
+## Installing it
+
+Neither CI leg installs `opencode` (same posture as Vector — see `docs/dev-mode.md`),
+and the real binary isn't needed for anything in this repository to boot, test, or
+pass `make check`. On a Mac Mini or dev machine that will actually run an executor:
+
+```bash
+make opencode-install ARGS='--version 2.1.1'   # pick a real, current v2 release
+```
+
+This wraps the official installer (`curl -fsSL https://opencode.ai/v2/install | bash`)
+via `scripts/opencode-install.sh` — never typed ad hoc, the same "complexity lives in
+one script behind one `make` target" discipline every other real-network/real-binary
+tool in this codebase follows. It refuses to run with no `--version`/`-v` (or
+`--binary`/`-b`) given: **no OpenCode release has been validated against Ansina yet**
+(`[opencode] required_version_prefix` defaults to `""`, meaning nothing is pinned), so
+this script will not silently install "latest" and let an unreviewed upgrade happen by
+accident. Two things worth knowing, verified against the real v2 install script rather
+than assumed:
+
+- `https://opencode.ai/install` (no `/v2/`) redirects to the **v1** branch's own
+  installer — a different CLI, including a different `--version` output shape (v1
+  prints a bare `"1.19.3"`; v2 prints `"opencode v2.1.1"`). Always use the `/v2/`
+  endpoint, which is what `opencode-install.sh` calls.
+- The downloaded artifact is a single self-contained binary built via `bun build
+  --compile`, which bundles the Bun runtime *inside* the executable. **No separate
+  Bun or Node.js install is needed** on the target machine, despite OpenCode itself
+  being written in TypeScript.
+
+The script prints the real `opencode --version` output once the install finishes —
+copy that straight into `ANSINA_OPENCODE__REQUIRED_VERSION_PREFIX` once you've
+actually run and validated against it (the same "pin only what you've proven,"
+Vector-0.45.x-lesson discipline this codebase applies everywhere else).
+
+## Why `enabled = true` also requires `[telemetry] enabled = true`
+
+Unlike every other `[section] enabled` flag in this codebase, turning OpenCode on
+requires `[telemetry] enabled = true` too — refused at boot with a `ConfigError`,
+not a logged skip, if it isn't. Every other "degrade gracefully" subsystem here
+(`[telemetry.s3]`, `[dev]`) only ever ships something that was already captured: a
+missing bucket or a dead sidecar leaves a bench/soak report or a telemetry file
+sitting unshipped, recoverable later. An unobserved OpenCode run is different in
+kind — a follow-up issue emits every tool call, permission denial, and outcome as
+telemetry or nothing at all, so a run that happens with telemetry off never existed
+anywhere Ansina can account for it. That's the one thing this milestone refuses to
+allow for an executor with real `bash`/`edit` reach.
+
+## The confinement model
+
+- **A dedicated workspace** (`[opencode] workspace_dir`, default
+  `~/.local/state/ansina/opencode`) — refused at boot if it is, is inside, or
+  contains this ansina checkout itself (walking up from `workspace_dir` for a
+  `pyproject.toml` naming `"ansina"`, and checking whether this running code's own
+  checkout sits inside `workspace_dir` the other way around).
+- **An isolated `HOME`** (`[opencode] isolate_home = true`, the default) — redirects
+  the child's `HOME` into a subdirectory of `workspace_dir`. This is a security
+  finding, not tidiness: see "The config-merge finding" below.
+- **A deny-by-default permission block** (`[opencode.permission]`) — `"*": "deny"` is
+  always the floor; `edit`/`bash` are Ansina's own typed modes (`workspace`/
+  `allowlist`), translated into OpenCode's native glob-map shape by
+  `ansina.opencode.config`. `"ask"` is unrepresentable anywhere in this section by
+  construction — a headless `--auto` run has nobody to answer a prompt, so an `"ask"`
+  value would hang a real run until its own timeout.
+- **An explicit env allow-list** (`ansina.opencode.env.build_opencode_env`) — only
+  `PATH`/`TMPDIR` are inherited unfiltered; everything else (the provider API key,
+  operator-named `inherit_env_names` entries) is named explicitly. Any
+  `ANSINA_`-prefixed or secret-shaped name (`AWS_*`, `*_API_KEY`, `*SECRET*`,
+  `*TOKEN*`) is refused outright at config-load time — `inherit_env_names` can never
+  be used to smuggle a real secret into the child's environment under cover of a
+  legitimate-looking name.
+
+## The config-merge finding (and its residual risk)
+
+OpenCode's own documented config precedence **merges** every source together rather
+than replacing one with another: remote → global (`~/.config/opencode/opencode.json`)
+→ `OPENCODE_CONFIG` → project (`opencode.json`) → `.opencode/` dirs →
+`OPENCODE_CONFIG_CONTENT` → managed config files → macOS managed preferences (later
+wins). Project config does rank above the global file — but because sources *merge*
+rather than override wholesale, any permission key an operator set in their own
+global config that Ansina's generated `opencode.json` doesn't also name survives into
+the effective, resolved configuration. Redirecting the child's `HOME` removes the
+global file from the merge chain entirely; `OPENCODE_CONFIG_CONTENT` (set to the
+identical rendered permission block) is defense in depth, since it ranks above
+project config too.
+
+**Residual risk, named rather than solved**: managed config files and macOS managed
+preferences outrank even `OPENCODE_CONFIG_CONTENT`, and redirecting `HOME` does not
+remove either from the merge chain — neither lives at a path this module can read and
+account for directly. `ansina.opencode.preflight`'s own final check re-reads the
+*effective*, fully-resolved permissions (`opencode debug config`) and refuses to
+proceed if anything looser than configured — or a literal `"ask"` anywhere — crept in
+from a layer above Ansina's own. This is the check that actually catches that case;
+everything else here only makes the *common* case (an ordinary global config file)
+unreachable.
+
+## Verifying it (no real executor exists yet)
+
+```bash
+uv run python -c "
+from ansina.config import load_settings
+from ansina.opencode import build_opencode_service
+
+settings = load_settings()
+print(build_opencode_service(settings))
+"
+```
+
+With `[opencode] enabled = false` (the default), this prints `None` and creates no
+directory — it does log one `WARNING` line naming the skip reason, the same way
+`ansina.dev.vector.preflight()` already logs a specific reason for *every* skip,
+including "disabled." That's calling the preflight function directly, though; nothing
+in the daemon's own boot sequence calls it yet (no executor exists to wire in), so an
+ordinary `uv run ansina` with the default config logs nothing about OpenCode at all.
+With `enabled = true` and `[telemetry] enabled = true`, this snippet preflights for
+real: binary resolution, an optional pinned-version check, workspace provisioning,
+the generated `opencode.json`'s own round-trip, and the effective-permission
+assertion above — returning `None` (with a specific logged skip reason) on any failed
+check, or a result carrying the resolved `opencode` path on a clean pass. Neither CI
+leg installs `opencode` (same reasoning as Vector — see `docs/dev-mode.md`), so both
+always exercise the "binary not found" skip path for real.
+
+## Config reference
+
+`ansina.example.toml`'s `[opencode]` and `[opencode.permission]` blocks document every
+setting inline, including why `enabled = true` requires `[telemetry] enabled = true`
+and how to pin `required_version_prefix` against a specific OpenCode v2 release (a
+raw-prefix match against the trimmed `--version` output, e.g. `"opencode v2."` —
+never a v1 release, which this project doesn't target and whose own `--version`
+output shape differs, as "Installing it" above explains).

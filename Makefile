@@ -149,6 +149,16 @@ heart-bench-publish: ## Upload every local bench/soak report not already in the 
 vector-validate: ## Validate deploy/vector.toml (requires the `vector` binary on PATH)
 	scripts/vector-validate.sh
 
+# Issue #74: installs OpenCode (v2) via the official installer for M9's
+# "Hands" — unlike Vector, never installed by CI (neither leg needs it to
+# pass), so this stays out of `check`/`check-all` the same reasoning as
+# `vector-validate` above. Requires an explicit --version/-v (or --binary/-b)
+# — see scripts/opencode-install.sh's own header for why "latest" is refused.
+# e.g. `make opencode-install ARGS='--version 2.1.1'`.
+.PHONY: opencode-install
+opencode-install: ## Install OpenCode v2 via the official installer (ARGS='--version <v>' required)
+	scripts/opencode-install.sh $(ARGS)
+
 # `make dev-mode-smoke` is the primary end-to-end verification for issue #62: boots
 # `ansina --dev` against a scratch database/spool dir with whatever real
 # [telemetry.s3] credentials this host already has (.envrc/ansina.toml), and
