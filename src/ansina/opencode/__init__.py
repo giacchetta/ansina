@@ -30,6 +30,10 @@ from ansina.opencode.events import (
 )
 from ansina.opencode.preflight import build_opencode_service
 from ansina.opencode.runner import AgentRunner, OpencodeCliRunner
+from ansina.opencode.telemetry import (
+    OpencodeTelemetryWriter,
+    build_opencode_telemetry_writer,
+)
 from ansina.opencode.workspace import ensure_workspace, isolated_home
 
 # Deliberately does *not* re-export `preflight`/`OpencodePreflightResult` from
@@ -46,11 +50,15 @@ from ansina.opencode.workspace import ensure_workspace, isolated_home
 # `PreflightResult`. A caller that needs either imports them from
 # `ansina.opencode.preflight` directly, the same way
 # `tests/unit/dev/test_vector.py` imports `ansina.dev.vector`'s own `preflight`.
-# `runner`/`events` carry no such risk — neither submodule's own name
-# collides with anything this file re-exports from it.
+# `runner`/`events`/`telemetry` carry no such risk — none of those submodules'
+# own names collide with anything this file re-exports from them, and `telemetry
+# .py` (issue #76) has no `ansina.heart` dependency chain to worry about either
+# (unlike `ansina.telemetry.sampler`, which is why *that* package's own
+# `__init__` leaves `sampler.py` out — see its module docstring).
 __all__ = [
     "AgentRunner",
     "OpencodeCliRunner",
+    "OpencodeTelemetryWriter",
     "RunEvent",
     "RunEventType",
     "RunOutcome",
@@ -58,6 +66,7 @@ __all__ = [
     "RunStatus",
     "build_opencode_env",
     "build_opencode_service",
+    "build_opencode_telemetry_writer",
     "ensure_workspace",
     "isolated_home",
     "render_opencode_config",

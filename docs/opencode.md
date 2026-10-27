@@ -178,6 +178,28 @@ as-emitted string regardless; a captured sample from a real run like this one is
 a future change would use to populate that table with confirmed, not guessed, OpenCode
 event-type literals.
 
+## Run telemetry: `kind=opencode/`
+
+Issue #76 adds `ansina.opencode.telemetry.OpencodeTelemetryWriter` — the third
+telemetry *shape* alongside M7's interval sampler and log mirror (see
+`docs/dev-mode.md`): one JSON line per run-lifecycle event (`submitted`,
+`started`, each in-run event, a terminal `completed`/`failed`/`timeout`/
+`cancelled`, and a reserved `intervention` event for a later issue), through the
+same generic `SpooledRotatingWriter` under its own `"opencode"` file family,
+shipped by Vector's third source/sink pair (`deploy/vector.toml`) to
+`host=<id>/kind=opencode/dt=<date>/`. This is a deliberate, load-bearing
+sequencing decision, not an afterthought: a run must not be submittable over
+HTTP before its own trace is already shipping — see `docs/ml/corpus-contract.md`'s
+"Opencode run event" family for the full field reference and its `seq`-based
+gap-detection property.
+
+**Still wired into nothing, same as `build_opencode_service` before #75 landed**:
+`build_opencode_telemetry_writer(settings)` is never called from `create_app`/
+`__main__.py` as of this issue — a later issue's run-submission API is the first
+real caller, constructing one writer and driving its `record_submitted`/
+`record_started`/`record_event`/`record_outcome`/`record_cancelled` methods
+around each real `AgentRunner.run()` call.
+
 ## Config reference
 
 `ansina.example.toml`'s `[opencode]` and `[opencode.permission]` blocks document every

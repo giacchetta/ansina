@@ -1,21 +1,23 @@
-# Heart corpus contract — `schema_version: 3`
+# Heart corpus contract — `schema_version: 4`
 
 Issue [#63](https://github.com/giacchetta/ansina/issues/63), bumped to
 `schema_version: 2` by issue
 [#67](https://github.com/giacchetta/ansina/issues/67) (host attribution for the
-`kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below) and to
+`kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below), to
 `schema_version: 3` by issue
 [#68](https://github.com/giacchetta/ansina/issues/68) (exact per-decision counts
-on the telemetry sample — see "Telemetry sample" below). This document is the
+on the telemetry sample — see "Telemetry sample" below), and to `schema_version: 4`
+by issue [#76](https://github.com/giacchetta/ansina/issues/76) (a new
+`kind=opencode/` family — see "Opencode run event" below). This document is the
 single source of truth for the shape of every artifact Ansina writes to its
 S3-compatible report bucket (`[telemetry.s3]`, issue #59). The machine-readable
-mirror of this exact document is `corpus-schema-v3.json` in this same directory,
-published byte-for-byte to `_contract/corpus-schema-v3.json` in the bucket (see
+mirror of this exact document is `corpus-schema-v4.json` in this same directory,
+published byte-for-byte to `_contract/corpus-schema-v4.json` in the bucket (see
 "Self-discovery" below) — the two are reviewed together in the same PR whenever
 either changes, so there is never a second, independently-maintained copy to drift
-out of sync. `corpus-schema-v1.json`/`corpus-schema-v2.json` stay committed,
-unmodified, per the stability promise below — neither is what this module
-re-uploads by default any longer.
+out of sync. `corpus-schema-v1.json`/`corpus-schema-v2.json`/`corpus-schema-v3.json`
+stay committed, unmodified, per the stability promise below — none of them is what
+this module re-uploads by default any longer.
 
 ## Lifecycle: Ansina is a producer, nothing more
 
@@ -59,14 +61,14 @@ Every version of this contract that has ever shipped is published, unmodified, t
 as part of every `make heart-bench-publish` run — see that module's own docstring).
 A reader needs no access to this repository's source to learn the current schema:
 list `_contract/`, read the highest `<N>`, done. The *currently committed* `<N>` is
-whatever `corpus-schema-v<N>.json` is named in this directory — `v3` as of this
+whatever `corpus-schema-v<N>.json` is named in this directory — `v4` as of this
 writing.
 
 ## Bucket key layout
 
 Hive-partitioned (`key=value/` segments), so a query engine can read it with no ETL
-step. Four families actually land in the bucket; three key prefixes, since bench and
-soak share no prefix collision risk with telemetry/runlog:
+step. Five families actually land in the bucket; four key prefixes, since bench and
+soak share no prefix collision risk with telemetry/runlog/opencode:
 
 ```
 s3://<bucket>/<prefix>/kind=bench/dt=<date>/<stem>.{md,json}
@@ -74,18 +76,19 @@ s3://<bucket>/<prefix>/kind=soak/dt=<date>/<run_id>/{samples.jsonl,run.log,
     journal.json,soak-<date>.md,soak-<date>.json}
 s3://<bucket>/<prefix>/host=<id>/kind=telemetry/dt=<date>/<vector-assigned-filename>
 s3://<bucket>/<prefix>/host=<id>/kind=runlog/dt=<date>/<vector-assigned-filename>
+s3://<bucket>/<prefix>/host=<id>/kind=opencode/dt=<date>/<vector-assigned-filename>
 s3://<bucket>/<prefix>/_contract/corpus-schema-v<N>.json
 ```
 
 `<prefix>` is `[telemetry.s3] key_prefix`, applied/stripped entirely inside
 `ReportStorage`/Vector's own sink config — nothing above is prefix-aware.
 
-**`kind=telemetry/`/`kind=runlog/` are produced by Vector (issue #62), not by any
-Python code in this repo**, per `deploy/vector.toml`'s two `aws_s3` sink
-definitions. The filename under `dt=<date>/` is whatever Vector's own `aws_s3` sink
-assigns it (not a name this repo controls or documents) — contrast with
-`kind=bench/`/`kind=soak/`, where `ansina.heart.eval.storage`'s own `bench_key`/
-`soak_key` name the exact filename.
+**`kind=telemetry/`/`kind=runlog/`/`kind=opencode/` are produced by Vector (issue
+#62, extended by #76), not by any Python code in this repo**, per
+`deploy/vector.toml`'s three `aws_s3` sink definitions. The filename under
+`dt=<date>/` is whatever Vector's own `aws_s3` sink assigns it (not a name this
+repo controls or documents) — contrast with `kind=bench/`/`kind=soak/`, where
+`ansina.heart.eval.storage`'s own `bench_key`/`soak_key` name the exact filename.
 
 ### Host attribution: `host=<id>/` (issue #67)
 
@@ -94,11 +97,14 @@ assigns it (not a name this repo controls or documents) — contrast with
 `socket.gethostname()` — either way run through the same character-sanitization
 (`[A-Za-z0-9._-]`, anything else collapsed to `-`) before `ansina.dev.vector.
 build_vector_env` injects it as `ANSINA_TELEMETRY_HOST_ID`, which
-`deploy/vector.toml`'s two `key_prefix` values interpolate directly ahead of
-`kind=.../`. This is a key-prefix segment, not a field on either record below —
-`TelemetrySample`/the mirrored log line carry no `host` field themselves, so a
-reader attributes a sample/log line to its producing deployment purely by which
-`host=<id>/` partition it was read from.
+`deploy/vector.toml`'s three `key_prefix` values interpolate directly ahead of
+`kind=.../`. This is a key-prefix segment, not a field on any of the three
+records below — `TelemetrySample`/the mirrored log line/the opencode run event
+carry no `host` field themselves, so a reader attributes a line to its producing
+deployment purely by which `host=<id>/` partition it was read from.
+`kind=opencode/` (issue #76) ships host-attributed from birth — it never had a
+v1-style gap to resolve, since it reuses this same key-prefix segment from its
+first line.
 
 **v1's own documented gap is what this resolves**: neither `kind=telemetry/` nor
 `kind=runlog/` carried any partition or field identifying *which machine* produced
@@ -319,6 +325,56 @@ key-prefix segment above (issue #67), not a field on this record either.
 | `extra` | object | present only when the log call passed `extra={...}`; every string leaf (recursively) is redacted |
 | `exception` | string | present only on an exception log, redacted |
 | `stack` | string | present only when stack info was captured, redacted |
+
+### 5. Opencode run event (`host=<id>/kind=opencode/`, issue #76)
+
+One JSON object per line, written by
+`ansina.opencode.telemetry.OpencodeTelemetryWriter` — the third telemetry
+*shape* (event-driven, one line per run-lifecycle event) alongside family 3
+(interval) and family 4 (log mirror) above, through the same generic
+`SpooledRotatingWriter`, under its own `"opencode"` file-prefix family. Host
+attribution is via the `host=<id>/` key-prefix segment above (issue #67), not a
+field on this record either — shipped this way from birth, unlike
+`kind=telemetry/`/`kind=runlog/`'s own v1-to-v2 history. **Still wired into
+nothing**: as of issue #76 nothing in the daemon's own boot sequence or
+tick loop calls `build_opencode_telemetry_writer`/drives these methods — a
+later issue's run-submission API is the first real caller, which is why this
+family may exist in the contract before it ever has a single real line in the
+bucket.
+
+| Field | Type | Notes |
+|---|---|---|
+| `t` | float (unix timestamp) | |
+| `run_id` | string | stable across every line for one run |
+| `session_id` | string \| null | the OpenCode session id, when known |
+| `seq` | int | **0-based, monotonic per `run_id`** — see "Gap detection" below |
+| `event` | string | `"submitted"`\|`"started"`\|`"run_event"`\|`"completed"`\|`"failed"`\|`"timeout"`\|`"cancelled"`\|`"intervention"` (reserved, not yet emitted — see below) |
+
+Event-specific fields, present only on the matching `event` value:
+
+| `event` | Additional fields |
+|---|---|
+| `submitted` | `prompt` (string, **truncated preview**, never the full unbounded prompt), `continue_last`/`fork` (bool), `model`/`agent` (string), `auto_approve` (bool \| null) |
+| `started` | none |
+| `run_event` | `raw_type` (string, redacted+truncated by the adapter), `payload` (string, the full redacted+truncated captured line — the lossless fallback), plus whichever of `tool`/`command`/`path` (a tool call), `permission`/`pattern`/`decision` (a permission denial), or `prompt_tokens`/`completion_tokens`/`cost` (a usage report) the payload happens to carry — a best-effort, forward-compatible passthrough, never a required classification (mirrors `ansina.opencode.events`' own intentionally-empty `RunEventType` lookup table) |
+| `completed`\|`failed`\|`timeout` | `exit_code` (int \| null), `duration_seconds` (float), `events_emitted`/`events_skipped` (int), `truncated` (bool), `error` (string \| null) |
+| `cancelled` | `duration_seconds` (float) — covers the one outcome `RunOutcome` cannot itself represent, since a cancelled run's own `asyncio.CancelledError` never resolves into one |
+| `intervention` | **reserved, not emitted by any code as of this issue** — a later issue (the Heart's own bounded, observe-then-intervene supervision of a run) populates this once it exists |
+
+A line that would exceed the writer's own `max_line_bytes` cap (re-asserted
+independently of whatever truncation already happened at the adapter boundary)
+falls back to a minimal envelope — `t`/`run_id`/`session_id`/`seq`/`event` plus
+`truncated: true` — rather than a bare mid-JSON cut. Every line is also passed
+through `ansina.logging.redaction.redact` in full, uniformly, as the writer's
+own re-assertion of redaction — this is the first code path that redacts
+`RunRequest.prompt` at all; nothing upstream of this writer ever did.
+
+**Gap detection via `seq`**: for one `run_id`, `seq` must be a contiguous,
+0-based sequence (`0, 1, 2, ...`) with no value skipped — a reader detects a
+dropped line (e.g. an upload-side truncation, a crash mid-run) by finding a
+break in consecutive `seq` values within that `run_id`'s own lines. `seq` is
+scoped per `run_id`, not global across runs — two concurrent runs each start
+their own counter at `0`.
 
 ## `heart/eval`'s continued authority
 
