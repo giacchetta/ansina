@@ -29,7 +29,13 @@ from ansina.opencode.events import (
     RunStatus,
 )
 from ansina.opencode.preflight import build_opencode_service
+from ansina.opencode.repository import OpencodeRun, OpencodeRunRepository
 from ansina.opencode.runner import AgentRunner, OpencodeCliRunner
+from ansina.opencode.service import (
+    OpencodeRunService,
+    OpencodeRunServiceFactory,
+    build_opencode_run_service,
+)
 from ansina.opencode.telemetry import (
     OpencodeTelemetryWriter,
     build_opencode_telemetry_writer,
@@ -54,10 +60,18 @@ from ansina.opencode.workspace import ensure_workspace, isolated_home
 # own names collide with anything this file re-exports from them, and `telemetry
 # .py` (issue #76) has no `ansina.heart` dependency chain to worry about either
 # (unlike `ansina.telemetry.sampler`, which is why *that* package's own
-# `__init__` leaves `sampler.py` out — see its module docstring).
+# `__init__` leaves `sampler.py` out — see its module docstring). `repository.py`/
+# `service.py` (issue #77) carry the identical no-cycle, no-name-collision shape —
+# `ansina.opencode.service` imports `ansina.heart.tick.loop`'s own `TickController`
+# at no point (unlike `ansina.telemetry.sampler`), so re-exporting it eagerly here
+# is safe.
 __all__ = [
     "AgentRunner",
     "OpencodeCliRunner",
+    "OpencodeRun",
+    "OpencodeRunRepository",
+    "OpencodeRunService",
+    "OpencodeRunServiceFactory",
     "OpencodeTelemetryWriter",
     "RunEvent",
     "RunEventType",
@@ -65,6 +79,7 @@ __all__ = [
     "RunRequest",
     "RunStatus",
     "build_opencode_env",
+    "build_opencode_run_service",
     "build_opencode_service",
     "build_opencode_telemetry_writer",
     "ensure_workspace",

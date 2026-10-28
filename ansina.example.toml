@@ -588,6 +588,21 @@ agent = ""
 # confirm it, which this deployment shape never has.
 auto_approve = true
 
+# Issue #77 -- `opencode_runs`' own bounded retention, the same two-cutoff
+# shape [heart.journal] max_entries/retention_days already use: a row is
+# swept once it's either outside the newest max_runs_retained or older than
+# run_retention_days, whichever bound it fails first.
+max_runs_retained = 2000
+run_retention_days = 14
+
+# Issue #77 -- whether OpencodeRunService starts with intake paused
+# (POST /opencode/runs refused with ansina.opencode.intake_paused until a
+# POST /opencode/intake/resume). Independent of `enabled` above -- an
+# operator can have the service constructed and observable via
+# GET /opencode/status while still deliberately not accepting new work from
+# a cold boot.
+intake_paused_on_boot = false
+
 [opencode.permission]
 # The deny-by-default permission block rendered into the generated
 # opencode.json (and, as defense in depth, into the OPENCODE_CONFIG_CONTENT

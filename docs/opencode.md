@@ -193,12 +193,63 @@ HTTP before its own trace is already shipping — see `docs/ml/corpus-contract.m
 "Opencode run event" family for the full field reference and its `seq`-based
 gap-detection property.
 
-**Still wired into nothing, same as `build_opencode_service` before #75 landed**:
-`build_opencode_telemetry_writer(settings)` is never called from `create_app`/
-`__main__.py` as of this issue — a later issue's run-submission API is the first
-real caller, constructing one writer and driving its `record_submitted`/
-`record_started`/`record_event`/`record_outcome`/`record_cancelled` methods
-around each real `AgentRunner.run()` call.
+**Wired in as of issue #77**: `build_opencode_telemetry_writer(settings)` is the
+telemetry half `ansina.opencode.service.build_opencode_run_service` constructs
+alongside `build_opencode_service`'s own runner — see "Submitting a run over
+HTTP" below for the route that drives both.
+
+## Submitting a run over HTTP
+
+Issue #77 is what actually exposes OpenCode as an inbound surface: `POST
+/opencode/runs`, `GET /opencode/runs`, `GET /opencode/runs/{id}`, `POST
+/opencode/runs/{id}/cancel` (resource `opencode.runs`), plus `GET
+/opencode/status`, `POST /opencode/intake/pause`, `POST /opencode/intake/resume`
+(resource `opencode.intake`) — all gated `require(...)` like every other route in
+this codebase, and all answer 503 `problem+json` (`ansina.opencode.disabled`)
+when `app.state.opencode` is `None` (`[opencode] enabled = false`, or a failed
+preflight), checked only *after* authorization has already passed. `POST
+/opencode/runs`/`.../cancel`/`.../intake/pause`/`.../intake/resume` are
+`sensitive=True` — launching, or killing, an autonomous coding agent demands a
+live sudo grant for every role but `Admin`, the same discipline `auth.*` mutations
+already use for a different reason.
+
+`POST /opencode/runs` returns `202` with the newly created, `queued` run — the
+actual execution happens in a tracked background task, never inside the request
+itself. **Every run produces its `submitted` telemetry line before the route
+returns**, not merely "eventually" — `ansina.opencode.service.OpencodeRunService
+.submit()` writes it synchronously before handing the run back, a tested
+property (`tests/e2e/test_server.py`'s own fake-executor test reads the spooled
+file back immediately after the `202`, before polling anything). `opencode_runs`
+is this codebase's first *mutable* status table — every other one
+(`heart_journal`, `login_attempts`, …) is deliberately append-only; see
+`storage/migrations/0012_opencode_runs.sql`'s own header comment for why a run's
+real lifecycle (`queued` → `running` → one of `succeeded`/`failed`/`timeout`/
+`cancelled`) earns the exception, with the *append-only* trace of that same
+lifecycle living in the `kind=opencode/` telemetry stream instead. A row left
+`queued`/`running` by a crashed or killed daemon is swept to `failed` on the next
+boot (`error_detail = "daemon restarted"`), so a restart can never poison a
+later active-run count.
+
+`GET /opencode/runs` pages newest-first with `limit`/`since`, byte-for-byte the
+`GET /heart/journal` shape (`has_more` via one extra row, a malformed `since` →
+400 `ansina.request.invalid`). `POST /opencode/intake/pause` is the operator-
+facing half of the one intake kill switch a later Heart issue's bounded
+`pause_intake` intervention will also call — `POST /opencode/runs` refuses with
+409 `ansina.opencode.intake_paused` while it's set, independently of whether
+`[opencode] enabled` itself is `true`.
+
+Hand-run verification, since neither CI leg installs a real `opencode` binary:
+
+```bash
+make opencode-install ARGS='--version 2.1.1'   # once, if not already installed
+make opencode-smoke                             # boots ansina, submits a real run, verifies telemetry
+```
+
+`make remote-opencode`/`-tail`/`-attach` run the identical check on a remote
+host over ssh (see `.envrc`'s `ANSINA_REMOTE_HOST`/`ANSINA_REMOTE_PATH`, the same
+two variables `make remote-heart`/`make remote-dev-mode` already use) — the same
+force-sync-then-tmux shape `scripts/remote-dev-mode.sh` established, just
+wrapping `make opencode-smoke` instead.
 
 ## Config reference
 
@@ -216,4 +267,8 @@ is refused with `OpencodeBusyError`), `max_prompt_chars`/`max_event_bytes`/
 `max_run_output_bytes` (three independent size caps — the request itself, one
 captured JSON line, and the whole run's own output), and `model`/`agent`/
 `auto_approve` (per-run `--model`/`--agent`/`--auto` defaults, overridable per call via
-`RunRequest`).
+`RunRequest`). Issue #77 adds the three keys `opencode_runs`' own retention and the
+intake kill switch's boot-time state read from: `max_runs_retained`/
+`run_retention_days` (the identical two-bound sweep shape `[heart.journal]`
+`max_entries`/`retention_days` already use) and `intake_paused_on_boot` (whether
+`OpencodeRunService` starts with intake paused — independent of `enabled` itself).

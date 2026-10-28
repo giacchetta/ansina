@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
+import anyio.to_thread
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -41,6 +42,8 @@ from ansina.api.routes.login import router as login_router
 from ansina.api.routes.me import router as me_router
 from ansina.api.routes.oidc import router as oidc_router
 from ansina.api.routes.openapi import router as openapi_router
+from ansina.api.routes.opencode_intake import router as opencode_intake_router
+from ansina.api.routes.opencode_runs import router as opencode_runs_router
 from ansina.api.routes.permissions import router as permissions_router
 from ansina.api.routes.role_assignments import router as role_assignments_router
 from ansina.api.routes.role_mappings import router as role_mappings_router
@@ -58,6 +61,7 @@ from ansina.auth import (
     ensure_key_configured_if_needed,
     reconcile_builtin_roles,
     sync_resources,
+    utc_now,
 )
 from ansina.brain import BrainProvider, build_brain_provider
 from ansina.config import Settings, load_settings
@@ -70,6 +74,12 @@ from ansina.heart import (
     build_tick_loop,
 )
 from ansina.logging import get_logger
+from ansina.opencode import (
+    OpencodeRunRepository,
+    OpencodeRunService,
+    OpencodeRunServiceFactory,
+    build_opencode_run_service,
+)
 from ansina.storage import Database, run_migrations
 from ansina.telemetry.sampler import (
     TelemetrySamplerFactory,
@@ -90,6 +100,7 @@ def create_app(
         [Database, Settings], OidcLoginService | None
     ] = build_oidc_login_service,
     telemetry_factory: TelemetrySamplerFactory = build_telemetry_sampler,
+    opencode_factory: OpencodeRunServiceFactory = build_opencode_run_service,
 ) -> FastAPI:
     """Build the FastAPI application. Loads `Settings` via `load_settings()` when none
     is given — tests and `python -m ansina` both pass an already-loaded one instead, so
@@ -124,6 +135,15 @@ def create_app(
     straight through rather than this factory being skipped whenever the Heart is
     off. `app.state.telemetry` is `None` when `telemetry.enabled` is `False` (the
     default) — the same "`None` when off" shape `heart`/`brain`/`oidc` already use.
+    `opencode_factory` (default `ansina.opencode.service.build_opencode_run_service`,
+    issue #77) is gated by `opencode.enabled` alone, independently of `heart`/
+    `tick_loop`/`telemetry` above — built with `db=db`, the same "needs a repository
+    handle at construction time" shape `oidc_factory` already has, rather than
+    `heart_factory`/`brain_factory`'s bare `(settings,)`. `None`-when-off is
+    enforced twice: here by the `if resolved_settings.opencode.enabled:` gate, and
+    again inside `build_opencode_run_service` itself when its own upstream
+    preflight/telemetry factories return `None` — `app.state.opencode` is `None`
+    either way.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
@@ -180,6 +200,20 @@ def create_app(
     if resolved_settings.telemetry.enabled:
         telemetry = telemetry_factory(resolved_settings, tick=tick_loop)
 
+    # Issue #77: independent of `heart`/`tick_loop`/`telemetry` above — built here,
+    # the same "assemble up front" shape, though like `telemetry` this never raises
+    # at construction time: `build_opencode_run_service` delegates to
+    # `build_opencode_service`'s own preflight, which resolves to `None` (a logged
+    # skip) on any failed check rather than a boot-time `ConfigError`. Gated on
+    # `resolved_settings.opencode.enabled` alone, not re-checked against
+    # `telemetry.enabled` here — `Settings._refuse_unobserved_executor` already
+    # refuses to construct a `Settings` tree where `opencode.enabled` is `True` and
+    # `telemetry.enabled` is `False`, so this gate can never admit an unobserved
+    # executor.
+    opencode: OpencodeRunService | None = None
+    if resolved_settings.opencode.enabled:
+        opencode = opencode_factory(resolved_settings, db=db)
+
     if not resolved_settings.security.enabled:
         logger.warning(
             "ansina starting with security.enabled = false — every route except "
@@ -235,6 +269,17 @@ def create_app(
         # "not asked for, not worth it" reasoning as the Brain's own omission above.
         if telemetry is not None:
             await telemetry.start()
+        # Issue #77: crash recovery before the service accepts any submission — any
+        # row left `queued`/`running` from a previous process (a crash, a kill -9,
+        # never reaching a terminal status) is swept to `failed` *before*
+        # `readiness.register` below ever makes this service visible as ready, so
+        # `count_active()` can never be poisoned by one stale row surviving a
+        # restart. Must run after `run_migrations` (it needs the table to exist).
+        if opencode is not None:
+            await anyio.to_thread.run_sync(
+                OpencodeRunRepository(db).sweep_stale_on_boot, utc_now()
+            )
+            readiness.register("opencode", opencode.is_healthy)
         readiness.register("startup", lambda: True)
         try:
             yield
@@ -251,6 +296,14 @@ def create_app(
                 heart.unload()
             if brain is not None:
                 await brain.aclose()
+            # Issue #77: cancels every in-flight run and waits (bounded by
+            # `[opencode] shutdown_timeout_seconds`) for each one's own
+            # terminate->kill to finish — "no orphan opencode process survives a
+            # clean daemon exit." Stopped last among the four, right before
+            # `db.close()`, since `OpencodeRunService.stop()` itself still needs a
+            # live `db` to record each cancelled run's final status.
+            if opencode is not None:
+                await opencode.stop()
             db.close()
 
     app = FastAPI(
@@ -278,6 +331,7 @@ def create_app(
     app.state.login_throttle = login_throttle
     app.state.oidc = oidc
     app.state.telemetry = telemetry
+    app.state.opencode = opencode
 
     # `add_middleware` inserts at the front of the stack, so registration order is
     # reversed at request time: the last one added runs outermost. BearerAuthMiddleware
@@ -315,6 +369,8 @@ def create_app(
     app.include_router(health_router)
     app.include_router(heart_router)
     app.include_router(heart_journal_router)
+    app.include_router(opencode_runs_router)
+    app.include_router(opencode_intake_router)
     app.include_router(openapi_router)
     app.include_router(oidc_router)
     app.include_router(login_router)

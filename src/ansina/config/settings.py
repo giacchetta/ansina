@@ -1078,6 +1078,20 @@ class OpencodeSettings(BaseModel):
     permission: OpencodePermissionSettings = Field(
         default_factory=OpencodePermissionSettings
     )
+    # Issue #77 — `opencode_runs`' own bounded retention, the same two-cutoff
+    # shape `JournalSettings.max_entries`/`retention_days` already use for
+    # `heart_journal`: a row is swept once it's either outside the newest
+    # `max_runs_retained` or older than `run_retention_days`, whichever bound
+    # it fails first.
+    max_runs_retained: int = Field(default=2000, ge=1)
+    run_retention_days: int = Field(default=14, ge=1)
+    # Issue #77 — whether `OpencodeRunService` starts with intake paused
+    # (`POST /opencode/runs` refused with `ansina.opencode.intake_paused`
+    # until a `POST /opencode/intake/resume`). Independent of `enabled`
+    # above: an operator can have the service constructed and observable via
+    # `GET /opencode/status` while still deliberately not accepting new work
+    # from a cold boot.
+    intake_paused_on_boot: bool = False
 
     @model_validator(mode="after")
     def _validate_run_limits(self) -> OpencodeSettings:

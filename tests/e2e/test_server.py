@@ -451,6 +451,12 @@ def test_openapi_schema(server: str) -> None:
         "/auth/oidc/login",
         "/auth/oidc/callback",
         "/auth/login",
+        "/opencode/runs",
+        "/opencode/runs/{run_id}",
+        "/opencode/runs/{run_id}/cancel",
+        "/opencode/status",
+        "/opencode/intake/pause",
+        "/opencode/intake/resume",
     }
 
 
@@ -1468,8 +1474,9 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         # provenance + the role_mappings unique index (issue #42); (8,) = the in-flight
         # OIDC login state table (issue #43); (9,) = the login-throttle table (issue
         # #49); (10,) = the heart_journal table (issue #55); (11,) = the heart_journal
-        # brain-outcome columns (issue #64) — bump this alongside `storage/migrations/`
-        # whenever a new migration lands.
+        # brain-outcome columns (issue #64); (12,) = the opencode_runs table (issue
+        # #77) — bump this alongside `storage/migrations/` whenever a new migration
+        # lands.
         assert rows == [
             (1,),
             (2,),
@@ -1482,6 +1489,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
             (9,),
             (10,),
             (11,),
+            (12,),
         ]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
@@ -1504,6 +1512,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
             (9,),
             (10,),
             (11,),
+            (12,),
         ]
 
 
@@ -1672,3 +1681,119 @@ def test_dev_mode_flag_boots_normally_and_skips_the_sidecar_when_telemetry_is_di
     assert "DEV MODE ENABLED" in output
     assert "vector sidecar not started" in output
     assert "telemetry.enabled is false" in output
+
+
+# --- issue #77: /opencode/runs, against a real subprocess --------------------------
+
+
+def test_opencode_runs_503_when_opencode_disabled(server: str) -> None:
+    response = httpx.post(f"{server}/opencode/runs", json={"prompt": "say hello"})
+
+    assert response.status_code == 503
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["code"] == "ansina.opencode.disabled"
+
+
+def test_opencode_status_503_when_opencode_disabled(server: str) -> None:
+    response = httpx.get(f"{server}/opencode/status")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "ansina.opencode.disabled"
+
+
+def test_authed_opencode_runs_requires_token(authed_server: str) -> None:
+    response = httpx.post(
+        f"{authed_server}/opencode/runs", json={"prompt": "say hello"}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+
+
+def test_authed_opencode_status_requires_token(authed_server: str) -> None:
+    response = httpx.get(f"{authed_server}/opencode/status")
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "ansina.unauthorized"
+
+
+def _fake_opencode_bin_dir(tmp_path: Path) -> Path:
+    """A directory whose `opencode` entry (a symlink) resolves to
+    `tests/e2e/fixtures/fake_opencode.py` — prepended to the daemon
+    subprocess's own `PATH` so `shutil.which("opencode")` (inside
+    `ansina.opencode.preflight.preflight()`) finds it exactly the way it would
+    find a real install, with zero production-code special-casing.
+    """
+    fixture = Path(__file__).parent / "fixtures" / "fake_opencode.py"
+    bin_dir = tmp_path / "fake-opencode-bin"
+    bin_dir.mkdir()
+    (bin_dir / "opencode").symlink_to(fixture)
+    return bin_dir
+
+
+def test_opencode_run_submission_executes_against_a_fake_binary(
+    tmp_path: Path,
+) -> None:
+    """The milestone's own load-bearing property, proven against a real
+    subprocess rather than assumed: every run submitted via `POST
+    /opencode/runs` produces a `submitted` telemetry line *before the route
+    returns* — checked here by reading the spooled `opencode.jsonl` file
+    immediately after the submission response comes back, before any polling —
+    and the run itself actually executes against `tests/e2e/fixtures/
+    fake_opencode.py` (standing in for the real `opencode` binary neither CI leg
+    installs) all the way to a terminal `succeeded` status.
+    """
+    bin_dir = _fake_opencode_bin_dir(tmp_path)
+    spool_dir = tmp_path / "telemetry-spool"
+    workspace_dir = tmp_path / "opencode-workspace"
+    env = {
+        "ANSINA_SECURITY__ADMIN_USERNAME": _E2E_ADMIN_USERNAME,
+        "ANSINA_SECURITY__API_TOKEN": _E2E_TOKEN,
+        "ANSINA_OPENCODE__ENABLED": "true",
+        "ANSINA_OPENCODE__WORKSPACE_DIR": str(workspace_dir),
+        "ANSINA_OPENCODE__REQUIRED_VERSION_PREFIX": "opencode v2.",
+        "ANSINA_TELEMETRY__ENABLED": "true",
+        "ANSINA_TELEMETRY__SPOOL_DIR": str(spool_dir),
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+    }
+
+    with _launch_server(tmp_path, env=env) as srv:
+        headers = {"Authorization": f"Bearer {_E2E_TOKEN}"}
+        submit = httpx.post(
+            f"{srv.base_url}/opencode/runs",
+            headers=headers,
+            json={"prompt": "say hello"},
+        )
+        assert submit.status_code == 202
+        run_id = submit.json()["id"]
+
+        # Read back immediately — before any polling below — so this proves the
+        # ordering rather than assuming it.
+        opencode_log = spool_dir / "opencode.jsonl"
+        assert opencode_log.exists(), (
+            "no submitted telemetry line before the route returned"
+        )
+        lines = [json.loads(line) for line in opencode_log.read_text().splitlines()]
+        own_lines = [line for line in lines if line["run_id"] == run_id]
+        assert own_lines[0]["event"] == "submitted"
+
+        deadline = time.monotonic() + 15.0
+        status = "queued"
+        while time.monotonic() < deadline:
+            page = httpx.get(f"{srv.base_url}/opencode/runs/{run_id}", headers=headers)
+            status = page.json()["status"]
+            if status not in ("queued", "running"):
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"run never reached a terminal status (last: {status!r})")
+
+    assert status == "succeeded"
+    final_lines = [
+        json.loads(line)
+        for line in opencode_log.read_text().splitlines()
+        if json.loads(line)["run_id"] == run_id
+    ]
+    events = [line["event"] for line in final_lines]
+    # submitted -> started -> (one run_event per canned fixture line) -> completed.
+    assert events == ["submitted", "started", "run_event", "run_event", "completed"]
