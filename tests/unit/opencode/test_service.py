@@ -110,6 +110,24 @@ class _HangingAgentRunner:
         raise AssertionError("unreachable — only ever cancelled, never finishes")
 
 
+class _RunnerThatEmitsThenHangs:
+    """Emits one event (so `on_event` fires at least once), then hangs the same
+    way `_HangingAgentRunner` does — lets a test observe `last_event_at` while the
+    run is still genuinely `running`, before it's ever cancelled/completed.
+    """
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def run(self, request: RunRequest, on_event: OnEvent) -> RunOutcome:
+        on_event(
+            RunEvent(type=RunEventType.OTHER, raw_type="x", payload="{}", sequence=0)
+        )
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable — only ever cancelled, never finishes")
+
+
 class _UncancellableAgentRunner:
     """Ignores exactly one cancellation — enough to still be pending when
     `stop()`'s own bounded `asyncio.wait(..., timeout=...)` gives up (exercising
@@ -519,3 +537,87 @@ def test_build_opencode_run_service_returns_a_real_service_on_a_clean_pass(
 
     assert isinstance(service, OpencodeRunService)
     assert service.is_healthy() is True
+
+
+# --- issue #78: the `OpencodeStateProbe` surface ------------------------------------
+
+
+def test_counts_by_status_delegates_to_the_repository(
+    db: Database, tmp_path: Path
+) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+
+    assert service.counts_by_status() == repository.counts_by_status()
+
+
+async def test_running_runs_reports_started_at_with_no_last_event_at_before_any_event(
+    db: Database, tmp_path: Path
+) -> None:
+    runner = _HangingAgentRunner()
+    service, _repository = _service(db, tmp_path, runner=runner)
+
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await asyncio.wait_for(runner.started.wait(), timeout=2.0)
+
+    snapshots = service.running_runs()
+
+    assert len(snapshots) == 1
+    assert snapshots[0].id == run.id
+    assert snapshots[0].started_at is not None
+    assert snapshots[0].last_event_at is None
+    await service.stop()
+
+
+async def test_running_runs_reports_last_event_at_once_an_event_has_arrived(
+    db: Database, tmp_path: Path
+) -> None:
+    runner = _RunnerThatEmitsThenHangs()
+    service, _repository = _service(db, tmp_path, runner=runner)
+
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await asyncio.wait_for(runner.started.wait(), timeout=2.0)
+
+    snapshots = service.running_runs()
+
+    assert snapshots[0].id == run.id
+    assert snapshots[0].last_event_at is not None
+    await service.stop()
+
+
+async def test_last_event_at_is_forgotten_once_a_run_reaches_a_terminal_status(
+    db: Database, tmp_path: Path
+) -> None:
+    """`_forget_task`'s done-callback pops `_last_event_at` the same way it already
+    pops `_tasks` — this run's own in-memory tracking must not grow unbounded.
+    """
+    event = RunEvent(
+        type=RunEventType.OTHER, raw_type="tool_call", payload="{}", sequence=0
+    )
+    runner = _FakeAgentRunner(events=[event])
+    service, repository = _service(db, tmp_path, runner=runner)
+
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await _wait_until(lambda: repository.get(run.id).status == "succeeded")  # type: ignore[union-attr]
+    # Let the done-callback actually run — it fires on the next loop iteration
+    # after the task finishes, not synchronously at that moment (the same
+    # reasoning `test_cancel_returns_false_for_an_already_terminal_run` documents).
+    await asyncio.sleep(0)
+
+    assert run.id not in service._last_event_at
+    assert service.running_runs() == []
+
+
+async def test_recent_outcome_counts_delegates_to_the_repository(
+    db: Database, tmp_path: Path
+) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+    since = "2020-01-01T00:00:00.000Z"
+
+    counts = service.recent_outcome_counts(since=since)
+    failed, timeout, permission_denied = repository.recent_outcome_counts(since)
+
+    assert (counts.failed, counts.timeout, counts.permission_denied) == (
+        failed,
+        timeout,
+        permission_denied,
+    )

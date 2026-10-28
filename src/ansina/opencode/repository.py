@@ -258,6 +258,64 @@ class OpencodeRunRepository:
         )
         return int(count)
 
+    def counts_by_status(self) -> dict[str, int]:
+        """`{"queued": n, "running": n}` — one `GROUP BY` query against
+        `idx_opencode_runs_status`, never a per-run scan. Issue #78's
+        `OpencodeStateSource` needs the two counts split (unlike `count_active()`'s
+        single combined total) so it can report them separately in its activity
+        item; a status with zero current rows is omitted from the result rather
+        than reported as an explicit `0`, so the caller decides the default.
+        """
+        rows = self._db.connection().execute(
+            "SELECT status, COUNT(*) FROM opencode_runs "
+            "WHERE status IN (?, ?) GROUP BY status",
+            _ACTIVE_STATUSES,
+        )
+        return {row["status"]: int(row[1]) for row in rows}
+
+    def list_running(self) -> list[OpencodeRun]:
+        """Every `status = 'running'` row — the same `idx_opencode_runs_status`
+        index `count_active()`/`counts_by_status()` already use, naturally bounded
+        by `[opencode] max_concurrent_runs` (small). Backs issue #78's
+        `OpencodeStateSource`'s stalled-run detection, which needs each running
+        run's own `started_at` (and, from the service's in-memory tracking, its
+        `last_event_at`) — not just a count.
+        """
+        rows = (
+            self._db.connection()
+            .execute("SELECT * FROM opencode_runs WHERE status = 'running'")
+            .fetchall()
+        )
+        return [OpencodeRun.from_row(row) for row in rows]
+
+    def recent_outcome_counts(self, since: str) -> tuple[int, int, int]:
+        """`(failed_count, timeout_count, permission_denied_total)` for every row
+        with `created_at > since` — one query against `idx_opencode_runs_created_at`
+        (a `created_at` range scan), never a per-run scan. `permission_denied_total`
+        sums `permission_denied_count` across every recent row regardless of status
+        (a run can rack up denials without ever failing outright), not just the
+        failed/timeout ones — it will read `0` until a future issue actually
+        populates that column (see `OpencodeRunService`'s own module docstring on
+        why it's still reserved), which this method deliberately does not paper
+        over.
+        """
+        row = (
+            self._db.connection()
+            .execute(
+                """
+            SELECT
+                COUNT(CASE WHEN status = 'failed' THEN 1 END),
+                COUNT(CASE WHEN status = 'timeout' THEN 1 END),
+                COALESCE(SUM(permission_denied_count), 0)
+            FROM opencode_runs
+            WHERE created_at > ?
+            """,
+                (since,),
+            )
+            .fetchone()
+        )
+        return (int(row[0]), int(row[1]), int(row[2]))
+
     def sweep(self, now: datetime, *, max_entries: int, retention_days: int) -> int:
         """Deletes every row that is either older than `retention_days` *or* outside
         the newest `max_entries` — the same two-independent-bounds reasoning

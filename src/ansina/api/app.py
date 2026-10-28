@@ -137,13 +137,17 @@ def create_app(
     default) — the same "`None` when off" shape `heart`/`brain`/`oidc` already use.
     `opencode_factory` (default `ansina.opencode.service.build_opencode_run_service`,
     issue #77) is gated by `opencode.enabled` alone, independently of `heart`/
-    `tick_loop`/`telemetry` above — built with `db=db`, the same "needs a repository
+    `tick_loop`/`telemetry` below — built with `db=db`, the same "needs a repository
     handle at construction time" shape `oidc_factory` already has, rather than
     `heart_factory`/`brain_factory`'s bare `(settings,)`. `None`-when-off is
     enforced twice: here by the `if resolved_settings.opencode.enabled:` gate, and
     again inside `build_opencode_run_service` itself when its own upstream
     preflight/telemetry factories return `None` — `app.state.opencode` is `None`
-    either way.
+    either way. Built *before* `tick_loop_factory` is called (reordered for issue
+    #78, the same move issue #64 made for `brain`) so it can be passed straight
+    through: when `opencode` is not `None`, `build_tick_loop` registers an
+    observe-only `OpencodeStateSource` (issue #78) alongside its existing
+    `DaemonStateSource`/`RecentJournalSource`.
     """
     resolved_settings = settings if settings is not None else load_settings()
     readiness = Readiness()
@@ -185,10 +189,32 @@ def create_app(
     if resolved_settings.brain.enabled:
         brain = brain_factory(resolved_settings)
 
+    # Issue #77: independent of `heart`/`tick_loop`/`telemetry` below — built here,
+    # the same "assemble up front" shape, though like `telemetry` this never raises
+    # at construction time: `build_opencode_run_service` delegates to
+    # `build_opencode_service`'s own preflight, which resolves to `None` (a logged
+    # skip) on any failed check rather than a boot-time `ConfigError`. Gated on
+    # `resolved_settings.opencode.enabled` alone, not re-checked against
+    # `telemetry.enabled` here — `Settings._refuse_unobserved_executor` already
+    # refuses to construct a `Settings` tree where `opencode.enabled` is `True` and
+    # `telemetry.enabled` is `False`, so this gate can never admit an unobserved
+    # executor. Built *before* `tick_loop` (reordered for issue #78, the same move
+    # #64 made for `brain`) so it can be passed straight through: when `opencode` is
+    # not `None`, `build_tick_loop` registers an observe-only `OpencodeStateSource`
+    # alongside `DaemonStateSource`/`RecentJournalSource`.
+    opencode: OpencodeRunService | None = None
+    if resolved_settings.opencode.enabled:
+        opencode = opencode_factory(resolved_settings, db=db)
+
     tick_loop: TickController | None = None
     if heart is not None and resolved_settings.heart.tick.enabled:
         tick_loop = tick_loop_factory(
-            resolved_settings, heart, db=db, readiness=readiness, brain=brain
+            resolved_settings,
+            heart,
+            db=db,
+            readiness=readiness,
+            brain=brain,
+            opencode=opencode,
         )
 
     # Issue #61: independent of `heart.enabled` — see `create_app`'s own docstring
@@ -199,20 +225,6 @@ def create_app(
     telemetry: TelemetrySamplerLifecycle | None = None
     if resolved_settings.telemetry.enabled:
         telemetry = telemetry_factory(resolved_settings, tick=tick_loop)
-
-    # Issue #77: independent of `heart`/`tick_loop`/`telemetry` above — built here,
-    # the same "assemble up front" shape, though like `telemetry` this never raises
-    # at construction time: `build_opencode_run_service` delegates to
-    # `build_opencode_service`'s own preflight, which resolves to `None` (a logged
-    # skip) on any failed check rather than a boot-time `ConfigError`. Gated on
-    # `resolved_settings.opencode.enabled` alone, not re-checked against
-    # `telemetry.enabled` here — `Settings._refuse_unobserved_executor` already
-    # refuses to construct a `Settings` tree where `opencode.enabled` is `True` and
-    # `telemetry.enabled` is `False`, so this gate can never admit an unobserved
-    # executor.
-    opencode: OpencodeRunService | None = None
-    if resolved_settings.opencode.enabled:
-        opencode = opencode_factory(resolved_settings, db=db)
 
     if not resolved_settings.security.enabled:
         logger.warning(

@@ -34,6 +34,8 @@ from ansina.opencode.runner import AgentRunner, OpencodeCliRunner
 from ansina.opencode.service import (
     OpencodeRunService,
     OpencodeRunServiceFactory,
+    RecentOutcomeCounts,
+    RunningRunSnapshot,
     build_opencode_run_service,
 )
 from ansina.opencode.telemetry import (
@@ -73,11 +75,13 @@ __all__ = [
     "OpencodeRunService",
     "OpencodeRunServiceFactory",
     "OpencodeTelemetryWriter",
+    "RecentOutcomeCounts",
     "RunEvent",
     "RunEventType",
     "RunOutcome",
     "RunRequest",
     "RunStatus",
+    "RunningRunSnapshot",
     "build_opencode_env",
     "build_opencode_run_service",
     "build_opencode_service",

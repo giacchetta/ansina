@@ -99,6 +99,16 @@ auto_pause_enabled = true
 # 8-hour soak found zero false escalates, so no dedup/cooldown rung gates this.
 escalate_to_brain = false
 
+# OpencodeStateSource (issue #78): how long a running OpenCode run may go with no
+# new event (from last_event_at, falling back to started_at) before it's reported
+# as stalled rather than merely long-running — a run that keeps producing events
+# never counts as stalled no matter how long it's been running.
+opencode_stall_seconds = 300.0
+
+# The window OpencodeStateSource's recent-outcomes item scores failed/timed-out/
+# permission-denied OpenCode runs over.
+opencode_recent_window_minutes = 15
+
 [heart.tick.fault_injection]
 # A soak/dev-only mode (issue #72) that forces real, scheduled tick faults — a
 # readiness check failing, consecutive tick failures, or consecutive tick overruns

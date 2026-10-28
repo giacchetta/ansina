@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import threading
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,10 @@ from ansina.heart.tick.loop import (
 )
 from ansina.heart.tick.snapshot import TickPrompt
 from ansina.heart.tick.sources.daemon_state import DaemonStateSource
+from ansina.heart.tick.sources.opencode_state import (
+    OpencodeStateSource,
+    RunningRunState,
+)
 from ansina.heart.tick.sources.recent_journal import RecentJournalSource
 from ansina.storage.database import Database
 
@@ -631,7 +636,9 @@ def test_build_tick_loop_wires_settings_into_the_loop(
     settings = load_settings()
     heart = _FakeHeart()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert loop._interval == 12.5
     assert loop._max_output_tokens == 77
@@ -646,7 +653,9 @@ def test_build_tick_loop_uses_journal_decision_handler_by_default(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, JournalDecisionHandler)
 
@@ -657,11 +666,99 @@ def test_build_tick_loop_registers_the_daemon_state_and_recent_journal_sources(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert len(loop._sources) == 2
     assert isinstance(loop._sources[0], DaemonStateSource)
     assert isinstance(loop._sources[1], RecentJournalSource)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _FakeOutcomeCounts:
+    failed: int = 0
+    timeout: int = 0
+    permission_denied: int = 0
+
+
+class _FakeOpencodeProbe:
+    """A minimal `OpencodeStateProbe` double — satisfies the Protocol structurally.
+    Declared return types reference the Protocols themselves
+    (`RunningRunState`/`OutcomeCounts`, both from `ansina.heart`), never a concrete
+    `ansina.opencode` type — this test file stays on the `ansina.heart` side of the
+    boundary, same as the probe's own module.
+    """
+
+    intake_paused = False
+
+    def counts_by_status(self) -> dict[str, int]:
+        return {}
+
+    def running_runs(self) -> Sequence[RunningRunState]:
+        return []
+
+    def recent_outcome_counts(self, *, since: str) -> _FakeOutcomeCounts:
+        return _FakeOutcomeCounts()
+
+
+def test_build_tick_loop_registers_no_opencode_source_when_hands_are_off(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    """AC: the Heart-on/Hands-off registered-source list must be unchanged — the
+    exact same two sources (`DaemonStateSource`/`RecentJournalSource`), not merely
+    an equivalent-looking three.
+    """
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
+
+    assert len(loop._sources) == 2
+
+
+def test_build_tick_loop_registers_the_opencode_state_source_when_hands_exist(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert len(loop._sources) == 3
+    assert isinstance(loop._sources[2], OpencodeStateSource)
+
+
+def test_build_tick_loop_wires_opencode_thresholds_from_settings(
+    clean_env: None, tmp_cwd: Path, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_STALL_SECONDS", "123")
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_RECENT_WINDOW_MINUTES", "7")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    source = loop._sources[2]
+    assert isinstance(source, OpencodeStateSource)
+    assert source._stall_seconds == 123.0
+    assert source._recent_window_minutes == 7
 
 
 # --- CompositeDecisionHandler (issue #64) -------------------------------------------
@@ -719,7 +816,9 @@ def test_build_tick_loop_escalate_to_brain_defaults_false_bare_journal_handler(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, JournalDecisionHandler)
     assert not isinstance(loop._handler, CompositeDecisionHandler)
@@ -732,7 +831,9 @@ def test_build_tick_loop_escalate_to_brain_true_composes_brain_handler(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, CompositeDecisionHandler)
 
@@ -761,6 +862,7 @@ async def test_escalate_to_brain_false_never_calls_the_brain_end_to_end(
         db=db,
         readiness=Readiness(),
         brain=_FailingBrainProvider(),  # type: ignore[arg-type]
+        opencode=None,
     )
 
     outcome = await loop.tick_once()
@@ -804,6 +906,7 @@ async def test_escalate_to_brain_true_journals_two_rows_and_never_trips_the_brea
         db=db,
         readiness=Readiness(),
         brain=_ErroringBrainProvider(),  # type: ignore[arg-type]
+        opencode=None,
     )
 
     outcome = await loop.tick_once()
@@ -838,7 +941,9 @@ def test_build_tick_loop_fault_injection_disabled_by_default_is_a_noop(
     settings = load_settings()
     readiness = Readiness()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=readiness, brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=readiness, brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, JournalDecisionHandler)
     assert not isinstance(loop._handler, CompositeDecisionHandler)
@@ -870,7 +975,9 @@ def test_build_tick_loop_fault_injection_enabled_composes_injector(
     settings = load_settings()
     readiness = Readiness()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=readiness, brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=readiness, brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, CompositeDecisionHandler)
     assert len(loop._sources) == 3
@@ -897,7 +1004,9 @@ def test_build_tick_loop_fault_injection_composes_after_the_brain_handler(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, CompositeDecisionHandler)
     handlers = loop._handler._handlers
@@ -935,7 +1044,9 @@ def test_build_tick_loop_warns_when_a_fault_window_may_trip_the_breaker(
     settings = load_settings()
 
     with caplog.at_level(logging.WARNING):
-        build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+        build_tick_loop(
+            settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+        )
 
     assert any(
         "may trip the circuit breaker" in record.message for record in caplog.records
@@ -972,7 +1083,9 @@ def test_build_tick_loop_does_not_warn_when_auto_pause_is_disabled(
     settings = load_settings()
 
     with caplog.at_level(logging.WARNING):
-        build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+        build_tick_loop(
+            settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+        )
 
     assert not any(
         "may trip the circuit breaker" in record.message for record in caplog.records
@@ -1013,7 +1126,9 @@ async def test_fault_injection_end_to_end_prompt_reports_a_real_readiness_failur
     heart = _CapturingHeart(context_tokens=8192, max_output_tokens=512)
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
     await loop.tick_once()
 
     assert len(captured_prompts) == 1

@@ -36,6 +36,7 @@ import asyncio
 import contextlib
 import functools
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -77,6 +78,35 @@ _TERMINAL_STATUS_BY_RUN_STATUS: dict[RunStatus, str] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class RunningRunSnapshot:
+    """One `running` run's own activity, for issue #78's `OpencodeStateSource`
+    stalled-run detection — `started_at` (persisted, from `opencode_runs`) plus
+    `last_event_at` (in-memory only, see `OpencodeRunService._last_event_at`'s own
+    docstring; `None` when no event has arrived for this run yet, in which case the
+    source falls back to `started_at`). Satisfies
+    `heart.tick.sources.opencode_state.RunningRunState` structurally — this module
+    never imports that one, the same "duck typing across the heart/opencode
+    boundary" shape `TickStats`/`TickLoop` already establish.
+    """
+
+    id: str
+    started_at: str | None
+    last_event_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecentOutcomeCounts:
+    """`failed`/`timeout`/`permission_denied` counts over some recent window —
+    satisfies `heart.tick.sources.opencode_state.OutcomeCounts` structurally, the
+    same reasoning as `RunningRunSnapshot` above.
+    """
+
+    failed: int
+    timeout: int
+    permission_denied: int
+
+
 class OpencodeRunServiceFactory(Protocol):
     """The shape of `build_opencode_run_service` (and any test double standing in
     for it) — `create_app`'s `opencode_factory` parameter. A plain `Callable[...]`
@@ -112,6 +142,14 @@ class OpencodeRunService:
         self._clock = clock
         self._intake_paused = settings.intake_paused_on_boot
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        # Issue #78: each currently-running run's own last-event timestamp, kept
+        # *only* in memory — `opencode_runs` has no `last_event_at` column (that
+        # issue's own AC explicitly ships no migration), and persisting a value
+        # that's rewritten on every single `RunEvent` would be the wrong trade
+        # anyway. Populated by `_execute`'s `on_event` closure, popped on that run's
+        # own terminal transition (`_forget_last_event`) so this never grows
+        # unbounded — the same per-run cleanup shape `_forget_task` already uses.
+        self._last_event_at: dict[str, str] = {}
 
     @property
     def repository(self) -> OpencodeRunRepository:
@@ -120,6 +158,42 @@ class OpencodeRunService:
         for every repository read.
         """
         return self._repository
+
+    # --- issue #78: the `OpencodeStateProbe` surface ---------------------------
+    #
+    # All three methods below are deliberately *synchronous*, unlike the rest of
+    # this class: `heart.tick.snapshot.StateSnapshotSource.collect()` is a sync
+    # Protocol, and `TickLoop.tick_once()` already offloads the *whole* snapshot
+    # collection via `anyio.to_thread.run_sync` — so a probe method awaiting here
+    # would be awaiting from inside a worker thread with no running event loop.
+    # The same reasoning `DaemonStateSource`'s `HealthProbe`/`ReadinessProbe` calls
+    # already rely on (`Database.is_healthy`/`Readiness.snapshot` are sync despite
+    # living in an async app).
+
+    def counts_by_status(self) -> dict[str, int]:
+        return self._repository.counts_by_status()
+
+    def running_runs(self) -> list[RunningRunSnapshot]:
+        """Every currently-`running` row, each paired with this service's own
+        in-memory `last_event_at` for that run id (`None` if no event has arrived
+        yet — `OpencodeStateSource` falls back to `started_at` in that case).
+        """
+        return [
+            RunningRunSnapshot(
+                id=run.id,
+                started_at=run.started_at,
+                last_event_at=self._last_event_at.get(run.id),
+            )
+            for run in self._repository.list_running()
+        ]
+
+    def recent_outcome_counts(self, *, since: str) -> RecentOutcomeCounts:
+        failed, timeout, permission_denied = self._repository.recent_outcome_counts(
+            since
+        )
+        return RecentOutcomeCounts(
+            failed=failed, timeout=timeout, permission_denied=permission_denied
+        )
 
     @property
     def intake_paused(self) -> bool:
@@ -193,6 +267,12 @@ class OpencodeRunService:
 
     def _forget_task(self, _task: asyncio.Task[None], *, run_id: str) -> None:
         self._tasks.pop(run_id, None)
+        # Issue #78: cleaned up here, not only on `_execute`'s own two "normal"
+        # terminal paths — a done-callback fires on *every* way a task ends
+        # (`CancelledError`, a clean return, or an exception `_execute` itself
+        # doesn't catch), so this is the one place that's guaranteed to run
+        # regardless, the same reasoning `self._tasks.pop` above already relies on.
+        self._last_event_at.pop(run_id, None)
 
     async def _update_status(
         self,
@@ -243,6 +323,12 @@ class OpencodeRunService:
 
             def on_event(event: RunEvent) -> None:
                 counters["event_count"] += 1
+                # Issue #78: every event, classified or not, counts as activity —
+                # `OpencodeStateSource`'s stalled-run detection cares whether the
+                # child is still producing *anything*, not whether this codebase has
+                # learned to classify it yet (`ansina.opencode.events`'s own
+                # intentionally empty lookup table).
+                self._last_event_at[run_id] = iso(self._clock())
                 if self._telemetry is not None:
                     self._telemetry.record_event(run_id, request.session_id, event)
 

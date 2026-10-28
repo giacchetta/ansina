@@ -193,6 +193,21 @@ class TickSettings(BaseModel):
         default_factory=FaultInjectionSettings
     )
 
+    # Issue #78: `heart.tick.sources.opencode_state.OpencodeStateSource`'s two
+    # thresholds. `opencode_stall_seconds` is how long a `running` run may go with no
+    # new event (measured from `last_event_at`, falling back to `started_at` when no
+    # event has arrived yet) before that source reports it as stalled rather than
+    # merely long-running — a run that keeps producing events stays healthy no matter
+    # how long it's been running. `opencode_recent_window_minutes` bounds the window
+    # `recent_outcome_counts` scores failures/timeouts/permission-denials over, the
+    # same "recent, not lifetime" framing `TickLoop`'s own *consecutive* breaker
+    # gauges use for tick faults. Both are read even when `[opencode] enabled` is
+    # `false` (the field exists regardless) but have no effect then —
+    # `OpencodeStateSource` is only ever registered when `build_tick_loop` is handed
+    # a non-`None` probe.
+    opencode_stall_seconds: float = Field(default=300.0, gt=0)
+    opencode_recent_window_minutes: int = Field(default=15, ge=1)
+
 
 class JournalSettings(BaseModel):
     """The `heart_journal` table's bounded retention and replay size, consumed by

@@ -282,3 +282,105 @@ def test_sweep_stale_on_boot_fails_queued_and_running_rows(db: Database) -> None
 
 def test_sweep_stale_on_boot_on_an_empty_table_sweeps_nothing(db: Database) -> None:
     assert OpencodeRunRepository(db).sweep_stale_on_boot(_NOW) == 0
+
+
+# --- issue #78: the three `OpencodeStateSource` read methods -----------------------
+
+
+def test_counts_by_status_splits_queued_and_running(db: Database) -> None:
+    repository = OpencodeRunRepository(db)
+    repository.create(created_at=iso(_NOW), prompt="queued-1")
+    repository.create(created_at=iso(_NOW), prompt="queued-2")
+    running = repository.create(created_at=iso(_NOW), prompt="running")
+    repository.update_status(running.id, "running", started_at=iso(_NOW))
+    succeeded = repository.create(created_at=iso(_NOW), prompt="succeeded")
+    repository.update_status(succeeded.id, "running", started_at=iso(_NOW))
+    repository.update_status(succeeded.id, "succeeded", completed_at=iso(_NOW))
+
+    counts = repository.counts_by_status()
+
+    assert counts == {"queued": 2, "running": 1}
+
+
+def test_counts_by_status_on_an_empty_table_returns_an_empty_mapping(
+    db: Database,
+) -> None:
+    assert OpencodeRunRepository(db).counts_by_status() == {}
+
+
+def test_counts_by_status_omits_a_status_with_zero_rows(db: Database) -> None:
+    repository = OpencodeRunRepository(db)
+    repository.create(created_at=iso(_NOW), prompt="queued-only")
+
+    counts = repository.counts_by_status()
+
+    assert counts == {"queued": 1}
+    assert "running" not in counts
+
+
+def test_list_running_returns_only_running_rows(db: Database) -> None:
+    repository = OpencodeRunRepository(db)
+    repository.create(created_at=iso(_NOW), prompt="queued")
+    running = repository.create(created_at=iso(_NOW), prompt="running")
+    repository.update_status(running.id, "running", started_at=iso(_NOW))
+    succeeded = repository.create(created_at=iso(_NOW), prompt="succeeded")
+    repository.update_status(succeeded.id, "running", started_at=iso(_NOW))
+    repository.update_status(succeeded.id, "succeeded", completed_at=iso(_NOW))
+
+    rows = repository.list_running()
+
+    assert [r.id for r in rows] == [running.id]
+
+
+def test_list_running_on_an_empty_table_returns_an_empty_list(db: Database) -> None:
+    assert OpencodeRunRepository(db).list_running() == []
+
+
+def test_recent_outcome_counts_sums_failed_timeout_and_permission_denied(
+    db: Database,
+) -> None:
+    repository = OpencodeRunRepository(db)
+    failed = repository.create(created_at=iso(_NOW), prompt="failed")
+    repository.update_status(failed.id, "running", started_at=iso(_NOW))
+    repository.update_status(
+        failed.id,
+        "failed",
+        completed_at=iso(_NOW),
+        error_detail="boom",
+        permission_denied_count=2,
+    )
+    timed_out = repository.create(created_at=iso(_NOW), prompt="timeout")
+    repository.update_status(timed_out.id, "running", started_at=iso(_NOW))
+    repository.update_status(
+        timed_out.id, "timeout", completed_at=iso(_NOW), permission_denied_count=1
+    )
+    succeeded = repository.create(created_at=iso(_NOW), prompt="succeeded")
+    repository.update_status(succeeded.id, "running", started_at=iso(_NOW))
+    repository.update_status(
+        succeeded.id, "succeeded", completed_at=iso(_NOW), permission_denied_count=5
+    )
+
+    since = iso(_NOW.replace(year=_NOW.year - 1))
+    failed_count, timeout_count, permission_denied_total = (
+        repository.recent_outcome_counts(since)
+    )
+
+    assert failed_count == 1
+    assert timeout_count == 1
+    # Summed across *every* recent row regardless of status, not just failed/timeout.
+    assert permission_denied_total == 2 + 1 + 5
+
+
+def test_recent_outcome_counts_excludes_rows_at_or_before_since(db: Database) -> None:
+    repository = OpencodeRunRepository(db)
+    old = repository.create(created_at=iso(_NOW), prompt="old-failure")
+    repository.update_status(old.id, "running", started_at=iso(_NOW))
+    repository.update_status(old.id, "failed", completed_at=iso(_NOW))
+
+    counts = repository.recent_outcome_counts(iso(_NOW))
+
+    assert counts == (0, 0, 0)
+
+
+def test_recent_outcome_counts_on_an_empty_table_is_all_zero(db: Database) -> None:
+    assert OpencodeRunRepository(db).recent_outcome_counts(iso(_NOW)) == (0, 0, 0)
