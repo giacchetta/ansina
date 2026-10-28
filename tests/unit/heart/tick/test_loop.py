@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 from collections.abc import AsyncGenerator, Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from ansina.heart.tick.loop import (
     _next_tick_number,
     build_tick_loop,
 )
+from ansina.heart.tick.opencode_intervention_handler import OpencodeInterventionHandler
 from ansina.heart.tick.snapshot import TickPrompt
 from ansina.heart.tick.sources.daemon_state import DaemonStateSource
 from ansina.heart.tick.sources.opencode_state import (
@@ -34,6 +36,7 @@ from ansina.heart.tick.sources.opencode_state import (
     RunningRunState,
 )
 from ansina.heart.tick.sources.recent_journal import RecentJournalSource
+from ansina.opencode.repository import OpencodeRun
 from ansina.storage.database import Database
 
 
@@ -688,6 +691,12 @@ class _FakeOpencodeProbe:
     (`RunningRunState`/`OutcomeCounts`, both from `ansina.heart`), never a concrete
     `ansina.opencode` type — this test file stays on the `ansina.heart` side of the
     boundary, same as the probe's own module.
+
+    Issue #79 widens this with the three `OpencodeInterventionTarget`-only
+    methods (`recent_retryable_runs`/`apply_intervention`/
+    `record_intervention_telemetry`) — never called by any test exercising
+    `opencode_interventions = false` (the default), so adding them is purely
+    additive for the pre-#79 tests above.
     """
 
     intake_paused = False
@@ -700,6 +709,25 @@ class _FakeOpencodeProbe:
 
     def recent_outcome_counts(self, *, since: str) -> _FakeOutcomeCounts:
         return _FakeOutcomeCounts()
+
+    def recent_retryable_runs(self, *, since: str) -> Sequence[OpencodeRun]:
+        return []
+
+    async def apply_intervention(
+        self, run_id: str | None, action: object
+    ) -> tuple[str, str]:
+        return ("applied", "fake")
+
+    def record_intervention_telemetry(
+        self,
+        run_id: str | None,
+        action: object,
+        outcome: str,
+        *,
+        detail: str,
+        session_id: str | None = None,
+    ) -> None:
+        pass
 
 
 def test_build_tick_loop_registers_no_opencode_source_when_hands_are_off(
@@ -921,6 +949,152 @@ async def test_escalate_to_brain_true_journals_two_rows_and_never_trips_the_brea
     assert loop.failures_total == 0
     assert loop.consecutive_failures == 0
     assert loop.paused is False
+
+
+# --- build_tick_loop: opencode_interventions gating (issue #79) --------------------
+
+
+def test_build_tick_loop_opencode_interventions_defaults_false_bare_journal_handler(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    """`opencode_interventions = false` (the default) must leave `decision_handler`
+    as the exact `JournalDecisionHandler` instance this function has always
+    built — the same verified-no-op discipline `escalate_to_brain` already
+    established — even when a real `opencode` probe is supplied.
+    """
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, JournalDecisionHandler)
+    assert not isinstance(loop._handler, CompositeDecisionHandler)
+
+
+def test_build_tick_loop_opencode_interventions_true_with_no_opencode_is_still_a_noop(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    """The flag alone is not enough — `opencode is None` (the executor disabled
+    or its preflight failed) must still leave the bare `JournalDecisionHandler`.
+    """
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
+
+    assert isinstance(loop._handler, JournalDecisionHandler)
+    assert not isinstance(loop._handler, CompositeDecisionHandler)
+
+
+def test_build_tick_loop_opencode_interventions_true_composes_the_handler(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    assert any(
+        isinstance(handler, OpencodeInterventionHandler)
+        for handler in loop._handler._handlers
+    )
+
+
+def test_build_tick_loop_composes_journal_then_opencode_then_fault_injector(
+    clean_env: None,
+    tmp_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db: Database,
+    tmp_path: Path,
+) -> None:
+    """The issue's own explicit composition instruction: journal (and brain
+    escalation, if enabled) first, the opencode intervention handler next,
+    `FaultInjector` last.
+    """
+
+    schedule_path = tmp_path / "schedule.json"
+    _write_schedule(
+        schedule_path,
+        [
+            {
+                "id": "w1",
+                "fault": "tick_failure",
+                "at_tick": 1,
+                "duration_ticks": 1,
+                "expected_decision": "idle",
+            }
+        ],
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", str(schedule_path)
+    )
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    types = [type(handler) for handler in loop._handler._handlers]
+    assert types == [JournalDecisionHandler, OpencodeInterventionHandler, FaultInjector]
+
+
+def test_build_tick_loop_binds_the_intervention_policy_to_the_loop(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    """The chicken-and-egg fix `FaultInjector.bind()` already established — the
+    policy must be callable (not raise "bind() must be called before use") once
+    the loop it was composed into actually exists.
+    """
+
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    handler = next(
+        h for h in loop._handler._handlers if isinstance(h, OpencodeInterventionHandler)
+    )
+    # Must not raise — proves `bind(loop)` was actually called.
+    decision = handler._policy.decide(_FakeOpencodeProbe(), now=datetime.now(UTC))
+    assert decision is None
 
 
 # --- build_tick_loop: fault injection wiring (issue #72) ----------------------------

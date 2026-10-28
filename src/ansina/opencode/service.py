@@ -51,6 +51,11 @@ from ansina.errors import (
 )
 from ansina.logging import get_logger
 from ansina.opencode.events import RunRequest, RunStatus
+from ansina.opencode.interventions import (
+    OpencodeAction,
+    build_nudge_request,
+    build_retry_request,
+)
 from ansina.opencode.preflight import build_opencode_service
 from ansina.opencode.repository import OpencodeRun, OpencodeRunRepository
 from ansina.opencode.telemetry import (
@@ -62,6 +67,12 @@ if TYPE_CHECKING:
     from ansina.opencode.events import RunEvent
     from ansina.opencode.runner import AgentRunner, OnEvent
     from ansina.storage.database import Database
+
+# issue #79: runs eligible for `OpencodeAction.RETRY` — a run that never actually
+# completed cleanly. `cancelled` is deliberately excluded: a cancellation is an
+# operator/shutdown decision, not a failure the Heart should second-guess by
+# resubmitting it.
+_RETRYABLE_STATUSES = frozenset({"failed", "timeout"})
 
 logger = get_logger(__name__)
 
@@ -187,6 +198,14 @@ class OpencodeRunService:
             for run in self._repository.list_running()
         ]
 
+    def recent_retryable_runs(self, *, since: str) -> list[OpencodeRun]:
+        """Issue #79: the read `DeterministicInterventionPolicy` scans for an
+        `OpencodeAction.RETRY` candidate — synchronous, same reasoning as the
+        three `OpencodeStateProbe` methods above (called from inside a worker
+        thread the caller itself offloaded to, never from the event loop
+        directly)."""
+        return self._repository.recent_retryable_runs(since)
+
     def recent_outcome_counts(self, *, since: str) -> RecentOutcomeCounts:
         failed, timeout, permission_denied = self._repository.recent_outcome_counts(
             since
@@ -221,13 +240,22 @@ class OpencodeRunService:
         """
         return True
 
-    async def submit(self, request: RunRequest) -> OpencodeRun:
+    async def submit(
+        self, request: RunRequest, *, retry_of: str | None = None
+    ) -> OpencodeRun:
         """Validate, persist a `queued` row, emit the `submitted` telemetry line,
         then launch (and track) a background task that actually drives the run.
         Raises `OpencodeIntakePausedError` (409)/`OpencodeRunFailedError` (400, via
         the shared `ansina.request.invalid` code at the route layer)/
         `OpencodeBusyError` (429) — all three *before* any `opencode_runs` row is
         created, so a refusal never leaves a `queued` row sitting there.
+
+        `retry_of` (issue #79) is `None` for every pre-#79 call site (the route) —
+        `apply_intervention()`'s own `RETRY`/`NUDGE` branches below are the only
+        callers that pass a value, recording which earlier run this one
+        resubmits/continues via the already-reserved `opencode_runs.retry_of`
+        column (see `0012_opencode_runs.sql`'s own "a later retry action's
+        self-reference" comment).
         """
         if self._intake_paused:
             raise OpencodeIntakePausedError(
@@ -255,6 +283,7 @@ class OpencodeRunService:
                 session_id=request.session_id,
                 model=request.model,
                 agent=request.agent,
+                retry_of=retry_of,
             )
         )
         if self._telemetry is not None:
@@ -398,6 +427,136 @@ class OpencodeRunService:
                     "shutdown_timeout_seconds, abandoning them",
                     extra={"pending_count": len(pending)},
                 )
+
+    async def apply_intervention(
+        self, run_id: str | None, action: OpencodeAction
+    ) -> tuple[str, str]:
+        """The one seam `heart.tick.opencode_intervention_handler
+        .OpencodeInterventionHandler` calls for every `OpencodeAction` except
+        `ESCALATE_TO_BRAIN` (which the handler itself dispatches directly against
+        a `BrainProvider` — this service has no such dependency and none is
+        added for this issue). Signature is deliberately `(run_id: str | None,
+        action: OpencodeAction)` and nothing else — issue #79's own structural
+        safety test asserts no caller ever passes free-text/model-authored
+        content through this method. `run_id` is `None` only for
+        `OpencodeAction.PAUSE_INTAKE` when the policy found no single
+        representative run — every other action always names a real run.
+
+        Returns `(status, detail)` where `status` is one of `"applied"`/
+        `"declined"`/`"unsupported"`/`"error"` — the exact string values of
+        `ansina.heart.journal.OpencodeInterventionStatus`, returned as plain
+        strings rather than that enum so this module (`ansina.opencode`) never
+        imports `ansina.heart` (the same acyclic, heart-imports-down-into-
+        opencode direction every other cross-package dependency in this codebase
+        already takes — `heart.tick.brain_escalation_handler` -> `ansina.brain`,
+        never the reverse). The caller converts via
+        `OpencodeInterventionStatus(status)` before journaling.
+        """
+        if action is OpencodeAction.PAUSE_INTAKE:
+            # The one action with no required run lookup — it's a global kill
+            # switch, not a per-run mutation. `run_id`, when the policy supplied
+            # one (a representative recently-failing run), still gets its own
+            # `intervention_count` bumped for bookkeeping; `None` is legitimate
+            # and simply skips that bump.
+            self.pause_intake()
+            session_id: str | None = None
+            if run_id is not None:
+                await anyio.to_thread.run_sync(
+                    self._repository.increment_intervention_count, run_id
+                )
+                run = await anyio.to_thread.run_sync(self._repository.get, run_id)
+                session_id = run.session_id if run is not None else None
+            outcome = ("applied", "intake paused")
+            if self._telemetry is not None:
+                self._telemetry.record_intervention(
+                    run_id, session_id, action, outcome[0], detail=outcome[1]
+                )
+            return outcome
+
+        # Every other action always names a real, already-persisted run.
+        assert run_id is not None
+        run = await anyio.to_thread.run_sync(self._repository.get, run_id)
+        if run is None:
+            return ("error", f"run {run_id!r} not found")
+
+        if action is OpencodeAction.RETRY:
+            if run.status not in _RETRYABLE_STATUSES:
+                return ("declined", f"run is {run.status!r}, not retryable")
+            new_run = await self.submit(build_retry_request(run), retry_of=run.id)
+            await anyio.to_thread.run_sync(
+                self._repository.increment_intervention_count, run_id
+            )
+            detail = f"resubmitted as {new_run.id}"
+            outcome = ("applied", detail)
+        elif action is OpencodeAction.NUDGE:
+            new_run = await self.submit(build_nudge_request(run), retry_of=run.id)
+            await anyio.to_thread.run_sync(
+                self._repository.increment_intervention_count, run_id
+            )
+            detail = f"nudged via new run {new_run.id}"
+            outcome = ("applied", detail)
+        elif action is OpencodeAction.COMPACT:
+            # Verified against a real, installed OpenCode v2.1.4 binary at
+            # implementation time (see `ansina.opencode.interventions`'s own
+            # module docstring for the full finding): a real compact entry
+            # point does exist — `POST /api/session/{id}/compact` on the HTTP
+            # API `opencode serve` exposes — but there is no CLI subcommand or
+            # flag for it at all (confirmed against `opencode --help` and every
+            # subcommand's own `--help`), so it is unreachable from the
+            # one-shot `opencode run` subprocess model `OpencodeCliRunner`
+            # uses. Wiring it would mean a second, server-based adapter
+            # (`AgentRunner`'s own module docstring already anticipates
+            # exactly this: "a future `opencode serve` + httpx adapter is a
+            # pure append") — out of scope for this issue, so this ships a
+            # documented `unsupported` no-op rather than a silent gap. An
+            # attempted-but-unsupported intervention still counts against the
+            # run.
+            await anyio.to_thread.run_sync(
+                self._repository.increment_intervention_count, run_id
+            )
+            outcome = (
+                "unsupported",
+                "opencode has no CLI entry point for compact (only "
+                "POST /api/session/{id}/compact over its HTTP API, which "
+                "OpencodeCliRunner's one-shot subprocess model cannot reach)",
+            )
+        else:  # pragma: no cover - ESCALATE_TO_BRAIN never reaches this method
+            raise AssertionError(
+                f"apply_intervention() does not handle {action!r} — "
+                "ESCALATE_TO_BRAIN is dispatched by the handler directly"
+            )
+
+        if self._telemetry is not None:
+            status, detail = outcome
+            self._telemetry.record_intervention(
+                run_id, run.session_id, action, status, detail=detail
+            )
+        return outcome
+
+    def record_intervention_telemetry(
+        self,
+        run_id: str | None,
+        action: OpencodeAction,
+        outcome: str,
+        *,
+        detail: str,
+        session_id: str | None = None,
+    ) -> None:
+        """A thin passthrough to `OpencodeTelemetryWriter.record_intervention` —
+        the one seam `OpencodeAction.ESCALATE_TO_BRAIN` uses, since that action is
+        dispatched by `heart.tick.opencode_intervention_handler
+        .OpencodeInterventionHandler` directly against a `BrainProvider` (this
+        service has no such dependency), never through `apply_intervention()`
+        above. Keeps "every intervention emits the `intervention` telemetry
+        line" true for *every* `OpencodeAction`, including the one this service
+        never executes itself. A no-op when telemetry is disabled, the same
+        `self._telemetry is not None` guard every other telemetry call site here
+        already uses.
+        """
+        if self._telemetry is not None:
+            self._telemetry.record_intervention(
+                run_id, session_id, action, outcome, detail=detail
+            )
 
 
 def build_opencode_run_service(

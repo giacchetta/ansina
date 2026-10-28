@@ -208,6 +208,29 @@ class TickSettings(BaseModel):
     opencode_stall_seconds: float = Field(default=300.0, gt=0)
     opencode_recent_window_minutes: int = Field(default=15, ge=1)
 
+    # Issue #79: `heart.tick.opencode_intervention_handler
+    # .OpencodeInterventionHandler`'s own flag and three budgets — the Heart's
+    # bounded, deterministic interventions on the OpenCode executor (retry/nudge/
+    # compact/pause_intake/escalate_to_brain). `False` (the default) is the usual
+    # no-op shape: `build_tick_loop` never constructs the handler at all, leaving
+    # the exact pre-#79 object graph, the same verified-no-op discipline issue
+    # #64's `escalate_to_brain` already established.
+    opencode_interventions: bool = False
+    # Per-run ceiling on `OpencodeAction.RETRY`/`.NUDGE` attempts, read from the
+    # targeted run's own `intervention_count`.
+    opencode_max_retries_per_run: int = Field(default=2, ge=0)
+    # No two of `RETRY`/`NUDGE`/`PAUSE_INTAKE` within this many ticks of each
+    # other — `TickLoop.ticks_run`-based, never wall-clock. Does not gate
+    # `ESCALATE_TO_BRAIN`, which is the deliberate fallback once this cooldown is
+    # what's blocking the other three (see `DeterministicInterventionPolicy`'s own
+    # docstring).
+    opencode_intervention_cooldown_ticks: int = Field(default=5, ge=0)
+    # A hard, rolling, process-lifetime-only ceiling (wall-clock) across every
+    # `OpencodeAction` attempt, including `ESCALATE_TO_BRAIN` — the one budget
+    # that bounds all five actions together, so the escalate fallback can never
+    # itself become the feedback loop this ceiling exists to prevent.
+    opencode_max_interventions_per_hour: int = Field(default=6, ge=1)
+
 
 class JournalSettings(BaseModel):
     """The `heart_journal` table's bounded retention and replay size, consumed by

@@ -27,12 +27,29 @@ input that could carry a pasted secret. `record_submitted` below is the first
 code path that ever puts a prompt through `ansina.logging.redaction.redact`.
 
 **No `ansina.heart` import anywhere in this module's own dependency chain**
-(`ansina.telemetry.rotation`, `ansina.opencode.events`, `ansina.logging.
-redaction`, stdlib only) — unlike `ansina.telemetry.sampler`, which needs
-`ansina.heart.tick.loop.TickController` and is therefore deliberately kept out
-of `ansina.telemetry.__init__`'s own re-exports (see that package's module
-docstring), this module carries no such risk and is eagerly re-exported from
-`ansina.opencode.__init__` with no cycle.
+(`ansina.telemetry.rotation`, `ansina.opencode.events`, `ansina.opencode
+.interventions`, `ansina.logging.redaction`, stdlib only) — unlike
+`ansina.telemetry.sampler`, which needs `ansina.heart.tick.loop.TickController` at
+runtime and is therefore deliberately kept out of `ansina.telemetry.__init__`'s
+own re-exports (see that package's module docstring), this module carries no such
+risk and is eagerly re-exported from `ansina.opencode.__init__` with no cycle.
+`record_intervention` (issue #79) takes its `outcome` as a plain `str` rather than
+`ansina.heart.journal.OpencodeInterventionStatus` specifically to preserve this —
+the caller (`ansina.opencode.service.OpencodeRunService`, or
+`heart.tick.opencode_intervention_handler.OpencodeInterventionHandler` for the one
+action the service doesn't dispatch) always holds that enum's own `.value` string
+already, the same "plain string, not the enum" shape
+`_TERMINAL_STATUS_BY_RUN_STATUS`/`_TERMINAL_STATUSES` elsewhere in this package
+already use for `opencode_runs.status`'s own `CHECK`-constrained values.
+
+**`record_intervention` — the first real emitter of the reserved `"intervention"`
+event (issue #79)**: one line per attempted `OpencodeAction`, written through the
+same `_write` path as every other method here. `run_id` is `str | None` since
+`OpencodeAction.PAUSE_INTAKE` has no single triggering run — `_next_seq`'s own
+`terminal` branch is only ever consulted when `run_id` is not `None` (an
+intervention event is never itself terminal for a run's own `seq` sequence, so
+this never pops a real run's counter either way); a `None` run id always writes
+`seq=0` with no map entry at all.
 
 **No `ansina.storage`/`Database` dependency at all** — the mutable run row (a
 later issue's own concern) is a separate thing from this append-only trace;
@@ -58,6 +75,7 @@ from ansina.config.settings import Settings
 from ansina.logging import get_logger
 from ansina.logging.redaction import redact
 from ansina.opencode.events import RunEvent, RunOutcome, RunRequest
+from ansina.opencode.interventions import OpencodeAction
 from ansina.telemetry.rotation import SpooledRotatingWriter
 
 logger = get_logger(__name__)
@@ -244,7 +262,38 @@ class OpencodeTelemetryWriter:
             run_id, session_id, "cancelled", {"duration_seconds": duration_seconds}
         )
 
-    def _next_seq(self, run_id: str, *, terminal: bool) -> int:
+    def record_intervention(
+        self,
+        run_id: str | None,
+        session_id: str | None,
+        action: OpencodeAction,
+        outcome: str,
+        *,
+        detail: str,
+    ) -> None:
+        """`event: "intervention"` — the first real emitter of this family's
+        reserved event (issue #79). `run_id` is `None` for `OpencodeAction
+        .PAUSE_INTAKE`, which has no single triggering run; every other action
+        carries the run id it was attempted against. Never terminal — an
+        intervention is a side event on an otherwise still-active (or already-
+        terminal, for `RETRY`/`NUDGE` against a run that just failed) run, never
+        itself the thing that pops that run's own `seq` counter.
+
+        `outcome` is a plain `str` — one of `"applied"`/`"declined"`/
+        `"unsupported"`/`"error"`, the exact values of `ansina.heart.journal
+        .OpencodeInterventionStatus` — rather than that enum, so this module stays
+        free of any `ansina.heart` import (see module docstring).
+        """
+        self._write(
+            run_id,
+            session_id,
+            "intervention",
+            {"action": action.value, "outcome": outcome, "detail": detail},
+        )
+
+    def _next_seq(self, run_id: str | None, *, terminal: bool) -> int:
+        if run_id is None:
+            return 0
         seq = self._seq_by_run.get(run_id, 0)
         if terminal:
             self._seq_by_run.pop(run_id, None)
@@ -254,7 +303,7 @@ class OpencodeTelemetryWriter:
 
     def _write(
         self,
-        run_id: str,
+        run_id: str | None,
         session_id: str | None,
         event: str,
         fields: Mapping[str, Any],

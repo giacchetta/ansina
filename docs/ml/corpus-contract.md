@@ -1,4 +1,4 @@
-# Heart corpus contract — `schema_version: 4`
+# Heart corpus contract — `schema_version: 5`
 
 Issue [#63](https://github.com/giacchetta/ansina/issues/63), bumped to
 `schema_version: 2` by issue
@@ -6,18 +6,22 @@ Issue [#63](https://github.com/giacchetta/ansina/issues/63), bumped to
 `kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below), to
 `schema_version: 3` by issue
 [#68](https://github.com/giacchetta/ansina/issues/68) (exact per-decision counts
-on the telemetry sample — see "Telemetry sample" below), and to `schema_version: 4`
+on the telemetry sample — see "Telemetry sample" below), to `schema_version: 4`
 by issue [#76](https://github.com/giacchetta/ansina/issues/76) (a new
-`kind=opencode/` family — see "Opencode run event" below). This document is the
-single source of truth for the shape of every artifact Ansina writes to its
-S3-compatible report bucket (`[telemetry.s3]`, issue #59). The machine-readable
-mirror of this exact document is `corpus-schema-v4.json` in this same directory,
-published byte-for-byte to `_contract/corpus-schema-v4.json` in the bucket (see
-"Self-discovery" below) — the two are reviewed together in the same PR whenever
-either changes, so there is never a second, independently-maintained copy to drift
-out of sync. `corpus-schema-v1.json`/`corpus-schema-v2.json`/`corpus-schema-v3.json`
-stay committed, unmodified, per the stability promise below — none of them is what
-this module re-uploads by default any longer.
+`kind=opencode/` family — see "Opencode run event" below), and to
+`schema_version: 5` by issue
+[#79](https://github.com/giacchetta/ansina/issues/79) (populating that family's
+own already-reserved `"intervention"` event — see "Opencode run event" below).
+This document is the single source of truth for the shape of every artifact
+Ansina writes to its S3-compatible report bucket (`[telemetry.s3]`, issue #59).
+The machine-readable mirror of this exact document is `corpus-schema-v5.json` in
+this same directory, published byte-for-byte to `_contract/corpus-schema-v5.json`
+in the bucket (see "Self-discovery" below) — the two are reviewed together in the
+same PR whenever either changes, so there is never a second, independently-
+maintained copy to drift out of sync.
+`corpus-schema-v1.json`/`corpus-schema-v2.json`/`corpus-schema-v3.json`/
+`corpus-schema-v4.json` stay committed, unmodified, per the stability promise
+below — none of them is what this module re-uploads by default any longer.
 
 ## Lifecycle: Ansina is a producer, nothing more
 
@@ -61,7 +65,7 @@ Every version of this contract that has ever shipped is published, unmodified, t
 as part of every `make heart-bench-publish` run — see that module's own docstring).
 A reader needs no access to this repository's source to learn the current schema:
 list `_contract/`, read the highest `<N>`, done. The *currently committed* `<N>` is
-whatever `corpus-schema-v<N>.json` is named in this directory — `v4` as of this
+whatever `corpus-schema-v<N>.json` is named in this directory — `v5` as of this
 writing.
 
 ## Bucket key layout
@@ -326,7 +330,7 @@ key-prefix segment above (issue #67), not a field on this record either.
 | `exception` | string | present only on an exception log, redacted |
 | `stack` | string | present only when stack info was captured, redacted |
 
-### 5. Opencode run event (`host=<id>/kind=opencode/`, issue #76)
+### 5. Opencode run event (`host=<id>/kind=opencode/`, issue #76, `intervention` populated by issue #79)
 
 One JSON object per line, written by
 `ansina.opencode.telemetry.OpencodeTelemetryWriter` — the third telemetry
@@ -335,20 +339,15 @@ One JSON object per line, written by
 `SpooledRotatingWriter`, under its own `"opencode"` file-prefix family. Host
 attribution is via the `host=<id>/` key-prefix segment above (issue #67), not a
 field on this record either — shipped this way from birth, unlike
-`kind=telemetry/`/`kind=runlog/`'s own v1-to-v2 history. **Still wired into
-nothing**: as of issue #76 nothing in the daemon's own boot sequence or
-tick loop calls `build_opencode_telemetry_writer`/drives these methods — a
-later issue's run-submission API is the first real caller, which is why this
-family may exist in the contract before it ever has a single real line in the
-bucket.
+`kind=telemetry/`/`kind=runlog/`'s own v1-to-v2 history.
 
 | Field | Type | Notes |
 |---|---|---|
 | `t` | float (unix timestamp) | |
-| `run_id` | string | stable across every line for one run |
+| `run_id` | string \| null | stable across every line for one run; `null` only for an `intervention` line whose action (`pause_intake`) has no single triggering run |
 | `session_id` | string \| null | the OpenCode session id, when known |
-| `seq` | int | **0-based, monotonic per `run_id`** — see "Gap detection" below |
-| `event` | string | `"submitted"`\|`"started"`\|`"run_event"`\|`"completed"`\|`"failed"`\|`"timeout"`\|`"cancelled"`\|`"intervention"` (reserved, not yet emitted — see below) |
+| `seq` | int | **0-based, monotonic per `run_id`**, `0` with no running counter when `run_id` is `null` — see "Gap detection" below |
+| `event` | string | `"submitted"`\|`"started"`\|`"run_event"`\|`"completed"`\|`"failed"`\|`"timeout"`\|`"cancelled"`\|`"intervention"` |
 
 Event-specific fields, present only on the matching `event` value:
 
@@ -359,7 +358,18 @@ Event-specific fields, present only on the matching `event` value:
 | `run_event` | `raw_type` (string, redacted+truncated by the adapter), `payload` (string, the full redacted+truncated captured line — the lossless fallback), plus whichever of `tool`/`command`/`path` (a tool call), `permission`/`pattern`/`decision` (a permission denial), or `prompt_tokens`/`completion_tokens`/`cost` (a usage report) the payload happens to carry — a best-effort, forward-compatible passthrough, never a required classification (mirrors `ansina.opencode.events`' own intentionally-empty `RunEventType` lookup table) |
 | `completed`\|`failed`\|`timeout` | `exit_code` (int \| null), `duration_seconds` (float), `events_emitted`/`events_skipped` (int), `truncated` (bool), `error` (string \| null) |
 | `cancelled` | `duration_seconds` (float) — covers the one outcome `RunOutcome` cannot itself represent, since a cancelled run's own `asyncio.CancelledError` never resolves into one |
-| `intervention` | **reserved, not emitted by any code as of this issue** — a later issue (the Heart's own bounded, observe-then-intervene supervision of a run) populates this once it exists |
+| `intervention` | `action` (string — `"retry"`\|`"nudge"`\|`"compact"`\|`"pause_intake"`\|`"escalate_to_brain"`, the exact `ansina.opencode.interventions.OpencodeAction` values), `outcome` (string — `"applied"`\|`"declined"`\|`"unsupported"`\|`"error"`, the exact `ansina.heart.journal.OpencodeInterventionStatus` values), `detail` (string, short and code-generated — never model-authored text) |
+
+The Heart's bounded interventions on the OpenCode executor (issue #79,
+`ansina.heart.tick.opencode_intervention_handler.OpencodeInterventionHandler`,
+gated by `[heart.tick] opencode_interventions`, default `false`) are the first
+real emitter of `intervention` — every attempted action writes exactly one such
+line, whether it was applied, declined, unsupported, or errored. This is the
+**supervision** record; the opencode run's own execution events (`run_event`/
+the terminal statuses above) are unaffected by an intervention attempted
+against them — a `retry`/`nudge` is a *new* run with its own full event stream,
+linked back to the original only via `opencode_runs.retry_of` (not a field on
+this telemetry record).
 
 A line that would exceed the writer's own `max_line_bytes` cap (re-asserted
 independently of whatever truncation already happened at the adapter boundary)

@@ -109,6 +109,26 @@ opencode_stall_seconds = 300.0
 # permission-denied OpenCode runs over.
 opencode_recent_window_minutes = 15
 
+# The Heart's bounded, deterministic interventions on the OpenCode executor
+# (issue #79): retry a failed/timed-out run, nudge a stalled session, pause
+# intake on repeated failures, or escalate to the Brain as a last resort. false
+# (the default) is a byte-for-byte no-op — build_tick_loop never constructs the
+# handler at all.
+opencode_interventions = false
+
+# Per-run ceiling on retry/nudge attempts, read from the run's own intervention
+# count.
+opencode_max_retries_per_run = 2
+
+# No two of retry/nudge/pause_intake within this many ticks of each other.
+# Does NOT gate escalate_to_brain, which is the deliberate fallback once this
+# cooldown is itself what's blocking the other three.
+opencode_intervention_cooldown_ticks = 5
+
+# A hard, rolling, process-lifetime-only ceiling (wall-clock) across every
+# opencode intervention attempt, including escalate_to_brain.
+opencode_max_interventions_per_hour = 6
+
 [heart.tick.fault_injection]
 # A soak/dev-only mode (issue #72) that forces real, scheduled tick faults — a
 # readiness check failing, consecutive tick failures, or consecutive tick overruns

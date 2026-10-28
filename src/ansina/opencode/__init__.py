@@ -28,6 +28,11 @@ from ansina.opencode.events import (
     RunRequest,
     RunStatus,
 )
+from ansina.opencode.interventions import (
+    OpencodeAction,
+    build_nudge_request,
+    build_retry_request,
+)
 from ansina.opencode.preflight import build_opencode_service
 from ansina.opencode.repository import OpencodeRun, OpencodeRunRepository
 from ansina.opencode.runner import AgentRunner, OpencodeCliRunner
@@ -66,9 +71,14 @@ from ansina.opencode.workspace import ensure_workspace, isolated_home
 # `service.py` (issue #77) carry the identical no-cycle, no-name-collision shape —
 # `ansina.opencode.service` imports `ansina.heart.tick.loop`'s own `TickController`
 # at no point (unlike `ansina.telemetry.sampler`), so re-exporting it eagerly here
-# is safe.
+# is safe. `interventions.py` (issue #79) carries the identical shape — it imports
+# only `ansina.opencode.events`/`ansina.opencode.repository`, never `ansina.heart`
+# at module scope (`OpencodeInterventionStatus`, which it journals against, lives
+# in `ansina.heart.journal`, imported from *that* module only under
+# `TYPE_CHECKING`).
 __all__ = [
     "AgentRunner",
+    "OpencodeAction",
     "OpencodeCliRunner",
     "OpencodeRun",
     "OpencodeRunRepository",
@@ -82,10 +92,12 @@ __all__ = [
     "RunRequest",
     "RunStatus",
     "RunningRunSnapshot",
+    "build_nudge_request",
     "build_opencode_env",
     "build_opencode_run_service",
     "build_opencode_service",
     "build_opencode_telemetry_writer",
+    "build_retry_request",
     "ensure_workspace",
     "isolated_home",
     "render_opencode_config",

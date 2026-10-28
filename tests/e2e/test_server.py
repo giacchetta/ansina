@@ -1475,8 +1475,8 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
         # OIDC login state table (issue #43); (9,) = the login-throttle table (issue
         # #49); (10,) = the heart_journal table (issue #55); (11,) = the heart_journal
         # brain-outcome columns (issue #64); (12,) = the opencode_runs table (issue
-        # #77) — bump this alongside `storage/migrations/` whenever a new migration
-        # lands.
+        # #77); (13,) = the heart_journal opencode-intervention columns (issue #79) —
+        # bump this alongside `storage/migrations/` whenever a new migration lands.
         assert rows == [
             (1,),
             (2,),
@@ -1490,6 +1490,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
             (10,),
             (11,),
             (12,),
+            (13,),
         ]
 
     # Boot again against the same tmp_path (same ansina.toml, same db file).
@@ -1513,6 +1514,7 @@ def test_migration_survives_a_restart(tmp_path: Path) -> None:
             (10,),
             (11,),
             (12,),
+            (13,),
         ]
 
 

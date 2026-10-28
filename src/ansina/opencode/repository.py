@@ -338,6 +338,56 @@ class OpencodeRunRepository:
             )
             return cursor.rowcount
 
+    def recent_retryable_runs(self, since: str) -> list[OpencodeRun]:
+        """Every `failed`/`timeout` row created after `since`, newest first — the
+        read `heart.tick.opencode_intervention_handler
+        .DeterministicInterventionPolicy` scans for an `OpencodeAction.RETRY`
+        candidate (issue #79). Bounded by `since` the same way
+        `recent_outcome_counts` already is — never a full-table scan — and
+        ordered the same `idx_opencode_runs_created_at` way `list_recent` already
+        uses.
+        """
+        rows = (
+            self._db.connection()
+            .execute(
+                "SELECT * FROM opencode_runs WHERE created_at > ? "
+                "AND status IN ('failed', 'timeout') "
+                "ORDER BY created_at DESC, id DESC",
+                (since,),
+            )
+            .fetchall()
+        )
+        return [OpencodeRun.from_row(row) for row in rows]
+
+    def increment_intervention_count(self, run_id: str) -> int:
+        """Bumps `intervention_count` by one and returns the new value — issue #79's
+        own mutator, deliberately **not** `update_status()`: that method's `WHERE
+        status NOT IN (<terminal>)` guard would silently refuse to touch an
+        already-`failed`/`timeout` run, but a `retry`/`nudge` attempted against
+        exactly such a run must still count against it. No status guard here at
+        all — an intervention attempt is counted regardless of the run's current
+        status.
+
+        Asserts a row existed, the same "internal invariant, not a caller-facing
+        condition" posture `update_status()` already uses for its own rowcount
+        check — every designed caller (`OpencodeRunService.apply_intervention`)
+        only ever calls this with a run id it just read from this repository.
+        """
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE opencode_runs SET intervention_count = intervention_count + 1 "
+                "WHERE id = ?",
+                (run_id,),
+            )
+            assert cursor.rowcount == 1, (
+                f"increment_intervention_count({run_id!r}): no row updated — the "
+                "run does not exist"
+            )
+            (count,) = cursor.execute(
+                "SELECT intervention_count FROM opencode_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            return int(count)
+
     def sweep_stale_on_boot(self, now: datetime) -> int:
         """Crash recovery (issue #77's own AC): any row left `queued`/`running` from
         a previous process (the daemon crashed or was killed mid-run, never reaching

@@ -23,6 +23,7 @@ from ansina.opencode.events import (
     RunRequest,
     RunStatus,
 )
+from ansina.opencode.interventions import OpencodeAction
 from ansina.opencode.repository import OpencodeRunRepository
 from ansina.opencode.service import OpencodeRunService, build_opencode_run_service
 from ansina.opencode.telemetry import OpencodeTelemetryWriter
@@ -621,3 +622,188 @@ async def test_recent_outcome_counts_delegates_to_the_repository(
         timeout,
         permission_denied,
     )
+
+
+def test_recent_retryable_runs_delegates_to_the_repository(
+    db: Database, tmp_path: Path
+) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+    since = "2020-01-01T00:00:00.000Z"
+
+    assert service.recent_retryable_runs(since=since) == (
+        repository.recent_retryable_runs(since)
+    )
+
+
+# --- issue #79: `submit(retry_of=...)` ------------------------------------------------
+
+
+async def test_submit_persists_retry_of(db: Database, tmp_path: Path) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+
+    run = await service.submit(RunRequest(prompt="retry me"), retry_of="prior-id")
+
+    assert run.retry_of == "prior-id"
+    assert repository.get(run.id).retry_of == "prior-id"  # type: ignore[union-attr]
+
+
+# --- issue #79: `apply_intervention` --------------------------------------------------
+
+
+async def test_apply_intervention_on_an_unknown_run_returns_error(
+    db: Database, tmp_path: Path
+) -> None:
+    service, _repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+
+    status, detail = await service.apply_intervention(
+        "does-not-exist", OpencodeAction.RETRY
+    )
+
+    assert status == "error"
+    assert "not found" in detail
+
+
+async def test_apply_intervention_retry_on_a_non_retryable_run_declines(
+    db: Database, tmp_path: Path
+) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await _wait_until(lambda: repository.get(run.id).status == "succeeded")  # type: ignore[union-attr]
+
+    status, detail = await service.apply_intervention(run.id, OpencodeAction.RETRY)
+
+    assert status == "declined"
+    assert "not retryable" in detail
+
+
+async def test_apply_intervention_retry_resubmits_with_retry_of_and_bumps_count(
+    db: Database, tmp_path: Path
+) -> None:
+    runner = _FakeAgentRunner(
+        outcome=RunOutcome(
+            status=RunStatus.FAILED,
+            exit_code=1,
+            events_emitted=0,
+            events_skipped=0,
+            duration_seconds=0.1,
+            error="boom",
+        )
+    )
+    service, repository = _service(db, tmp_path, runner=runner)
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await _wait_until(lambda: repository.get(run.id).status == "failed")  # type: ignore[union-attr]
+
+    status, detail = await service.apply_intervention(run.id, OpencodeAction.RETRY)
+
+    assert status == "applied"
+    assert "resubmitted" in detail
+    reloaded = repository.get(run.id)
+    assert reloaded is not None
+    assert reloaded.intervention_count == 1
+    retries = [r for r in repository.list_recent(limit=10) if r.retry_of == run.id]
+    assert len(retries) == 1
+    assert retries[0].prompt == "say hello"
+    lines = [
+        line for line in _read_lines(tmp_path) if line.get("event") == "intervention"
+    ]
+    assert lines[-1]["action"] == "retry"
+    assert lines[-1]["outcome"] == "applied"
+
+
+async def test_apply_intervention_nudge_resubmits_with_the_fixed_continuation(
+    db: Database, tmp_path: Path
+) -> None:
+    runner = _HangingAgentRunner()
+    service, repository = _service(db, tmp_path, runner=runner)
+    run = await service.submit(RunRequest(prompt="original", session_id="session-1"))
+    await asyncio.wait_for(runner.started.wait(), timeout=2.0)
+
+    status, detail = await service.apply_intervention(run.id, OpencodeAction.NUDGE)
+
+    assert status == "applied"
+    assert "nudged" in detail
+    reloaded = repository.get(run.id)
+    assert reloaded is not None
+    assert reloaded.intervention_count == 1
+    await service.stop()
+
+
+async def test_apply_intervention_compact_is_unsupported(
+    db: Database, tmp_path: Path
+) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await _wait_until(lambda: repository.get(run.id).status == "succeeded")  # type: ignore[union-attr]
+
+    status, _detail = await service.apply_intervention(run.id, OpencodeAction.COMPACT)
+
+    assert status == "unsupported"
+    reloaded = repository.get(run.id)
+    assert reloaded is not None
+    assert reloaded.intervention_count == 1
+
+
+async def test_apply_intervention_pause_intake_pauses_and_bumps_count(
+    db: Database, tmp_path: Path
+) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await _wait_until(lambda: repository.get(run.id).status == "succeeded")  # type: ignore[union-attr]
+
+    status, _detail = await service.apply_intervention(
+        run.id, OpencodeAction.PAUSE_INTAKE
+    )
+
+    assert status == "applied"
+    assert service.intake_paused is True
+    reloaded = repository.get(run.id)
+    assert reloaded is not None
+    assert reloaded.intervention_count == 1
+
+
+async def test_apply_intervention_pause_intake_with_no_run_id(
+    db: Database, tmp_path: Path
+) -> None:
+    """`PAUSE_INTAKE` is the one action that may legitimately carry no run id at
+    all (the policy found no single representative run) — no lookup, no count
+    bump, just the global pause.
+    """
+    service, _repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+
+    status, detail = await service.apply_intervention(None, OpencodeAction.PAUSE_INTAKE)
+
+    assert status == "applied"
+    assert detail == "intake paused"
+    assert service.intake_paused is True
+    lines = [
+        line for line in _read_lines(tmp_path) if line.get("event") == "intervention"
+    ]
+    assert lines[-1]["run_id"] is None
+
+
+async def test_apply_intervention_never_dispatches_escalate_to_brain(
+    db: Database, tmp_path: Path
+) -> None:
+    service, repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+    run = await service.submit(RunRequest(prompt="say hello"))
+    await _wait_until(lambda: repository.get(run.id).status == "succeeded")  # type: ignore[union-attr]
+
+    with pytest.raises(AssertionError):
+        await service.apply_intervention(run.id, OpencodeAction.ESCALATE_TO_BRAIN)
+
+
+def test_record_intervention_telemetry_writes_a_line(
+    db: Database, tmp_path: Path
+) -> None:
+    service, _repository = _service(db, tmp_path, runner=_FakeAgentRunner())
+
+    service.record_intervention_telemetry(
+        None, OpencodeAction.PAUSE_INTAKE, "applied", detail="paused"
+    )
+
+    lines = _read_lines(tmp_path)
+    assert lines[-1]["event"] == "intervention"
+    assert lines[-1]["run_id"] is None
+    assert lines[-1]["action"] == "pause_intake"
+    assert lines[-1]["outcome"] == "applied"
+    assert lines[-1]["detail"] == "paused"

@@ -12,6 +12,7 @@ from ansina.opencode.events import (
     RunRequest,
     RunStatus,
 )
+from ansina.opencode.interventions import OpencodeAction
 from ansina.opencode.telemetry import (
     OpencodeTelemetryWriter,
     build_opencode_telemetry_writer,
@@ -403,3 +404,83 @@ def test_module_has_no_database_dependency() -> None:
         getattr(value, "__module__", None) for value in vars(module).values()
     }
     assert "Database" not in dir(module)
+
+
+def test_module_has_no_heart_dependency() -> None:
+    """Issue #79's `record_intervention` takes `outcome` as a plain `str`
+    rather than `ansina.heart.journal.OpencodeInterventionStatus` specifically
+    to preserve this — see the module docstring's own reasoning.
+    """
+    import ansina.opencode.telemetry as module
+
+    assert "ansina.heart" not in {
+        getattr(value, "__module__", None) for value in vars(module).values()
+    }
+
+
+# --- issue #79: `record_intervention` -------------------------------------------------
+
+
+def test_record_intervention_writes_action_outcome_and_detail(tmp_path: Path) -> None:
+    writer = _make_writer(tmp_path)
+
+    writer.record_intervention(
+        "run-1",
+        "session-1",
+        OpencodeAction.RETRY,
+        "applied",
+        detail="resubmitted as run-2",
+    )
+
+    line = _read_lines(tmp_path)[0]
+    assert line["event"] == "intervention"
+    assert line["run_id"] == "run-1"
+    assert line["session_id"] == "session-1"
+    assert line["action"] == "retry"
+    assert line["outcome"] == "applied"
+    assert line["detail"] == "resubmitted as run-2"
+    assert line["seq"] == 0
+
+
+def test_record_intervention_with_no_run_id_writes_null_and_seq_zero(
+    tmp_path: Path,
+) -> None:
+    writer = _make_writer(tmp_path)
+
+    writer.record_intervention(
+        None, None, OpencodeAction.PAUSE_INTAKE, "applied", detail="paused"
+    )
+    # A second call with the same `None` run id must also write `seq == 0` —
+    # `None` never gets a running counter in `_seq_by_run`.
+    writer.record_intervention(
+        None, None, OpencodeAction.PAUSE_INTAKE, "applied", detail="paused again"
+    )
+
+    lines = _read_lines(tmp_path)
+    assert lines[0]["run_id"] is None
+    assert lines[0]["seq"] == 0
+    assert lines[1]["seq"] == 0
+
+
+def test_record_intervention_is_never_terminal_for_a_runs_own_seq(
+    tmp_path: Path,
+) -> None:
+    """An intervention against an already-running run must not pop that run's
+    own `_seq_by_run` counter the way `record_outcome`/`record_cancelled` do.
+    """
+    writer = _make_writer(tmp_path)
+    writer.record_started("run-1", None)  # seq 0, bumps the counter to 1
+
+    writer.record_intervention(
+        "run-1", None, OpencodeAction.NUDGE, "applied", detail="nudged"
+    )
+    writer.record_event(
+        "run-1",
+        None,
+        RunEvent(type=RunEventType.OTHER, raw_type="x", payload="{}", sequence=0),
+    )
+
+    lines = _read_lines(tmp_path)
+    assert lines[1]["event"] == "intervention"
+    assert lines[1]["seq"] == 1
+    assert lines[2]["seq"] == 2  # the counter kept advancing, never reset

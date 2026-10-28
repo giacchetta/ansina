@@ -384,3 +384,96 @@ def test_recent_outcome_counts_excludes_rows_at_or_before_since(db: Database) ->
 
 def test_recent_outcome_counts_on_an_empty_table_is_all_zero(db: Database) -> None:
     assert OpencodeRunRepository(db).recent_outcome_counts(iso(_NOW)) == (0, 0, 0)
+
+
+# --- issue #79: `recent_retryable_runs`/`increment_intervention_count` -------------
+
+
+def test_recent_retryable_runs_returns_only_failed_and_timeout(db: Database) -> None:
+    repository = OpencodeRunRepository(db)
+    failed = repository.create(created_at=iso(_NOW), prompt="failed")
+    repository.update_status(failed.id, "running", started_at=iso(_NOW))
+    repository.update_status(failed.id, "failed", completed_at=iso(_NOW))
+    timed_out = repository.create(created_at=iso(_NOW), prompt="timeout")
+    repository.update_status(timed_out.id, "running", started_at=iso(_NOW))
+    repository.update_status(timed_out.id, "timeout", completed_at=iso(_NOW))
+    succeeded = repository.create(created_at=iso(_NOW), prompt="succeeded")
+    repository.update_status(succeeded.id, "running", started_at=iso(_NOW))
+    repository.update_status(succeeded.id, "succeeded", completed_at=iso(_NOW))
+    queued = repository.create(created_at=iso(_NOW), prompt="queued")
+
+    since = iso(_NOW.replace(year=_NOW.year - 1))
+    runs = repository.recent_retryable_runs(since)
+
+    assert {r.id for r in runs} == {failed.id, timed_out.id}
+    assert queued.status == "queued"  # sanity: never touched above
+
+
+def test_recent_retryable_runs_orders_newest_first(db: Database) -> None:
+    repository = OpencodeRunRepository(db)
+    first = repository.create(created_at=iso(_NOW), prompt="1")
+    repository.update_status(first.id, "running", started_at=iso(_NOW))
+    repository.update_status(first.id, "failed", completed_at=iso(_NOW))
+    second = repository.create(created_at=iso(_NOW.replace(minute=1)), prompt="2")
+    repository.update_status(second.id, "running", started_at=iso(_NOW))
+    repository.update_status(second.id, "failed", completed_at=iso(_NOW))
+
+    since = iso(_NOW.replace(year=_NOW.year - 1))
+    runs = repository.recent_retryable_runs(since)
+
+    assert [r.id for r in runs] == [second.id, first.id]
+
+
+def test_recent_retryable_runs_excludes_rows_at_or_before_since(db: Database) -> None:
+    repository = OpencodeRunRepository(db)
+    old = repository.create(created_at=iso(_NOW), prompt="old")
+    repository.update_status(old.id, "running", started_at=iso(_NOW))
+    repository.update_status(old.id, "failed", completed_at=iso(_NOW))
+
+    assert repository.recent_retryable_runs(iso(_NOW)) == []
+
+
+def test_recent_retryable_runs_on_an_empty_table_returns_an_empty_list(
+    db: Database,
+) -> None:
+    since = iso(_NOW.replace(year=_NOW.year - 1))
+    assert OpencodeRunRepository(db).recent_retryable_runs(since) == []
+
+
+def test_increment_intervention_count_bumps_and_returns_the_new_value(
+    db: Database,
+) -> None:
+    repository = OpencodeRunRepository(db)
+    run = repository.create(created_at=iso(_NOW), prompt="p")
+
+    first = repository.increment_intervention_count(run.id)
+    second = repository.increment_intervention_count(run.id)
+
+    assert first == 1
+    assert second == 2
+    assert repository.get(run.id).intervention_count == 2  # type: ignore[union-attr]
+
+
+def test_increment_intervention_count_works_against_an_already_terminal_run(
+    db: Database,
+) -> None:
+    """The one case `update_status()` itself refuses — a retry/nudge attempted
+    against an already-`failed`/`timeout` run must still be counted against it.
+    """
+    repository = OpencodeRunRepository(db)
+    run = repository.create(created_at=iso(_NOW), prompt="p")
+    repository.update_status(run.id, "running", started_at=iso(_NOW))
+    repository.update_status(run.id, "failed", completed_at=iso(_NOW))
+
+    count = repository.increment_intervention_count(run.id)
+
+    assert count == 1
+    reloaded = repository.get(run.id)
+    assert reloaded is not None
+    assert reloaded.status == "failed"  # untouched
+    assert reloaded.intervention_count == 1
+
+
+def test_increment_intervention_count_on_an_unknown_id_raises(db: Database) -> None:
+    with pytest.raises(AssertionError):
+        OpencodeRunRepository(db).increment_intervention_count("does-not-exist")

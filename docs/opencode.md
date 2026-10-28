@@ -184,8 +184,9 @@ Issue #76 adds `ansina.opencode.telemetry.OpencodeTelemetryWriter` — the third
 telemetry *shape* alongside M7's interval sampler and log mirror (see
 `docs/dev-mode.md`): one JSON line per run-lifecycle event (`submitted`,
 `started`, each in-run event, a terminal `completed`/`failed`/`timeout`/
-`cancelled`, and a reserved `intervention` event for a later issue), through the
-same generic `SpooledRotatingWriter` under its own `"opencode"` file family,
+`cancelled`, and an `intervention` event — reserved at #76, populated by issue
+#79's `OpencodeInterventionHandler`), through the same generic
+`SpooledRotatingWriter` under its own `"opencode"` file family,
 shipped by Vector's third source/sink pair (`deploy/vector.toml`) to
 `host=<id>/kind=opencode/dt=<date>/`. This is a deliberate, load-bearing
 sequencing decision, not an afterthought: a run must not be submittable over
@@ -233,10 +234,12 @@ later active-run count.
 `GET /opencode/runs` pages newest-first with `limit`/`since`, byte-for-byte the
 `GET /heart/journal` shape (`has_more` via one extra row, a malformed `since` →
 400 `ansina.request.invalid`). `POST /opencode/intake/pause` is the operator-
-facing half of the one intake kill switch a later Heart issue's bounded
-`pause_intake` intervention will also call — `POST /opencode/runs` refuses with
+facing half of the one intake kill switch issue #79's own bounded
+`OpencodeAction.PAUSE_INTAKE` intervention also calls (`OpencodeRunService
+.pause_intake()`, the exact same method) — `POST /opencode/runs` refuses with
 409 `ansina.opencode.intake_paused` while it's set, independently of whether
-`[opencode] enabled` itself is `true`.
+`[opencode] enabled` itself is `true`. See "The Heart's bounded interventions"
+below for the full mechanism.
 
 Hand-run verification, since neither CI leg installs a real `opencode` binary:
 
@@ -250,6 +253,57 @@ host over ssh (see `.envrc`'s `ANSINA_REMOTE_HOST`/`ANSINA_REMOTE_PATH`, the sam
 two variables `make remote-heart`/`make remote-dev-mode` already use) — the same
 force-sync-then-tmux shape `scripts/remote-dev-mode.sh` established, just
 wrapping `make opencode-smoke` instead.
+
+## The Heart's bounded interventions
+
+Issue #79 gives the Heart its first ability to act on OpenCode, within a fixed,
+enumerable set — never free-form, never model-authored text reaching a
+subprocess argv/prompt/path. Gated by `[heart.tick] opencode_interventions`
+(default `false`, a byte-for-byte no-op — `build_tick_loop` never constructs the
+handler at all), composed alongside `JournalDecisionHandler`/
+`BrainEscalationHandler`/`FaultInjector` in `heart.tick.loop.build_tick_loop`.
+
+`ansina.opencode.interventions.OpencodeAction` is the closed set:
+
+- **`retry`** — resubmits a `failed`/`timeout` run's own prompt as a fresh run
+  (no session continuation), up to `[heart.tick] opencode_max_retries_per_run`
+  attempts per run.
+- **`nudge`** — resubmits a fixed, code-generated continuation prompt against a
+  stalled run's own `--session`, since `AgentRunner` is one-shot per call with no
+  interactive stdin to send more input to a still-running process.
+- **`compact`** — ships a real, verified `unsupported` outcome as of this issue.
+  Verified against a real, installed OpenCode v2.1.4 binary: a compact entry
+  point does exist (`POST /api/session/{id}/compact`, "Compact session" in the
+  binary's own `/openapi.json`), but there is no CLI subcommand or flag for it
+  anywhere (`opencode --help`, every subcommand's own `--help`, and
+  `opencode session --help` were all checked directly) — it is reachable only
+  over the HTTP API `opencode serve` exposes, not through the one-shot
+  `opencode run` subprocess model `OpencodeCliRunner` uses. A documented no-op,
+  not a silent gap: wiring the real endpoint needs a second, server-based
+  `AgentRunner` adapter, which that port's own module docstring already
+  anticipates as a pure, future append ("a future `opencode serve` + httpx
+  adapter") — out of scope here.
+- **`pause_intake`** — calls the exact same `OpencodeRunService.pause_intake()`
+  method `POST /opencode/intake/pause` does.
+- **`escalate_to_brain`** — reuses `BrainEscalationHandler`'s own
+  `BrainProvider.stream()` call/journal-column pattern, gated *additionally* by
+  `[heart.tick] escalate_to_brain` (the older, M7 flag) — the Brain is never
+  reachable through this new path while that flag stays off.
+
+*Which* action fires, if any, is chosen by `DeterministicInterventionPolicy` — a
+documented priority ladder over real `OpencodeStateProbe` signals (the same ones
+issue #78's `OpencodeStateSource` already reports), bounded by three budgets
+(`opencode_max_retries_per_run`, `opencode_intervention_cooldown_ticks`,
+`opencode_max_interventions_per_hour`) so no feedback loop can amplify. The
+Heart's own model output is consumed only as "act / don't act"
+(`TickDecision.ACT`) — never as the action or the target run id.
+
+Every attempt — applied, declined, unsupported, or errored — is journaled as a
+second `heart_journal` row (sharing the triggering tick's `tick_number`,
+`decision=act`; see `0013_heart_journal_opencode_intervention.sql`) and emitted
+as the `intervention` line in the `kind=opencode/` telemetry stream (reserved by
+issue #76, populated here) — see `docs/ml/corpus-contract.md`'s "Opencode run
+event" family for the full field reference.
 
 ## Config reference
 
