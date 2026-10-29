@@ -227,6 +227,79 @@ def test_render_provider_block_sits_between_schema_and_permission(
     assert list(rendered.keys()) == ["$schema", "provider", "permission"]
 
 
+def test_render_derives_a_models_entry_from_the_ansina_model_setting(
+    tmp_path: Path,
+) -> None:
+    """Found genuinely required by real-hardware verification (see module
+    docstring): `opencode run --model ansina/<id>` against a provider with no
+    matching `models` entry fails at admission with `provider.no-route`,
+    before ever reaching the network.
+    """
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+        model="ansina/GLM-5.3-Flash-low",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert rendered["provider"]["ansina"]["models"] == {"GLM-5.3-Flash-low": {}}
+
+
+def test_render_strips_a_variant_suffix_from_the_derived_model_id(
+    tmp_path: Path,
+) -> None:
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+        model="ansina/some-model#reasoning",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert rendered["provider"]["ansina"]["models"] == {"some-model": {}}
+
+
+def test_render_omits_models_entry_when_model_names_a_different_provider(
+    tmp_path: Path,
+) -> None:
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+        model="anthropic/claude",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert "models" not in rendered["provider"]["ansina"]
+
+
+def test_render_omits_models_entry_when_model_is_the_bare_prefix(
+    tmp_path: Path,
+) -> None:
+    """`model = "ansina/"` has no model id after the prefix — the same "empty
+    means nothing to derive" discipline every other optional field here uses,
+    rather than emitting a `models: {"": {}}` entry.
+    """
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+        model="ansina/",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert "models" not in rendered["provider"]["ansina"]
+
+
 def test_write_opencode_config_overwrites_a_prior_run(tmp_path: Path) -> None:
     first_settings = _settings(tmp_path, webfetch="deny")
     workspace = first_settings.opencode.workspace_dir

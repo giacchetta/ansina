@@ -32,12 +32,15 @@ value, so the rendered file is safe to write to disk and to embed verbatim into
 `OPENCODE_CONFIG_CONTENT` (`ansina.opencode.env`). `_CUSTOM_PROVIDER_ID` is a
 fixed constant, not a setting — Ansina configures at most one custom provider
 for OpenCode's own model, so a second knob to name it would add no real
-flexibility. Whether OpenCode's own `--model <id>/<model>` resolution also
-needs a `models.<model-id>` entry under this block (the docs' own worked
-example includes one, but only ever to set a display name/context limits, not
-stated as required for a direct CLI invocation) is left to real-hardware
-verification — see `docs/opencode.md`'s own "verify, don't assume" discipline;
-not added here speculatively.
+flexibility. `_render_provider()` also derives a `models.<model-id>` entry from
+`[opencode] model` (stripping the `"ansina/"` prefix and any `#variant` suffix)
+— found genuinely required by real-hardware verification against a real v2.2.1
+binary and a real LiteLLM gateway, not assumed: `opencode run --model
+ansina/<model-id>` against a provider with no matching `models` entry fails at
+admission with `{"type":"provider.no-route","message":"Model unavailable: ..."}`
+before ever reaching the network — the docs' own worked example already showed
+one, but described it only as setting a display name/context limits, which
+undersold how load-bearing it actually is.
 """
 
 from __future__ import annotations
@@ -93,6 +96,15 @@ def _render_provider(settings: Settings) -> dict[str, Any] | None:
     """The custom-provider block for OpenCode's own driving model, or `None`
     when `[opencode] provider_base_url` is unset — see module docstring for the
     documented shape this mirrors and why `apiKey` never carries a real secret.
+
+    Includes a `models.<model-id>` entry when `[opencode] model` names a model
+    under this provider (`"ansina/<model-id>"`, optionally `#<variant>`) — found
+    necessary by real-hardware verification, not assumed: `opencode run
+    --model ansina/<model-id>` against a provider with no matching `models`
+    entry fails at admission with `provider.no-route` ("Model unavailable"),
+    never reaching the network at all. The docs' own worked example already
+    showed one, but only ever described it as naming a display name/context
+    limits — this is the empirical correction to that reading.
     """
     opencode = settings.opencode
     if not opencode.provider_base_url:
@@ -100,13 +112,17 @@ def _render_provider(settings: Settings) -> dict[str, Any] | None:
     options: dict[str, str] = {"baseURL": opencode.provider_base_url}
     if opencode.provider_api_key_env:
         options["apiKey"] = f"{{env:{opencode.provider_api_key_env}}}"
-    return {
-        _CUSTOM_PROVIDER_ID: {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": "Ansina",
-            "options": options,
-        }
+    provider_block: dict[str, Any] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "Ansina",
+        "options": options,
     }
+    prefix = f"{_CUSTOM_PROVIDER_ID}/"
+    if opencode.model.startswith(prefix):
+        model_id = opencode.model[len(prefix) :].split("#", 1)[0]
+        if model_id:
+            provider_block["models"] = {model_id: {}}
+    return {_CUSTOM_PROVIDER_ID: provider_block}
 
 
 def render_opencode_config(settings: Settings) -> dict[str, Any]:
