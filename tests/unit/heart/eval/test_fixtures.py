@@ -477,14 +477,34 @@ def test_load_curation_fixtures_rejects_a_file_of_only_comments(
         load_curation_fixtures(path)
 
 
-def test_load_curation_fixtures_rejects_a_missing_bundled_file() -> None:
-    """`data/curation_fixtures.jsonl` is real, captured session data landed by a
-    follow-up real-hardware step, not shipped with this code — calling with no
-    `--fixtures` override must fail cleanly (`FixtureError`), never a raw
-    `FileNotFoundError`/`ModuleNotFoundError` traceback escaping `_resolve_text`.
+def test_load_curation_fixtures_loads_the_bundled_default_set() -> None:
+    """`data/curation_fixtures.jsonl` is real, captured OpenCode session data
+    from the Mac Mini (issue #14's own AC #1 rules out a synthetic
+    placeholder) — calling with no `--fixtures` override must load it cleanly.
     """
+    fixtures = load_curation_fixtures()
+
+    assert len(fixtures) >= 4
+    ids = [f.id for f in fixtures]
+    assert len(ids) == len(set(ids))
+    for fixture in fixtures:
+        assert fixture.events
+        assert fixture.must_keep
+        assert fixture.failure_cause.strip()
+
+
+def test_load_curation_fixtures_rejects_a_missing_custom_path(
+    tmp_path: Path,
+) -> None:
+    """Mirrors `test_load_fixtures_rejects_a_missing_custom_path` above —
+    `_resolve_text` must fail cleanly (`FixtureError`), never a raw
+    `FileNotFoundError`/`ModuleNotFoundError` traceback, on an explicit path
+    that doesn't exist either.
+    """
+    missing = tmp_path / "does-not-exist.jsonl"
+
     with pytest.raises(FixtureError, match="fixture file not found"):
-        load_curation_fixtures()
+        load_curation_fixtures(missing)
 
 
 def test_load_curation_fixtures_rejects_duplicate_ids(tmp_path: Path) -> None:

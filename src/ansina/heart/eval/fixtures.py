@@ -74,10 +74,9 @@ def _resolve_text(
     `default_resource`'s bundled `importlib.resources` file; `None` reads the bundled
     default.
 
-    A missing file — an explicit `path` that doesn't exist, or a bundled resource not
-    yet shipped (issue #14's own `data/curation_fixtures.jsonl` is real, captured
-    session data landed in a follow-up real-hardware step, not shipped with this
-    code) — raises `FixtureError` rather than a raw `FileNotFoundError`/
+    A missing file — an explicit `path` that doesn't exist, or (before issue #14's
+    own real-hardware step landed `data/curation_fixtures.jsonl`) a bundled resource
+    not yet shipped — raises `FixtureError` rather than a raw `FileNotFoundError`/
     `ModuleNotFoundError`, so every caller (`__main__.py`'s own `except AnsinaError`)
     sees one consistent error type regardless of which of the three loaders hit it.
     """
