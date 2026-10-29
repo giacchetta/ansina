@@ -44,7 +44,20 @@ from ansina.heart.eval.metrics import (
     read_peak_rss_bytes,
 )
 
-DEFAULT_BUDGET_FRACTION = 0.5
+DEFAULT_BUDGET_FRACTION = 0.9
+"""Raised from an original 0.5 by a real-hardware finding against issue #14's own
+four fixtures: a human-visible-narration transcript is a handful of unevenly-sized
+turns (not many small ones), and the single essential turn in every one of those
+four is also consistently the *largest* — often 60-85% of the whole transcript on
+its own. At 0.5, the pure, non-model recency baseline (`recency_window_selection`)
+couldn't even fit that one turn and returned an empty selection on three of four
+fixtures, which the real bench's own first scored run surfaced directly (the Brain
+answering "the transcript wasn't included" against a genuinely empty one). 0.9
+reliably fits each fixture's own essential turn with real margin against
+tokenizer-estimate variance (one fixture's essential turn alone is ~83% of its own
+full transcript), while still leaving at least one earlier, droppable turn excluded
+in every fixture — there is still a real selection decision for both the baseline
+and the curator to make, just not an all-or-nothing one."""
 
 FAILURE_QUESTION_TEMPLATE = (
     "Here is a partial transcript of an OpenCode coding-agent run. What caused it "
