@@ -22,6 +22,22 @@ behavior rather than a strawman.
 `heart.tick.sources.opencode_state`'s own structural-Protocol approach documents:
 `ansina.heart` stays free of an `ansina.opencode` import. `heart.eval.fixtures`
 constructs these directly from the committed, already-redacted/truncated JSONL fields.
+
+A `CurationEvent` is deliberately **not** one raw `kind=opencode/` telemetry line —
+a real caller is expected to pre-filter the full `RunEvent` stream down to only the
+`"text"`-typed events (the model's own human-visible narration) before ever
+constructing one, the same way a human reading this very kind of session sees only
+the assistant's own messages, never the raw tool-call JSON or its reasoning steps.
+This is a load-bearing decision, not a style preference, found the hard way against
+issue #14's own real captured fixtures: rendering every raw event (tool calls,
+`step_start`/`step_finish` bookkeeping, and all) blew the Heart's 8k context budget
+before curation could even begin — a `tool_use` event's own `metadata.content`/
+`metadata.rawInput` fields duplicate `output`/`input` byte-for-byte, `providerCall`/
+`providerResult` are always empty boilerplate, and roughly half of every real
+session's own events are `step_start`/`step_finish` pairs carrying no decision-
+relevant content at all. None of that noise is needed to answer "what happened and
+why" — the human-visible narration alone already tells the whole story in every one
+of this duty's four real fixtures, each one's own `note` field states this plainly.
 """
 
 from __future__ import annotations
