@@ -26,7 +26,7 @@ from typing import Any, Protocol
 
 from ansina.config.settings import Settings
 from ansina.logging import get_logger
-from ansina.opencode.config import render_opencode_config, write_opencode_config
+from ansina.opencode.config import render_opencode_config
 from ansina.opencode.env import build_opencode_env
 from ansina.opencode.runner import OpencodeCliRunner
 from ansina.opencode.workspace import ensure_workspace
@@ -215,11 +215,10 @@ def preflight(
         # forces this branch via a monkeypatched `ensure_workspace`.
         return _skip(f"workspace {opencode.workspace_dir} could not be provisioned")
 
-    config_path = write_opencode_config(settings, workspace)
     try:
-        json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return _skip(f"generated {config_path} did not round-trip as JSON: {exc}")
+        json.loads(json.dumps(render_opencode_config(settings)))
+    except (TypeError, ValueError) as exc:
+        return _skip(f"generated opencode config did not round-trip as JSON: {exc}")
 
     effective = _resolve_effective_permission(settings, opencode_path, runner=runner)
     if effective is not None:

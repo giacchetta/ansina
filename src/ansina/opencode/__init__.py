@@ -19,7 +19,7 @@ one-time, boot-only exception; `ansina.opencode` is a second, independent
 exception with its own (wider) shape.
 """
 
-from ansina.opencode.config import render_opencode_config, write_opencode_config
+from ansina.opencode.config import render_opencode_config
 from ansina.opencode.env import build_opencode_env
 from ansina.opencode.events import (
     RunEvent,
@@ -101,5 +101,4 @@ __all__ = [
     "ensure_workspace",
     "isolated_home",
     "render_opencode_config",
-    "write_opencode_config",
 ]

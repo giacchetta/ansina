@@ -10,7 +10,7 @@ from ansina.config.settings import (
     Settings,
     TelemetrySettings,
 )
-from ansina.opencode.config import render_opencode_config, write_opencode_config
+from ansina.opencode.config import render_opencode_config
 
 
 def _settings(tmp_path: Path, **permission_overrides: Any) -> Settings:
@@ -135,18 +135,6 @@ def test_render_additional_keys_are_appended_after_the_named_keys(
     assert list(permission.keys())[-2:] == ["glob", "task"]
     assert permission["glob"] == "allow"
     assert permission["task"] == "deny"
-
-
-def test_write_opencode_config_round_trips_as_json(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    workspace = settings.opencode.workspace_dir
-    workspace.mkdir(parents=True)
-
-    config_path = write_opencode_config(settings, workspace)
-
-    assert config_path == workspace / "opencode.json"
-    on_disk = json.loads(config_path.read_text(encoding="utf-8"))
-    assert on_disk == render_opencode_config(settings)
 
 
 # --- _render_provider / issue #14's custom-provider block -------------------------
@@ -307,15 +295,18 @@ def test_render_omits_models_entry_when_model_is_the_bare_prefix(
     assert "models" not in rendered["provider"]["ansina"]
 
 
-def test_write_opencode_config_overwrites_a_prior_run(tmp_path: Path) -> None:
+def test_render_is_deterministic_across_repeated_calls(tmp_path: Path) -> None:
+    """`render_opencode_config` is called fresh on every preflight/spawn (never
+    written once and reused) — two calls against the same settings must
+    produce identical output, including for a model that previously had a
+    different setting value, proving no caller can observe a stale rendering.
+    """
     first_settings = _settings(tmp_path, webfetch="deny")
-    workspace = first_settings.opencode.workspace_dir
-    workspace.mkdir(parents=True)
-    write_opencode_config(first_settings, workspace)
-
     second_settings = _settings(tmp_path, webfetch="allow")
-    config_path = write_opencode_config(second_settings, workspace)
 
-    on_disk = json.loads(config_path.read_text(encoding="utf-8"))
-    assert on_disk["permission"]["webfetch"] == "allow"
-    assert on_disk == render_opencode_config(second_settings)
+    assert render_opencode_config(second_settings)["permission"]["webfetch"] == (
+        "allow"
+    )
+    assert render_opencode_config(first_settings) == render_opencode_config(
+        first_settings
+    )

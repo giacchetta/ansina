@@ -103,11 +103,28 @@ than replacing one with another: remote → global (`~/.config/opencode/opencode
 `OPENCODE_CONFIG_CONTENT` → managed config files → macOS managed preferences (later
 wins). Project config does rank above the global file — but because sources *merge*
 rather than override wholesale, any permission key an operator set in their own
-global config that Ansina's generated `opencode.json` doesn't also name survives into
-the effective, resolved configuration. Redirecting the child's `HOME` removes the
-global file from the merge chain entirely; `OPENCODE_CONFIG_CONTENT` (set to the
-identical rendered permission block) is defense in depth, since it ranks above
-project config too.
+global config that Ansina's own rendered config doesn't also name survives into the
+effective, resolved configuration. Redirecting the child's `HOME` removes the global
+file from the merge chain entirely; `OPENCODE_CONFIG_CONTENT` (set to the identical
+rendered permission block) then carries the whole load, since it ranks above project
+config too.
+
+**A second, more serious bug, found by issue #14's own real-hardware verification**:
+Ansina originally shipped *both* mitigations at once — the identical rendered config
+set as `OPENCODE_CONFIG_CONTENT` **and** written to disk as a project `opencode.json`
+file (`write_opencode_config`, since removed). With both present, even carrying
+byte-identical content, real `edit`/`write` tool calls were denied outright. A
+controlled A/B test against the real Ansina workspace directory and OpenCode's own
+shared background service isolated the cause: removing the on-disk file (env
+unchanged) made the exact same write succeed. The root cause inside OpenCode's own
+project-config-plus-`OPENCODE_CONFIG_CONTENT` merge path was not pinned down further;
+the fix taken is the structurally safe one — `ansina.opencode.config` no longer writes
+a project `opencode.json` file at all, so there is nothing for it to merge badly with.
+`OPENCODE_CONFIG_CONTENT` alone already ranks above project config in the precedence
+list above, so this loses no coverage of the common case. Not re-tested: whether an
+*operator*-authored project `opencode.json` placed by hand inside `workspace_dir`
+(never written by Ansina itself) reintroduces the identical denial — the A/B test
+above only isolated the file Ansina used to write.
 
 **Residual risk, named rather than solved**: managed config files and macOS managed
 preferences outrank even `OPENCODE_CONFIG_CONTENT`, and redirecting `HOME` does not
@@ -141,7 +158,7 @@ in the daemon's own boot sequence calls it yet (no route or tick-loop caller exi
 so an ordinary `uv run ansina` with the default config logs nothing about OpenCode at
 all. With `enabled = true` and `[telemetry] enabled = true`, this snippet preflights
 for real: binary resolution, an optional pinned-version check, workspace provisioning,
-the generated `opencode.json`'s own round-trip, and the effective-permission
+the generated config's own in-memory JSON round-trip, and the effective-permission
 assertion above — returning `None` (with a specific logged skip reason) on any failed
 check, or (issue #75) a real, ready-to-call `OpencodeCliRunner` on a clean pass.
 Neither CI leg installs `opencode` (same reasoning as Vector — see

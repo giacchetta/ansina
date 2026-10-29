@@ -276,14 +276,17 @@ def test_preflight_skips_when_the_workspace_path_is_not_a_directory(
 def test_preflight_skips_when_the_generated_config_does_not_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Unreachable via any real `[opencode]` settings tree — `render_
+    opencode_config` only ever builds plain, JSON-serializable values from a
+    typed Pydantic model. Forced here by monkeypatching it to return a
+    non-serializable value, the same "defensive, never-trust-a-helper" shape
+    `test_preflight_skips_when_the_workspace_path_is_not_a_directory` already
+    uses above.
+    """
     monkeypatch.setattr("shutil.which", lambda _name: "/usr/opencode")
-
-    def _write_bad_config(_settings: Settings, workspace: Path) -> Path:
-        path = workspace / "opencode.json"
-        path.write_text("not valid json")
-        return path
-
-    monkeypatch.setattr(preflight_module, "write_opencode_config", _write_bad_config)
+    monkeypatch.setattr(
+        preflight_module, "render_opencode_config", lambda _settings: {"bad": object()}
+    )
     settings = _settings(tmp_path)
 
     result = preflight(settings)
@@ -422,10 +425,9 @@ def test_preflight_passes_every_check_end_to_end(
         ["/usr/opencode", "debug", "config"],
     ]
     assert "OPENCODE_CONFIG_CONTENT" in captured["env"]
-    config_on_disk = json.loads(
-        (settings.opencode.workspace_dir / "opencode.json").read_text()
-    )
-    assert config_on_disk["permission"] == configured_permission
+    embedded = json.loads(captured["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert embedded["permission"] == configured_permission
+    assert not (settings.opencode.workspace_dir / "opencode.json").exists()
 
 
 # --- _scan_for_ask / _find_looser_than_configured (pure helpers) ----------------

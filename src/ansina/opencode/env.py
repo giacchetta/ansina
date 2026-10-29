@@ -14,20 +14,30 @@ block for any permission key our own generated `opencode.json` doesn't
 explicitly name. Redirecting `HOME` removes that one file from the merge
 chain entirely.
 
-`OPENCODE_CONFIG_CONTENT` is set to the identical rendered permission block
-the generated `opencode.json` file carries, as defense in depth: it sits
-*above* project config in OpenCode's own documented merge order, so even a
-project-config file an operator hand-edited after the fact can't loosen what
-this module demands.
+`OPENCODE_CONFIG_CONTENT` carries the full rendered config (`ansina.opencode.
+config.render_opencode_config`) — it sits *above* project config in OpenCode's
+own documented merge order, so even a project-config file an operator
+hand-edited after the fact can't loosen what this module demands. It is the
+*only* config source Ansina ever hands OpenCode: this module previously also
+wrote the identical rendering to a project-level `opencode.json` file
+(`write_opencode_config`, since removed — see `ansina.opencode.config`'s own
+module docstring) as defense in depth, until issue #14's own real-hardware
+A/B test found that having *both* sources present — even with byte-identical
+content — broke real `edit`/`write` tool-call permission resolution outright.
 
-**Residual risk, named rather than solved here**: OpenCode's documented
-precedence places managed config files and macOS managed preferences *above*
-even `OPENCODE_CONFIG_CONTENT` — redirecting `HOME` does not remove either
-from the merge chain, and neither lives at a path this module could read and
-account for directly. `ansina.opencode.preflight`'s own final check (re-
-reading the *effective*, fully-resolved permissions via `opencode debug
-config`) is what actually catches that case; this module's job is only to
-make the common case (an ordinary global config file) unreachable.
+**Residual risk, named rather than solved here**: an *operator*-authored
+project-level `opencode.json` placed inside `workspace_dir` by hand (never
+written by this module itself) has not been re-tested against the finding
+above — if the same interaction applies regardless of who wrote the file, it
+could reintroduce the identical permission denial. Separately, OpenCode's
+documented precedence places managed config files and macOS managed
+preferences *above* even `OPENCODE_CONFIG_CONTENT` — redirecting `HOME` does
+not remove either from the merge chain, and neither lives at a path this
+module could read and account for directly. `ansina.opencode.preflight`'s own
+final check (re-reading the *effective*, fully-resolved permissions via
+`opencode debug config`) is what actually catches that second case; this
+module's job is only to make the common case (an ordinary global config file)
+unreachable.
 """
 
 from __future__ import annotations

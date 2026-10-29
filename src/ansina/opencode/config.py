@@ -1,21 +1,34 @@
-"""Renders OpenCode's own `opencode.json` from Ansina's typed `[opencode]`
+"""Renders OpenCode's own `opencode.json` shape from Ansina's typed `[opencode]`
 settings. See issue #74; the `provider` block below is issue #14's own small
 additive change.
 
-Generated on every preflight/spawn — deliberately unlike `deploy/vector.toml`'s
-committed, hand-edited, never-daemon-generated file: the permission block must
-be operator-tunable from `ansina.toml` with no code change, and a file this
-module writes itself can never drift from the typed settings that produced it
-(a hand-edited file always can).
+Rendered fresh on every preflight/spawn and embedded into `OPENCODE_CONFIG_CONTENT`
+(`ansina.opencode.env.build_opencode_env`) — never written to a project-level
+`opencode.json` file on disk. That was this module's original shape (`write_
+opencode_config`, since removed) until issue #14's own real-hardware verification
+found a second, more serious config-merge bug beyond the one `docs/opencode.md`'s
+"config-merge finding" already named: with *both* a project `opencode.json` file and
+`OPENCODE_CONFIG_CONTENT` present — even carrying byte-identical permission content —
+real `edit`/`write` tool calls were denied outright, while the identical content via
+`OPENCODE_CONFIG_CONTENT` *alone* (no project file at all) worked correctly. Confirmed
+by a controlled A/B test against the real Ansina workspace directory and OpenCode's
+own shared background service: renaming the on-disk file away (env unchanged) made
+the exact same write succeed. Root cause not pinned down further (OpenCode's own
+project-config-plus-`OPENCODE_CONFIG_CONTENT` merge path, not Ansina's rendering, is
+the suspect) — the fix taken here is the structurally safe one: never let the
+project-file source exist at all, so there is nothing to merge badly with.
+`OPENCODE_CONFIG_CONTENT` alone already ranks above project config in OpenCode's own
+documented precedence (see `docs/opencode.md`), so this loses no coverage.
 
 Emission order inside `permission` is load-bearing, not cosmetic: OpenCode's
 own documented precedence for `bash`/`edit`'s glob-map values is "rules are
 evaluated by pattern match, with the last matching rule winning" — so `"*"`
 (the deny floor) is always emitted first, then every allowlist glob, then
 every denylist glob *last*, so an overlapping denylist entry always beats an
-allowlist one rather than the reverse. `write_opencode_config`'s
-`sort_keys=False` is deliberate for the identical reason — a sorted
-re-ordering would silently change which glob rule wins.
+allowlist one rather than the reverse. `render_opencode_config` returns a
+plain `dict`, so this order survives into `OPENCODE_CONFIG_CONTENT` via
+`json.dumps`'s own default `sort_keys=False` — a sorted re-ordering would
+silently change which glob rule wins.
 
 `_render_provider()` (issue #14) is the custom-provider block for OpenCode's
 own driving model, when `[opencode] provider_base_url` is set — i.e. when that
@@ -28,7 +41,7 @@ provider is `provider.<id>.npm = "@ai-sdk/openai-compatible"` plus
 `"{env:VARNAME}"` templating form that lets the *value* stay in the child
 process's own environment — this function only ever emits the env var *name*
 (`[opencode] provider_api_key_env`), never `provider_api_key`'s actual secret
-value, so the rendered file is safe to write to disk and to embed verbatim into
+value, so the rendered config is safe to embed verbatim into
 `OPENCODE_CONFIG_CONTENT` (`ansina.opencode.env`). `_CUSTOM_PROVIDER_ID` is a
 fixed constant, not a setting — Ansina configures at most one custom provider
 for OpenCode's own model, so a second knob to name it would add no real
@@ -45,14 +58,11 @@ undersold how load-bearing it actually is.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 from ansina.config.settings import Settings
 
 _SCHEMA_URL = "https://opencode.ai/config.json"
-_CONFIG_FILENAME = "opencode.json"
 _CUSTOM_PROVIDER_ID = "ansina"
 
 
@@ -154,10 +164,12 @@ def _render_provider(settings: Settings) -> dict[str, Any] | None:
 
 
 def render_opencode_config(settings: Settings) -> dict[str, Any]:
-    """The pure, deterministic rendering `write_opencode_config` serializes —
-    split out so the unit suite can assert its shape (key order, no `"ask"`
-    anywhere) without touching a filesystem, and so `ansina.opencode.env` can
-    embed the identical rendering into `OPENCODE_CONFIG_CONTENT`.
+    """The pure, deterministic rendering `ansina.opencode.env.build_opencode_env`
+    embeds into `OPENCODE_CONFIG_CONTENT` and `ansina.opencode.preflight.preflight`
+    round-trips through `json.dumps`/`json.loads` as its own defense-in-depth check —
+    never written to a project-level `opencode.json` file (see module docstring for
+    why). Returns a plain `dict` so the unit suite can assert its shape (key order,
+    no `"ask"` anywhere) with no filesystem involved.
     """
     permission = settings.opencode.permission
     rendered_permission: dict[str, Any] = {
@@ -181,19 +193,3 @@ def render_opencode_config(settings: Settings) -> dict[str, Any]:
         rendered["provider"] = provider
     rendered["permission"] = rendered_permission
     return rendered
-
-
-def write_opencode_config(settings: Settings, workspace: Path) -> Path:
-    """Writes the rendered config to `<workspace>/opencode.json`, overwriting
-    whatever was already there — this file always reflects the *current*
-    typed settings, never a prior run's. `indent=2` for a human reading it
-    while debugging; `sort_keys=False` (`json.dumps`'s own default, stated
-    explicitly here since it is load-bearing, not incidental) preserves the
-    emission order `render_opencode_config` built.
-    """
-    config_path = workspace / _CONFIG_FILENAME
-    config_path.write_text(
-        json.dumps(render_opencode_config(settings), indent=2, sort_keys=False),
-        encoding="utf-8",
-    )
-    return config_path
