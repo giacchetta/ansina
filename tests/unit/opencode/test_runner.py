@@ -245,7 +245,11 @@ async def test_spawn_oserror_becomes_a_failed_outcome(tmp_path: Path) -> None:
 # --- argv construction --------------------------------------------------------
 
 
-async def test_argv_includes_prompt_format_and_workspace_dir(tmp_path: Path) -> None:
+async def test_argv_scopes_the_workspace_via_cwd_not_a_dir_flag(
+    tmp_path: Path,
+) -> None:
+    """`opencode run` has no directory flag at all (issue #81) — the spawned
+    child's own `cwd` is what confines it to the workspace."""
     handle = _FakePipedProcessHandle()
     handle.complete(0)
     captured: dict[str, Any] = {}
@@ -263,7 +267,7 @@ async def test_argv_includes_prompt_format_and_workspace_dir(tmp_path: Path) -> 
     assert argv[1] == "run"
     assert argv[2] == "do the thing"
     assert argv[argv.index("--format") + 1] == "json"
-    assert argv[argv.index("--dir") + 1] == str(settings.opencode.workspace_dir)
+    assert "--dir" not in argv
     assert captured["cwd"] == settings.opencode.workspace_dir
 
 
@@ -279,7 +283,15 @@ async def test_argv_omits_optional_flags_when_nothing_is_set(tmp_path: Path) -> 
     await runner.run(RunRequest(prompt="p"), lambda _e: None)
 
     argv = captured["argv"]
-    for flag in ("--session", "--continue", "--fork", "--model", "--agent", "--auto"):
+    for flag in (
+        "--dir",
+        "--session",
+        "--continue",
+        "--fork",
+        "--model",
+        "--agent",
+        "--auto",
+    ):
         assert flag not in argv
 
 

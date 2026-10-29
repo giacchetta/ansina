@@ -93,8 +93,13 @@ class AgentRunner(Protocol):
 
 class OpencodeCliRunner:
     """The one `AgentRunner` adapter: `opencode run <prompt> --format json
-    --dir <workspace> ...` via `ansina.process.handles.PipedSpawner`, one
-    child process per `run()` call.
+    ...` via `ansina.process.handles.PipedSpawner`, one child process per
+    `run()` call. The child's own working directory — `cwd=
+    opencode.workspace_dir`, passed at the real spawn call in `_run_one()` —
+    is what confines it to the workspace; `opencode run` has no directory
+    flag at all (verified against a real `opencode v2.1.4` binary — see
+    issue #81, which removed a `--dir` flag `_build_argv()` used to pass
+    that the real CLI rejects outright).
 
     Concurrency and backlog are enforced per instance, not per Protocol —
     `asyncio.Semaphore(max_concurrent_runs)` bounds how many children may
@@ -168,8 +173,6 @@ class OpencodeCliRunner:
             request.prompt,
             "--format",
             "json",
-            "--dir",
-            str(opencode.workspace_dir),
         ]
         if request.session_id is not None:
             argv += ["--session", request.session_id]

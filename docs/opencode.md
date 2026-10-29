@@ -7,8 +7,9 @@ foundation: workspace provisioning, generated per-run config, an allow-list chil
 environment, and a logged-skip preflight — with no spawn at all beyond `preflight()`'s
 own two readiness checks (`--version`, `debug config`). Issue #75's
 `ansina.opencode.runner.OpencodeCliRunner` is the first thing that actually spawns a
-real `opencode` child to do work: a one-shot `opencode run --format json --dir
-<workspace> ...` subprocess per call, streaming its line-delimited JSON events into a
+real `opencode` child to do work: a one-shot `opencode run --format json ...`
+subprocess per call — confined to the workspace via `cwd`, since `opencode run` has
+no directory flag at all (issue #81) — streaming its line-delimited JSON events into a
 callback as they arrive, enforcing a wall-clock timeout (terminate→kill) and a
 concurrency/backlog bound, and never raising once that spawn has been attempted —
 every failure (a bad spawn, a non-zero exit, a timeout, an output-size cap) resolves
