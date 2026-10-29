@@ -72,13 +72,41 @@ def _render_glob_permission(
 
 
 def _render_edit_permission(settings: Settings) -> str | dict[str, str]:
+    """`"workspace"` confines edits to the directory the child was actually
+    spawned in — enforced by a bare, cwd-*relative* `"**"` pattern, not an
+    absolute, `workspace_dir`-prefixed one.
+
+    Found necessary by real-hardware verification, not assumed: against a
+    real v2.2.1 binary, an absolute pattern (`f"{workspace_dir}/*"`, this
+    function's own shape before this fix) never matched a single real
+    `write`/`edit` tool call — not because of the glob syntax (`*` vs `**`),
+    but because OpenCode's own documented convention for `edit` patterns is
+    relative to the project root (confirmed against its own docs' worked
+    example, `"packages/web/src/content/docs/*.mdx"`, no leading `/`), and in
+    practice the tool's own `path` input varies between absolute and relative
+    across calls — an absolute-rooted pattern can never match a relative
+    input, or vice versa. A bare `"**"` is both correct and sufficient: `cwd`
+    is always `opencode.workspace_dir` for every real spawn
+    (`ansina.opencode.runner.OpencodeCliRunner._run_one`), so "everything
+    reachable via a relative path from here" already *is* "everything inside
+    the workspace." `edit` is also confirmed (both from OpenCode's own docs
+    and from a real `"Permission denied: edit"` error on a real `write` tool
+    call) to be the one action covering `edit`/`write`/`patch` together — no
+    separate `write` key is needed.
+
+    A `"**"` pattern does **not** reopen directory-escape risk: a relative
+    path containing `../` segments is caught by OpenCode's own independent
+    `external_directory` check (always `"deny"` here unless the operator
+    explicitly widens it) *before* the `edit` glob is ever consulted —
+    verified directly with a real `../../../../../../tmp/...` write attempt
+    under this exact `"**"` rule, which failed with
+    `"Permission denied: external_directory"`, never reaching `edit` at all.
+    """
     opencode = settings.opencode
     mode = opencode.permission.edit
     if mode in ("deny", "allow"):
         return mode
-    # "workspace": confined to the workspace directory itself, nothing else.
-    workspace_glob = f"{opencode.workspace_dir}/*"
-    return {"*": "deny", workspace_glob: "allow"}
+    return {"*": "deny", "**": "allow"}
 
 
 def _render_bash_permission(settings: Settings) -> str | dict[str, str]:

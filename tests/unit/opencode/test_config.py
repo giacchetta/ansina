@@ -49,15 +49,22 @@ def test_render_includes_schema_and_every_permission_key(tmp_path: Path) -> None
     assert permission["external_directory"] == "deny"
 
 
-def test_render_edit_workspace_mode_confines_to_the_workspace_glob(
+def test_render_edit_workspace_mode_uses_a_relative_double_star_pattern(
     tmp_path: Path,
 ) -> None:
+    """A bare, cwd-relative `"**"` — not an absolute, `workspace_dir`-prefixed
+    pattern — confirmed necessary by real-hardware verification (see
+    `_render_edit_permission`'s own docstring): `cwd` is always
+    `workspace_dir` for every real spawn, so "everything reachable via a
+    relative path from here" already *is* "everything inside the workspace,"
+    and an absolute pattern never matched a real tool call's own `path` input
+    in practice.
+    """
     settings = _settings(tmp_path, edit="workspace")
 
     rendered = render_opencode_config(settings)
 
-    workspace_glob = f"{settings.opencode.workspace_dir}/*"
-    assert rendered["permission"]["edit"] == {"*": "deny", workspace_glob: "allow"}
+    assert rendered["permission"]["edit"] == {"*": "deny", "**": "allow"}
 
 
 def test_render_edit_deny_and_allow_modes_are_plain_strings(tmp_path: Path) -> None:
