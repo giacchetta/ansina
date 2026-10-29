@@ -129,15 +129,18 @@ for those two families.
 
 ### 1. Bench report (`kind=bench/`)
 
-Two sub-families share this one key prefix, distinguished by the `suite` field below
-— the tick-decision bench (issue #53) and the request-triage bench (issue #13, a
-gated experiment whose port is wired into no route or the tick loop; see
-`ansina.heart.triage`). Both are JSON objects (`ansina.heart.eval.report.
-report_to_json` / `ansina.heart.eval.triage_report.triage_report_to_json`), the
-authoritative shape; each paired `.md` is a human-readable rendering of the same
-data, not independently schema'd. `suite` is additive (issue #13 — every report
-written before it has no such field, which a consumer should treat as `"tick"`,
-the only suite that existed then).
+Three sub-families share this one key prefix, distinguished by the `suite` field
+below — the tick-decision bench (issue #53), the request-triage bench (issue #13),
+and the context-curation bench (issue #14) — the latter two both gated experiments
+whose ports are wired into no route or the tick loop; see `ansina.heart.triage`/
+`ansina.heart.curation`. All three are JSON objects (`ansina.heart.eval.report.
+report_to_json` / `ansina.heart.eval.triage_report.triage_report_to_json` /
+`ansina.heart.eval.curation_report.curation_report_to_json`), the authoritative
+shape; each paired `.md` is a human-readable rendering of the same data, not
+independently schema'd. `suite` is additive (issue #13 — every report written
+before it has no such field, which a consumer should treat as `"tick"`, the only
+suite that existed then; issue #14 adds a third value with no further schema
+version bump, the same reasoning).
 
 #### 1a. Tick-decision bench report (`suite: "tick"`)
 
@@ -204,6 +207,39 @@ same types; `metrics.*`/`results[].*` differ:
 | `results[].routed_to_brain` / `.under_route` / `.over_route` | bool | |
 | `results[].raw_output` | string | unbounded length, same caveat as 1a |
 | `results[].latency_seconds` | float | |
+| `results[].prompt_tokens` | int | |
+| `results[].tags` | string[] | sorted |
+
+#### 1c. Context-curation bench report (`suite: "curation"`)
+
+Shares `model_repo`/`prompt_variant`/`chat_template`/`generated_at`/`host`/`commit`/
+`branch`/`mlx_lm_version`/`max_output_tokens`/`fixture_count`/`gate.*` with 1a/1b
+above, same types; `metrics.*`/`results[].*` differ. Unlike 1a/1b, this suite also
+carries `brain_model` and `budget_fraction` (there is no analogous "which remote
+model answered" or "what fraction of the transcript fit the budget" concept for the
+other two suites) and drives two real `BrainProvider.stream()` calls per fixture
+(issue #12) rather than only `HeartRuntime.generate()` calls:
+
+| Field | Type | Notes |
+|---|---|---|
+| `suite` | `"curation"` | |
+| `brain_model` | string | the Brain model both conditions were asked, per fixture |
+| `budget_fraction` | float (0–1) | each fixture's own token budget as a fraction of its full transcript's token count |
+| `metrics.must_keep_recall_rate` | float (0–1) | fraction of fixtures whose curated selection kept every labelled `must_keep` event — the gate's zero-tolerance clause |
+| `metrics.curated_identified_count` / `.truncated_identified_count` | int | how many fixtures' Brain answer, under each condition, matched the keyword-match proxy against the fixture's `failure_cause` label — a documented, coarse stand-in for a human judgment call, not a semantic judge (see `ansina.heart.eval.curation_runner`'s own module docstring) |
+| `metrics.parse_fallback_rate` | float (0–1) | |
+| `metrics.exceeded_budget_count` | int | how often the curator's own raw selection didn't fit the budget unassisted and had to be trimmed; reported, never gated |
+| `metrics.latency_p50_seconds` / `latency_p95_seconds` | float | the curator's own `curate()` call only — never the Brain round trips |
+| `metrics.prompt_tokens_min` / `_median` / `_max` | int / float / int | the curator's own Heart-side prompt, not the Brain's |
+| `metrics.peak_rss_bytes` | int | |
+| `results[].id` | string | fixture id |
+| `results[].must_keep` | int[] | sorted event sequence numbers |
+| `results[].selected_curated` / `.selected_truncated` | int[] | sorted event sequence numbers each condition kept |
+| `results[].curated_recall` / `.truncated_recall` | bool | whether that condition's selection kept every `must_keep` event |
+| `results[].parse_fallback` / `.exceeded_budget` | bool | |
+| `results[].curated_identified` / `.truncated_identified` | bool | the per-fixture keyword-match proxy verdict |
+| `results[].curated_answer` / `.truncated_answer` | string | the Brain's full free-text answer under each condition — unbounded length, same caveat as 1a/1b's `raw_output`; this is the human sanity-check surface for the keyword-match proxy above |
+| `results[].curation_latency_seconds` | float | |
 | `results[].prompt_tokens` | int | |
 | `results[].tags` | string[] | sorted |
 

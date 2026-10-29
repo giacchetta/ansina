@@ -5,9 +5,12 @@ from pathlib import Path
 import pytest
 
 from ansina.errors import FixtureError
+from ansina.heart.curation import CurationEvent
 from ansina.heart.eval.fixtures import (
+    CurationFixture,
     TickFixture,
     TriageFixture,
+    load_curation_fixtures,
     load_fixtures,
     load_triage_fixtures,
 )
@@ -139,6 +142,13 @@ def test_load_fixtures_rejects_an_empty_file(tmp_path: Path) -> None:
 
     with pytest.raises(FixtureError, match="no fixtures found"):
         load_fixtures(path)
+
+
+def test_load_fixtures_rejects_a_missing_custom_path(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist.jsonl"
+
+    with pytest.raises(FixtureError, match="fixture file not found"):
+        load_fixtures(missing)
 
 
 def test_load_fixtures_rejects_a_file_of_only_comments(tmp_path: Path) -> None:
@@ -303,3 +313,188 @@ def test_load_triage_fixtures_rejects_a_missing_class(tmp_path: Path) -> None:
 
     with pytest.raises(FixtureError, match="no fixtures for class"):
         load_triage_fixtures(path)
+
+
+# --- load_curation_fixtures (issue #14) --------------------------------------------
+#
+# Unlike `load_fixtures`/`load_triage_fixtures` above, there is no "loads the bundled
+# default set" test here: `data/curation_fixtures.jsonl` is real, captured OpenCode
+# session data (issue #14's own AC #1 — "derived from real M9 session data, not
+# synthetic"), produced in a follow-up real-hardware step, not shipped with this
+# code. `_resolve_text`'s `path is None` branch is already covered by the two
+# bundled-default tests above (same shared function); every test below exercises
+# `load_curation_fixtures` against an explicit `tmp_path` instead.
+
+
+def test_load_curation_fixtures_from_a_custom_path(tmp_path: Path) -> None:
+    content = (
+        '{"id": "c1", "events": [{"sequence": 0, "raw_type": "submitted", '
+        '"payload": "p0"}, {"sequence": 1, "raw_type": "run_event", '
+        '"payload": "p1"}], "must_keep": [0], "failure_cause": "bad assumption"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    fixtures = load_curation_fixtures(path)
+
+    assert fixtures == (
+        CurationFixture(
+            id="c1",
+            events=(
+                CurationEvent(sequence=0, raw_type="submitted", payload="p0"),
+                CurationEvent(sequence=1, raw_type="run_event", payload="p1"),
+            ),
+            must_keep=frozenset({0}),
+            failure_cause="bad assumption",
+        ),
+    )
+
+
+def test_load_curation_fixtures_skips_blank_lines_and_comments(
+    tmp_path: Path,
+) -> None:
+    content = (
+        "# a comment\n"
+        "\n"
+        '{"id": "a", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [0], "failure_cause": "f"}\n'
+        '{"id": "b", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [0], "failure_cause": "f"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    fixtures = load_curation_fixtures(path)
+
+    assert [f.id for f in fixtures] == ["a", "b"]
+
+
+def test_load_curation_fixtures_parses_tags_and_note(tmp_path: Path) -> None:
+    content = (
+        '{"id": "a", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [0], "failure_cause": "f", "tags": ["permission_denial"], '
+        '"note": "n"}\n'
+        '{"id": "b", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [0], "failure_cause": "f"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    fixtures = load_curation_fixtures(path)
+
+    assert fixtures[0].tags == frozenset({"permission_denial"})
+    assert fixtures[0].note == "n"
+    assert fixtures[1].tags == frozenset()
+    assert fixtures[1].note == ""
+
+
+def test_load_curation_fixtures_rejects_invalid_json(tmp_path: Path) -> None:
+    path = _write(tmp_path, "not json at all\n")
+
+    with pytest.raises(FixtureError, match="not valid JSON"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_a_missing_required_key(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, '{"id": "a", "events": []}\n')
+
+    with pytest.raises(FixtureError, match="missing required key"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_empty_events(tmp_path: Path) -> None:
+    content = '{"id": "a", "events": [], "must_keep": [0], "failure_cause": "f"}\n'
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="has no events"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_duplicate_event_sequences(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"id": "a", "events": ['
+        '{"sequence": 0, "raw_type": "t", "payload": "p"}, '
+        '{"sequence": 0, "raw_type": "t", "payload": "p2"}'
+        '], "must_keep": [0], "failure_cause": "f"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="duplicate event sequence numbers"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_an_empty_must_keep(tmp_path: Path) -> None:
+    content = (
+        '{"id": "a", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [], "failure_cause": "f"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="empty must_keep set"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_a_must_keep_outside_valid_sequences(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"id": "a", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [7], "failure_cause": "f"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="not present in its own events"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_an_empty_failure_cause(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"id": "a", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [0], "failure_cause": "  "}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="empty failure_cause"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_an_empty_file(tmp_path: Path) -> None:
+    path = _write(tmp_path, "")
+
+    with pytest.raises(FixtureError, match="no fixtures found"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_a_file_of_only_comments(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, "# just a comment\n\n")
+
+    with pytest.raises(FixtureError, match="no fixtures found"):
+        load_curation_fixtures(path)
+
+
+def test_load_curation_fixtures_rejects_a_missing_bundled_file() -> None:
+    """`data/curation_fixtures.jsonl` is real, captured session data landed by a
+    follow-up real-hardware step, not shipped with this code — calling with no
+    `--fixtures` override must fail cleanly (`FixtureError`), never a raw
+    `FileNotFoundError`/`ModuleNotFoundError` traceback escaping `_resolve_text`.
+    """
+    with pytest.raises(FixtureError, match="fixture file not found"):
+        load_curation_fixtures()
+
+
+def test_load_curation_fixtures_rejects_duplicate_ids(tmp_path: Path) -> None:
+    content = (
+        '{"id": "a", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [0], "failure_cause": "f"}\n'
+        '{"id": "a", "events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"must_keep": [0], "failure_cause": "f"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="duplicate fixture id"):
+        load_curation_fixtures(path)

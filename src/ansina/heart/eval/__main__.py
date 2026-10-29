@@ -1,5 +1,5 @@
 """`python -m ansina.heart.eval` — the real-model bench entry point. See issue #53
-(tick suite) / #13 (triage suite).
+(tick suite) / #13 (triage suite) / #14 (curation suite).
 
 Never invoked in CI: no MLX adapter is viable on either CI leg (see
 `ansina.heart.selection`). Run via `make heart-bench` on the Mac Mini M4, which wraps
@@ -12,24 +12,47 @@ Reads `[heart]`/`[heart.tick]` from the normal `load_settings()` layering;
 `--model-repo` and `--max-output-tokens` override those two fields for this run only,
 via `Settings.model_copy`, without touching `ansina.toml` or the environment.
 
-`--suite {tick,triage}` (default `tick`) picks which bench runs — issue #13's own
-request-triage experiment reuses this entry point, the runtime lifecycle, provenance
+`--suite {tick,triage,curation}` (default `tick`) picks which bench runs — issue
+#13's own request-triage experiment, and issue #14's own context-curation
+experiment, both reuse this entry point, the runtime lifecycle, provenance
 resolution, and the upload hook rather than duplicating any of them; only the fixture
 loader, the prompt-variant map, and the report renderer differ per suite, each kept in
-`_run_tick_suite`/`_run_triage_suite` below.
+`_run_tick_suite`/`_run_triage_suite`/`_run_curation_suite` below. The curation suite
+is the one genuinely **async** branch — it drives real `BrainProvider.stream()` calls
+— isolated inside its own `asyncio.run(...)` call so the tick/triage branches stay
+fully synchronous and unaffected.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
+from ansina.brain.provider import BrainProvider
+from ansina.brain.selection import build_brain_provider
 from ansina.config import Settings, load_settings
 from ansina.errors import AnsinaError
+from ansina.heart.curation import (
+    CURATION_PROMPT_VARIANTS,
+    DEFAULT_CURATION_VARIANT,
+    HeartContextCurator,
+)
+from ansina.heart.eval.curation_report import (
+    curation_gate_result,
+    curation_report_to_json,
+    curation_report_to_markdown,
+)
+from ansina.heart.eval.curation_runner import (
+    DEFAULT_BUDGET_FRACTION,
+    run_curation_bench,
+)
 from ansina.heart.eval.fixtures import (
+    CurationFixture,
     TickFixture,
     TriageFixture,
+    load_curation_fixtures,
     load_fixtures,
     load_triage_fixtures,
 )
@@ -59,11 +82,13 @@ from ansina.logging import configure_logging, get_logger
 
 _DEFAULT_OUT_DIR = Path("docs/heart/bench")
 
-# The union of both suites' variant names, purely for `argparse`'s own `--help`
+# The union of every suite's variant names, purely for `argparse`'s own `--help`
 # rendering — the actual choice is validated against the *selected* suite's map in
-# `main()`, since the two suites don't share a prompt-variant namespace (issue #13's
+# `main()`, since the suites don't share a prompt-variant namespace (e.g. issue #13's
 # own "strict" is an unrelated template from the tick suite's "strict").
-_ALL_PROMPT_VARIANTS = sorted(set(PROMPT_VARIANTS) | set(TRIAGE_PROMPT_VARIANTS))
+_ALL_PROMPT_VARIANTS = sorted(
+    set(PROMPT_VARIANTS) | set(TRIAGE_PROMPT_VARIANTS) | set(CURATION_PROMPT_VARIANTS)
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -73,12 +98,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--suite",
-        choices=("tick", "triage"),
+        choices=("tick", "triage", "curation"),
         default="tick",
         help=(
             "Which bench to run: 'tick' (issue #53, the shipped autonomic-loop "
-            "decision) or 'triage' (issue #13, the gated request-triage "
-            "experiment — wired into nothing, bench only). Default: tick."
+            "decision), 'triage' (issue #13, the gated request-triage "
+            "experiment), or 'curation' (issue #14, the gated context-curation "
+            "experiment — needs a real [brain] configured). The two experiment "
+            "suites are wired into nothing beyond this bench. Default: tick."
         ),
     )
     parser.add_argument(
@@ -93,8 +120,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Named prompt template. Validated against the selected --suite's own "
             "variant map (ansina.heart.tick.prompts.PROMPT_VARIANTS for 'tick', "
-            "ansina.heart.triage.TRIAGE_PROMPT_VARIANTS for 'triage'); defaults to "
-            "that suite's own default variant when omitted."
+            "ansina.heart.triage.TRIAGE_PROMPT_VARIANTS for 'triage', "
+            "ansina.heart.curation.CURATION_PROMPT_VARIANTS for 'curation'); "
+            "defaults to that suite's own default variant when omitted."
         ),
     )
     parser.add_argument(
@@ -143,7 +171,7 @@ def _upload_report_pair(settings: Settings, out_dir: Path, stem: str) -> None:
     `scripts/remote-heart.sh` already applies to `docs/heart/bench/`, extended to
     the bucket, so a second run on the same day never silently overwrites the
     first. Only the *uploaded key* is suffixed; the local files stay named `stem`.
-    Suite-agnostic: both the tick and triage suites key under `kind=bench/`.
+    Suite-agnostic: all three suites (tick/triage/curation) key under `kind=bench/`.
     """
     try:
         storage = build_report_storage(settings.telemetry.s3)
@@ -243,6 +271,66 @@ def _run_triage_suite(
     )
 
 
+async def _run_curation_suite(
+    runtime: HeartRuntime,
+    brain: BrainProvider,
+    settings: Settings,
+    *,
+    fixtures: tuple[CurationFixture, ...],
+    prompt_variant: str,
+    provenance: Provenance,
+) -> tuple[str, str, str, bool]:
+    """Run the context-curation bench (issue #14, the gated experiment — wired into
+    nothing beyond this bench) and return `(stem, markdown, json, gate_passed)`.
+    `runtime` must already be loaded, same discipline as `_run_tick_suite`/
+    `_run_triage_suite`; `brain` is this suite's own extra requirement (neither of the
+    other two suites touches the Brain at all) — a real, constructed `BrainProvider`,
+    never `None`, since `main()` refuses to even reach this function when
+    `[brain] enabled = false`.
+
+    Owns closing `brain` itself (`await brain.aclose()` in a `finally`, below) rather
+    than leaving that to a second, separate `asyncio.run()` call in `main()` — an
+    adapter's underlying async HTTP client may be bound to the event loop that
+    created it, so construction, use, and close must all happen inside the *same*
+    `asyncio.run()` call this whole function already runs under.
+    """
+    template = CURATION_PROMPT_VARIANTS[prompt_variant]
+    curator = HeartContextCurator(
+        runtime, template=template, max_output_tokens=settings.heart.max_output_tokens
+    )
+    try:
+        report = await run_curation_bench(
+            curator,
+            brain,
+            fixtures,
+            model_repo=settings.heart.model_repo,
+            prompt_variant=prompt_variant,
+            brain_model=settings.brain.model,
+            max_output_tokens=settings.brain.max_output_tokens,
+            token_count=runtime.token_count,
+            budget_fraction=DEFAULT_BUDGET_FRACTION,
+            chat_template=settings.heart.apply_chat_template,
+            commit=provenance.commit,
+            branch=provenance.branch,
+        )
+    finally:
+        await brain.aclose()
+    gate = curation_gate_result(
+        report, interval_seconds=settings.heart.tick.interval_seconds
+    )
+
+    date = report.generated_at[:10]
+    model_slug = settings.heart.model_repo.rsplit("/", 1)[-1]
+    template_suffix = "" if settings.heart.apply_chat_template else "-notemplate"
+    stem = f"{date}-{model_slug}-curation-{prompt_variant}{template_suffix}"
+    return (
+        stem,
+        curation_report_to_markdown(report, gate=gate),
+        curation_report_to_json(report, gate=gate),
+        gate.passed,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -267,10 +355,15 @@ def main(argv: list[str] | None = None) -> int:
             update={"heart": settings.heart.model_copy(update=heart_overrides)}
         )
 
-    variant_map = PROMPT_VARIANTS if args.suite == "tick" else TRIAGE_PROMPT_VARIANTS
-    default_variant = (
-        DEFAULT_PROMPT_VARIANT if args.suite == "tick" else DEFAULT_TRIAGE_VARIANT
-    )
+    if args.suite == "tick":
+        variant_map: dict[str, str] = dict(PROMPT_VARIANTS)
+        default_variant = DEFAULT_PROMPT_VARIANT
+    elif args.suite == "triage":
+        variant_map = dict(TRIAGE_PROMPT_VARIANTS)
+        default_variant = DEFAULT_TRIAGE_VARIANT
+    else:
+        variant_map = dict(CURATION_PROMPT_VARIANTS)
+        default_variant = DEFAULT_CURATION_VARIANT
     prompt_variant = args.prompt_variant or default_variant
     if prompt_variant not in variant_map:
         print(
@@ -283,11 +376,34 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.suite == "tick":
             tick_fixtures = load_fixtures(args.fixtures)
-        else:
+        elif args.suite == "triage":
             triage_fixtures = load_triage_fixtures(args.fixtures)
+        else:
+            curation_fixtures = load_curation_fixtures(args.fixtures)
     except AnsinaError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    # Issue #14's curation suite structurally requires a real Brain — unlike
+    # tick/triage, it compares two conditions' Brain *answers*, not just a Heart
+    # decision. `build_brain_provider` itself doesn't check `[brain] enabled` (its
+    # one caller, `create_app`, gates the call instead — see that module's own
+    # docstring), so this suite checks it explicitly rather than reaching
+    # `BrainUnavailableError`'s own, differently-worded refusal.
+    brain: BrainProvider | None = None
+    if args.suite == "curation":
+        if not settings.brain.enabled:
+            print(
+                "--suite curation requires a real [brain] configured "
+                "(ANSINA_BRAIN__ENABLED=true, plus base_url/model/api_key)",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            brain = build_brain_provider(settings)
+        except AnsinaError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
 
     try:
         runtime = build_heart_runtime(settings)
@@ -310,13 +426,27 @@ def main(argv: list[str] | None = None) -> int:
                 prompt_variant=prompt_variant,
                 provenance=provenance,
             )
-        else:
+        elif args.suite == "triage":
             stem, markdown, json_text, passed = _run_triage_suite(
                 runtime,
                 settings,
                 fixtures=triage_fixtures,
                 prompt_variant=prompt_variant,
                 provenance=provenance,
+            )
+        else:
+            # Guaranteed non-`None` by the `args.suite == "curation"` branch above —
+            # `main()`'s own control flow, not a runtime guess.
+            assert brain is not None
+            stem, markdown, json_text, passed = asyncio.run(
+                _run_curation_suite(
+                    runtime,
+                    brain,
+                    settings,
+                    fixtures=curation_fixtures,
+                    prompt_variant=prompt_variant,
+                    provenance=provenance,
+                )
             )
     finally:
         runtime.unload()

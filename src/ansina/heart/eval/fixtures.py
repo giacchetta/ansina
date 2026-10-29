@@ -13,8 +13,19 @@ duplicate-id/every-class-present machinery with `load_fixtures()` — the two di
 only in what one JSON object deserializes into, never in how the file as a whole is
 read or validated.
 
-Both loaders read via `importlib.resources`, not `Path(__file__)` — the same pattern
-`auth/password_policy.py`'s `_common_passwords()` uses to load `auth/data/
+A curation fixture (issue #14) is one real, captured OpenCode session: its event
+transcript (`heart.curation.CurationEvent`s, reconstructed from real `kind=opencode/`
+`run_event` lines — see that module's own docstring for why this is a local type, not
+an `ansina.opencode.events.RunEvent` import), the sequence numbers a human judged
+essential to explain the run's outcome (`must_keep`), and a short `failure_cause`
+label the bench's keyword-match proxy scores a Brain answer against.
+`load_curation_fixtures()` shares `_resolve_text`/`_iter_fixture_lines` with the two
+loaders above, plus the standalone duplicate-id check
+(`_check_no_duplicate_ids`) — but **not** `_validate_fixture_set`'s "every class
+present" half, since there is no label enum to be exhaustive over.
+
+All three loaders read via `importlib.resources`, not `Path(__file__)` — the same
+pattern `auth/password_policy.py`'s `_common_passwords()` uses to load `auth/data/
 common_passwords.txt`, so this resolves correctly from an installed wheel, not just a
 source checkout.
 """
@@ -30,12 +41,14 @@ from importlib import resources
 from pathlib import Path
 
 from ansina.errors import FixtureError
+from ansina.heart.curation import CurationEvent
 from ansina.heart.tick.decision import TickDecision
 from ansina.heart.tick.snapshot import SnapshotItem
 from ansina.heart.triage import TriageClass
 
 _DEFAULT_RESOURCE = ("ansina.heart.eval", "data/tick_fixtures.jsonl")
 _DEFAULT_TRIAGE_RESOURCE = ("ansina.heart.eval", "data/triage_fixtures.jsonl")
+_DEFAULT_CURATION_RESOURCE = ("ansina.heart.eval", "data/curation_fixtures.jsonl")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,14 +70,33 @@ def _resolve_text(
     path: Path | None, default_resource: tuple[str, str]
 ) -> tuple[str, str]:
     """Read fixture-set text plus the `source` string error messages cite — shared by
-    `load_fixtures`/`load_triage_fixtures`. `path` overrides `default_resource`'s
-    bundled `importlib.resources` file; `None` reads the bundled default.
+    `load_fixtures`/`load_triage_fixtures`/`load_curation_fixtures`. `path` overrides
+    `default_resource`'s bundled `importlib.resources` file; `None` reads the bundled
+    default.
+
+    A missing file — an explicit `path` that doesn't exist, or a bundled resource not
+    yet shipped (issue #14's own `data/curation_fixtures.jsonl` is real, captured
+    session data landed in a follow-up real-hardware step, not shipped with this
+    code) — raises `FixtureError` rather than a raw `FileNotFoundError`/
+    `ModuleNotFoundError`, so every caller (`__main__.py`'s own `except AnsinaError`)
+    sees one consistent error type regardless of which of the three loaders hit it.
     """
-    if path is None:
-        package, resource_path = default_resource
-        text = resources.files(package).joinpath(resource_path).read_text("utf-8")
-        return text, f"{package}/{resource_path}"
-    return path.read_text("utf-8"), str(path)
+    source = (
+        str(path)
+        if path is not None
+        else f"{default_resource[0]}/{default_resource[1]}"
+    )
+    try:
+        if path is None:
+            package, resource_path = default_resource
+            text = resources.files(package).joinpath(resource_path).read_text("utf-8")
+        else:
+            text = path.read_text("utf-8")
+    except (FileNotFoundError, ModuleNotFoundError) as exc:
+        raise FixtureError(
+            f"{source}: fixture file not found", details={"source": source}
+        ) from exc
+    return text, source
 
 
 def _iter_fixture_lines(text: str) -> Iterator[tuple[int, str]]:
@@ -78,6 +110,22 @@ def _iter_fixture_lines(text: str) -> Iterator[tuple[int, str]]:
             yield line_number, stripped
 
 
+def _check_no_duplicate_ids(ids: Sequence[str], *, source: str) -> None:
+    """The duplicate-id half of fixture-set validation — standalone because
+    `load_curation_fixtures` needs it with no label enum to also be exhaustive over
+    (there is no `TriageClass`-shaped label for a curation fixture), unlike
+    `load_fixtures`/`load_triage_fixtures` below, which both call this from
+    `_validate_fixture_set`.
+    """
+    seen_ids = Counter(ids)
+    duplicates = sorted(id_ for id_, count in seen_ids.items() if count > 1)
+    if duplicates:
+        raise FixtureError(
+            f"{source}: duplicate fixture id(s): {', '.join(duplicates)}",
+            details={"source": source, "duplicates": duplicates},
+        )
+
+
 def _validate_fixture_set[LabelT: StrEnum](
     *,
     ids: Sequence[str],
@@ -89,13 +137,7 @@ def _validate_fixture_set[LabelT: StrEnum](
     `load_triage_fixtures` differ only in what one JSON object deserializes into,
     never in this.
     """
-    seen_ids = Counter(ids)
-    duplicates = sorted(id_ for id_, count in seen_ids.items() if count > 1)
-    if duplicates:
-        raise FixtureError(
-            f"{source}: duplicate fixture id(s): {', '.join(duplicates)}",
-            details={"source": source, "duplicates": duplicates},
-        )
+    _check_no_duplicate_ids(ids, source=source)
 
     present = set(labels)
     missing = sorted(member.value for member in label_enum if member not in present)
@@ -271,4 +313,133 @@ def load_triage_fixtures(path: Path | None = None) -> tuple[TriageFixture, ...]:
         label_enum=TriageClass,
         source=source,
     )
+    return tuple(fixtures)
+
+
+@dataclass(frozen=True, slots=True)
+class CurationFixture:
+    """One labelled, real captured OpenCode session. See issue #14.
+
+    `must_keep` is the human-judged minimal set of event sequence numbers essential
+    to explain the session's outcome — the gate's own ground truth for recall.
+    `failure_cause` is a short, human-written label the bench's keyword-match proxy
+    scores a Brain answer against (see `heart.eval.curation_report`'s own docstring
+    for why this is a documented, coarse proxy rather than a semantic judge).
+    """
+
+    id: str
+    events: tuple[CurationEvent, ...]
+    must_keep: frozenset[int]
+    failure_cause: str
+    tags: frozenset[str] = field(default_factory=frozenset)
+    note: str = ""
+
+
+def _parse_curation_line(
+    line: str, *, line_number: int, source: str
+) -> CurationFixture:
+    try:
+        raw = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise FixtureError(
+            f"{source}:{line_number}: not valid JSON",
+            details={"source": source, "line": line_number},
+        ) from exc
+
+    try:
+        fixture_id = raw["id"]
+        events_raw = raw["events"]
+        must_keep_raw = raw["must_keep"]
+        failure_cause = raw["failure_cause"]
+    except KeyError as exc:
+        raise FixtureError(
+            f"{source}:{line_number}: missing required key {exc}",
+            details={"source": source, "line": line_number},
+        ) from exc
+
+    if not events_raw:
+        raise FixtureError(
+            f"{source}:{line_number}: fixture {fixture_id!r} has no events",
+            details={"source": source, "line": line_number, "id": fixture_id},
+        )
+
+    events = tuple(
+        CurationEvent(
+            sequence=event["sequence"],
+            raw_type=event["raw_type"],
+            payload=event["payload"],
+        )
+        for event in events_raw
+    )
+    valid_sequences = frozenset(event.sequence for event in events)
+    if len(valid_sequences) != len(events):
+        raise FixtureError(
+            f"{source}:{line_number}: fixture {fixture_id!r} has duplicate event "
+            "sequence numbers",
+            details={"source": source, "line": line_number, "id": fixture_id},
+        )
+
+    must_keep = frozenset(must_keep_raw)
+    if not must_keep:
+        raise FixtureError(
+            f"{source}:{line_number}: fixture {fixture_id!r} has an empty "
+            "must_keep set",
+            details={"source": source, "line": line_number, "id": fixture_id},
+        )
+    if not must_keep <= valid_sequences:
+        invalid = sorted(must_keep - valid_sequences)
+        raise FixtureError(
+            f"{source}:{line_number}: fixture {fixture_id!r} has must_keep "
+            f"sequence(s) not present in its own events: {invalid}",
+            details={
+                "source": source,
+                "line": line_number,
+                "id": fixture_id,
+                "invalid": invalid,
+            },
+        )
+
+    if not failure_cause.strip():
+        raise FixtureError(
+            f"{source}:{line_number}: fixture {fixture_id!r} has an empty "
+            "failure_cause",
+            details={"source": source, "line": line_number, "id": fixture_id},
+        )
+
+    return CurationFixture(
+        id=fixture_id,
+        events=events,
+        must_keep=must_keep,
+        failure_cause=failure_cause,
+        tags=frozenset(raw.get("tags", [])),
+        note=raw.get("note", ""),
+    )
+
+
+def load_curation_fixtures(path: Path | None = None) -> tuple[CurationFixture, ...]:
+    """Load and validate the context-curation fixture set — the `load_fixtures()`/
+    `load_triage_fixtures()` sibling issue #14 asks for, sharing their line-reading
+    machinery and the standalone duplicate-id check
+    (`_check_no_duplicate_ids`) rather than duplicating either. Unlike the other two
+    loaders, this one does **not** call `_validate_fixture_set` — there is no label
+    enum for a curation fixture to be exhaustive over.
+
+    `path` overrides the bundled JSONL. `None` (the default) reads the packaged
+    `data/curation_fixtures.jsonl` via `importlib.resources`.
+
+    Raises `FixtureError` on any structural problem: bad JSON, a missing key, an
+    empty `events` list, a duplicate event sequence number within one fixture, an
+    empty or out-of-range `must_keep` set, an empty `failure_cause`, or a duplicate
+    fixture `id`.
+    """
+    text, source = _resolve_text(path, _DEFAULT_CURATION_RESOURCE)
+
+    fixtures = [
+        _parse_curation_line(line, line_number=line_number, source=source)
+        for line_number, line in _iter_fixture_lines(text)
+    ]
+    if not fixtures:
+        raise FixtureError(f"{source}: no fixtures found", details={"source": source})
+
+    _check_no_duplicate_ids([fixture.id for fixture in fixtures], source=source)
     return tuple(fixtures)
