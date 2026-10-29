@@ -1,5 +1,6 @@
 """Renders OpenCode's own `opencode.json` from Ansina's typed `[opencode]`
-settings. See issue #74.
+settings. See issue #74; the `provider` block below is issue #14's own small
+additive change.
 
 Generated on every preflight/spawn — deliberately unlike `deploy/vector.toml`'s
 committed, hand-edited, never-daemon-generated file: the permission block must
@@ -15,6 +16,28 @@ every denylist glob *last*, so an overlapping denylist entry always beats an
 allowlist one rather than the reverse. `write_opencode_config`'s
 `sort_keys=False` is deliberate for the identical reason — a sorted
 re-ordering would silently change which glob rule wins.
+
+`_render_provider()` (issue #14) is the custom-provider block for OpenCode's
+own driving model, when `[opencode] provider_base_url` is set — i.e. when that
+model is a self-hosted/custom OpenAI-compatible endpoint (a LiteLLM gateway, in
+the first real deployment of this) rather than one of OpenCode's own built-in
+providers. Verified against the real opencode.ai docs (`/docs/providers`'s own
+"Custom provider" section) rather than assumed: a custom OpenAI-compatible
+provider is `provider.<id>.npm = "@ai-sdk/openai-compatible"` plus
+`options.baseURL`/`options.apiKey`, and `options.apiKey` supports a documented
+`"{env:VARNAME}"` templating form that lets the *value* stay in the child
+process's own environment — this function only ever emits the env var *name*
+(`[opencode] provider_api_key_env`), never `provider_api_key`'s actual secret
+value, so the rendered file is safe to write to disk and to embed verbatim into
+`OPENCODE_CONFIG_CONTENT` (`ansina.opencode.env`). `_CUSTOM_PROVIDER_ID` is a
+fixed constant, not a setting — Ansina configures at most one custom provider
+for OpenCode's own model, so a second knob to name it would add no real
+flexibility. Whether OpenCode's own `--model <id>/<model>` resolution also
+needs a `models.<model-id>` entry under this block (the docs' own worked
+example includes one, but only ever to set a display name/context limits, not
+stated as required for a direct CLI invocation) is left to real-hardware
+verification — see `docs/opencode.md`'s own "verify, don't assume" discipline;
+not added here speculatively.
 """
 
 from __future__ import annotations
@@ -27,6 +50,7 @@ from ansina.config.settings import Settings
 
 _SCHEMA_URL = "https://opencode.ai/config.json"
 _CONFIG_FILENAME = "opencode.json"
+_CUSTOM_PROVIDER_ID = "ansina"
 
 
 def _render_glob_permission(
@@ -65,6 +89,26 @@ def _render_bash_permission(settings: Settings) -> str | dict[str, str]:
     )
 
 
+def _render_provider(settings: Settings) -> dict[str, Any] | None:
+    """The custom-provider block for OpenCode's own driving model, or `None`
+    when `[opencode] provider_base_url` is unset — see module docstring for the
+    documented shape this mirrors and why `apiKey` never carries a real secret.
+    """
+    opencode = settings.opencode
+    if not opencode.provider_base_url:
+        return None
+    options: dict[str, str] = {"baseURL": opencode.provider_base_url}
+    if opencode.provider_api_key_env:
+        options["apiKey"] = f"{{env:{opencode.provider_api_key_env}}}"
+    return {
+        _CUSTOM_PROVIDER_ID: {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Ansina",
+            "options": options,
+        }
+    }
+
+
 def render_opencode_config(settings: Settings) -> dict[str, Any]:
     """The pure, deterministic rendering `write_opencode_config` serializes —
     split out so the unit suite can assert its shape (key order, no `"ask"`
@@ -86,7 +130,13 @@ def render_opencode_config(settings: Settings) -> dict[str, Any]:
     # `OpencodePermissionSettings.additional`'s own docstring) — appended
     # after, never merged ahead of, the keys this module controls directly.
     rendered_permission.update(permission.additional)
-    return {"$schema": _SCHEMA_URL, "permission": rendered_permission}
+
+    rendered: dict[str, Any] = {"$schema": _SCHEMA_URL}
+    provider = _render_provider(settings)
+    if provider is not None:
+        rendered["provider"] = provider
+    rendered["permission"] = rendered_permission
+    return rendered
 
 
 def write_opencode_config(settings: Settings, workspace: Path) -> Path:

@@ -1411,6 +1411,7 @@ def test_opencode_defaults(clean_env: None, tmp_cwd: Path) -> None:
     assert opencode.isolate_home is True
     assert opencode.provider_api_key_env == ""
     assert opencode.provider_api_key is None
+    assert opencode.provider_base_url == ""
     assert opencode.inherit_env_names == ()
     assert opencode.preflight_timeout_seconds == 30.0
     assert opencode.run_timeout_seconds == 900.0
@@ -1485,6 +1486,9 @@ def test_opencode_env_vars_round_trip(
     monkeypatch.setenv("ANSINA_OPENCODE__PROVIDER_API_KEY_ENV", "ANTHROPIC_API_KEY")
     monkeypatch.setenv("ANSINA_OPENCODE__PROVIDER_API_KEY", "sk-real-key-0123456789")
     monkeypatch.setenv(
+        "ANSINA_OPENCODE__PROVIDER_BASE_URL", "https://litellm.example.com/v1"
+    )
+    monkeypatch.setenv(
         "ANSINA_OPENCODE__INHERIT_ENV_NAMES", '["CUSTOM_PROXY", "HTTP_PROXY"]'
     )
     monkeypatch.setenv("ANSINA_OPENCODE__PREFLIGHT_TIMEOUT_SECONDS", "45")
@@ -1510,6 +1514,7 @@ def test_opencode_env_vars_round_trip(
     assert opencode.provider_api_key_env == "ANTHROPIC_API_KEY"
     assert opencode.provider_api_key is not None
     assert opencode.provider_api_key.get_secret_value() == "sk-real-key-0123456789"
+    assert opencode.provider_base_url == "https://litellm.example.com/v1"
     assert opencode.inherit_env_names == ("CUSTOM_PROXY", "HTTP_PROXY")
     assert opencode.preflight_timeout_seconds == 45.0
     assert opencode.run_timeout_seconds == 120.0

@@ -556,6 +556,16 @@ provider_api_key_env = ""
 # is a hard startup error:
 #   ANSINA_OPENCODE__PROVIDER_API_KEY=...
 
+# The base URL of an OpenAI-compatible endpoint for OpenCode's OWN driving
+# model (issue #14) -- a separate concern from [brain].base_url, which is
+# Ansina's own remote reasoning target; the two may point at the same gateway
+# but are configured independently. Empty (the default) means no custom
+# provider block is emitted into the generated opencode.json at all. When set,
+# combine with provider_api_key_env/provider_api_key above and point `model`
+# below at "ansina/<model-id>" -- "ansina" is this feature's one fixed,
+# built-in provider id, not itself a setting.
+provider_base_url = ""
+
 # Operator-named extra environment variables to forward verbatim from the
 # daemon's own environment into the child's -- empty (the default) is the
 # usual "explicit allow-list, never os.environ wholesale" shape every other

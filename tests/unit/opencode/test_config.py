@@ -142,6 +142,91 @@ def test_write_opencode_config_round_trips_as_json(tmp_path: Path) -> None:
     assert on_disk == render_opencode_config(settings)
 
 
+# --- _render_provider / issue #14's custom-provider block -------------------------
+
+
+def test_render_omits_provider_block_when_base_url_is_unset(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    rendered = render_opencode_config(settings)
+
+    assert "provider" not in rendered
+
+
+def test_render_emits_provider_block_with_base_url_only(tmp_path: Path) -> None:
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert rendered["provider"] == {
+        "ansina": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Ansina",
+            "options": {"baseURL": "https://litellm.example.com/v1"},
+        }
+    }
+
+
+def test_render_emits_provider_api_key_as_env_template_not_a_secret(
+    tmp_path: Path,
+) -> None:
+    """`options.apiKey` must reference the env var *name* via OpenCode's own
+    documented `{env:VARNAME}` templating — never the real secret value, which
+    this function never even receives (`provider_api_key` isn't read here).
+    """
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+        provider_api_key_env="LITELLM_API_KEY",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert rendered["provider"]["ansina"]["options"]["apiKey"] == (
+        "{env:LITELLM_API_KEY}"
+    )
+    rendered_json = json.dumps(rendered)
+    assert "LITELLM_API_KEY" in rendered_json  # the name
+    assert "sk-" not in rendered_json  # never a literal-looking secret
+
+
+def test_render_omits_api_key_when_provider_api_key_env_is_unset(
+    tmp_path: Path,
+) -> None:
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert "apiKey" not in rendered["provider"]["ansina"]["options"]
+
+
+def test_render_provider_block_sits_between_schema_and_permission(
+    tmp_path: Path,
+) -> None:
+    opencode = OpencodeSettings(
+        enabled=True,
+        workspace_dir=tmp_path / "workspace",
+        provider_base_url="https://litellm.example.com/v1",
+    )
+    settings = Settings(telemetry=TelemetrySettings(enabled=True), opencode=opencode)
+
+    rendered = render_opencode_config(settings)
+
+    assert list(rendered.keys()) == ["$schema", "provider", "permission"]
+
+
 def test_write_opencode_config_overwrites_a_prior_run(tmp_path: Path) -> None:
     first_settings = _settings(tmp_path, webfetch="deny")
     workspace = first_settings.opencode.workspace_dir

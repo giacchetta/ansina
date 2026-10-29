@@ -1056,6 +1056,20 @@ class OpencodeSettings(BaseModel):
     # provider API key — e.g. "ANTHROPIC_API_KEY". Empty means "no key passed."
     provider_api_key_env: str = ""
     provider_api_key: SecretStr | None = Field(default=None)
+    # The base URL of an OpenAI-compatible endpoint for OpenCode's own driving
+    # model (issue #14) — a separate concern from `[brain] base_url`, which is
+    # Ansina's own remote reasoning target; the two may point at the same
+    # gateway but are configured independently. Empty (the default) means "emit
+    # no custom-provider block at all" — the same "empty means unset" shape
+    # `provider_api_key_env` already uses. `ansina.opencode.config.
+    # render_opencode_config` is what turns a non-empty value into OpenCode's
+    # own documented `provider.<id>.options.baseURL`/`.options.apiKey` shape
+    # (verified against the real opencode.ai docs, not assumed — see that
+    # module's own docstring) — never the raw secret itself, only
+    # `provider_api_key_env`'s *name*, referenced via OpenCode's own `{env:...}`
+    # templating syntax, so the generated `opencode.json` never contains a
+    # credential.
+    provider_base_url: str = ""
     # Operator-named extra environment variables to forward verbatim from the
     # daemon's own environment into the child's — empty by default, the same
     # "explicit allow-list, never the daemon's own os.environ wholesale" shape
