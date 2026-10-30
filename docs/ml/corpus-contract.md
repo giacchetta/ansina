@@ -129,18 +129,20 @@ for those two families.
 
 ### 1. Bench report (`kind=bench/`)
 
-Three sub-families share this one key prefix, distinguished by the `suite` field
+Four sub-families share this one key prefix, distinguished by the `suite` field
 below — the tick-decision bench (issue #53), the request-triage bench (issue #13),
-and the context-curation bench (issue #14) — the latter two both gated experiments
-whose ports are wired into no route or the tick loop; see `ansina.heart.triage`/
-`ansina.heart.curation`. All three are JSON objects (`ansina.heart.eval.report.
+the context-curation bench (issue #14), and the structured-extraction bench (issue
+#15) — the latter three all gated experiments whose ports are wired into no route
+or the tick loop; see `ansina.heart.triage`/`ansina.heart.curation`/
+`ansina.heart.extraction`. All four are JSON objects (`ansina.heart.eval.report.
 report_to_json` / `ansina.heart.eval.triage_report.triage_report_to_json` /
-`ansina.heart.eval.curation_report.curation_report_to_json`), the authoritative
-shape; each paired `.md` is a human-readable rendering of the same data, not
-independently schema'd. `suite` is additive (issue #13 — every report written
-before it has no such field, which a consumer should treat as `"tick"`, the only
-suite that existed then; issue #14 adds a third value with no further schema
-version bump, the same reasoning).
+`ansina.heart.eval.curation_report.curation_report_to_json` / `ansina.heart.eval.
+extraction_report.extraction_report_to_json`), the authoritative shape; each
+paired `.md` is a human-readable rendering of the same data, not independently
+schema'd. `suite` is additive (issue #13 — every report written before it has no
+such field, which a consumer should treat as `"tick"`, the only suite that existed
+then; issue #14 adds a third value, issue #15 a fourth, neither bumping the schema
+version, the same reasoning each time).
 
 #### 1a. Tick-decision bench report (`suite: "tick"`)
 
@@ -242,6 +244,63 @@ other two suites) and drives two real `BrainProvider.stream()` calls per fixture
 | `results[].curation_latency_seconds` | float | |
 | `results[].prompt_tokens` | int | |
 | `results[].tags` | string[] | sorted |
+
+#### 1d. Structured-extraction bench report (`suite: "extraction"`)
+
+Shares `model_repo`/`prompt_variant`/`chat_template`/`generated_at`/`host`/`commit`/
+`branch`/`mlx_lm_version`/`max_output_tokens` with 1a/1b/1c above, same types.
+Unlike the other three, this suite covers **three distinct jobs in one report**
+(intervention selection, run titling, failure classification — see
+`ansina.heart.extraction`), each with its own result list and its own gate; there
+is no single `gate.passed`/`gate.checks` pair — only the `intervention` gate
+governs whether `DeterministicInterventionPolicy` could be swapped for a
+model-chosen one, per issue #15's own "gated separately" instruction. No
+`fixture_count` field either, since the three jobs' counts differ — each is
+reported as `metrics.<job>.fixture_count` instead.
+
+| Field | Type | Notes |
+|---|---|---|
+| `suite` | `"extraction"` | |
+| `metrics.latency_p50_seconds` / `latency_p95_seconds` | float | across every job's `generate()` call, pooled |
+| `metrics.prompt_tokens_min` / `_median` / `_max` | int / float / int | |
+| `metrics.peak_rss_bytes` | int | |
+| `metrics.intervention.fixture_count` | int | |
+| `metrics.intervention.schema_valid_rate` | float (0–1) | parsed and in-vocabulary; `1 - parse_fallback_rate` |
+| `metrics.intervention.hallucination_count` | int | a hallucinated `run_id`/out-of-vocabulary `action` — already refused upstream by the strict parser, so always 0 today; reported for discoverability if a future, looser parser ever makes it non-zero |
+| `metrics.intervention.agreement_rate` | float (0–1) | matches `DeterministicInterventionPolicy`'s own real choice exactly (action and, where applicable, run id) |
+| `metrics.intervention.more_conservative_count` / `.less_conservative_count` / `.wrong_run_count` | int | disagreement directions — see `ansina.heart.eval.extraction_runner`'s own module docstring for the conservativeness rank table; `less_conservative`/`wrong_run` are the zero-tolerance correctness-bug directions, `more_conservative` is tolerated up to a committed ceiling |
+| `metrics.intervention.parse_fallback_rate` | float (0–1) | |
+| `metrics.title.fixture_count` | int | |
+| `metrics.title.schema_valid_rate` | float (0–1) | single-line, non-empty, under the configured length bound — never a semantic quality judgment against the fixture's own `expected_title` |
+| `metrics.title.parse_fallback_rate` | float (0–1) | |
+| `metrics.failure_cause.fixture_count` | int | |
+| `metrics.failure_cause.schema_valid_rate` | float (0–1) | |
+| `metrics.failure_cause.cause_accuracy` / `.evidence_accuracy` | float (0–1) | against the fixture's own human-labelled `expected_cause`/`expected_evidence_seq` |
+| `metrics.failure_cause.parse_fallback_rate` | float (0–1) | |
+| `gate.intervention.passed` / `.checks` | bool / object (check name → bool) | the one gate that governs the policy-swap decision |
+| `gate.title.passed` / `.checks` | bool / object | reported, informational only |
+| `gate.failure_cause.passed` / `.checks` | bool / object | reported, informational only |
+| `intervention_results[].id` | string | fixture id |
+| `intervention_results[].expected_action` / `.actual_action` | string \| null | one of `OpencodeAction`'s five members, or `null` meaning "no intervention" — a real, schema-valid answer, not a parse failure |
+| `intervention_results[].expected_run_id` / `.actual_run_id` | string \| null | |
+| `intervention_results[].schema_valid` | bool | |
+| `intervention_results[].direction` | string \| null | `"agree"`/`"more_conservative"`/`"less_conservative"`/`"wrong_run"`, or `null` on a parse fallback |
+| `intervention_results[].raw_output` | string | unbounded length, same caveat as 1a/1b/1c's `raw_output` |
+| `intervention_results[].prompt_tokens` | int | |
+| `intervention_results[].tags` | string[] | sorted |
+| `title_results[].id` | string | fixture id |
+| `title_results[].expected_title` / `.actual_title` | string / string \| null | the human reference and the model's reply side by side — the human sanity-check surface, since title quality is never automatically graded |
+| `title_results[].schema_valid` | bool | |
+| `title_results[].raw_output` | string | |
+| `title_results[].prompt_tokens` | int | |
+| `title_results[].tags` | string[] | sorted |
+| `failure_results[].id` | string | fixture id |
+| `failure_results[].expected_cause` / `.actual_cause` | string / string \| null | one of `FailureCause`'s members |
+| `failure_results[].expected_evidence_seq` / `.actual_evidence_seq` | int / int \| null | |
+| `failure_results[].schema_valid` / `.cause_correct` / `.evidence_correct` | bool | |
+| `failure_results[].raw_output` | string | |
+| `failure_results[].prompt_tokens` | int | |
+| `failure_results[].tags` | string[] | sorted |
 
 ### 2. Soak run (`kind=soak/`)
 

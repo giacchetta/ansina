@@ -8,15 +8,21 @@ from ansina.errors import FixtureError
 from ansina.heart.curation import CurationEvent
 from ansina.heart.eval.fixtures import (
     CurationFixture,
+    FailureExtractionFixture,
+    InterventionExtractionFixture,
     TickFixture,
+    TitleExtractionFixture,
     TriageFixture,
     load_curation_fixtures,
+    load_extraction_fixtures,
     load_fixtures,
     load_triage_fixtures,
 )
+from ansina.heart.extraction import FailureCause, InterventionCandidateRun
 from ansina.heart.tick.decision import TickDecision
 from ansina.heart.tick.snapshot import SnapshotItem
 from ansina.heart.triage import TriageClass
+from ansina.opencode.interventions import OpencodeAction
 
 
 def test_load_fixtures_loads_the_bundled_default_set() -> None:
@@ -518,3 +524,359 @@ def test_load_curation_fixtures_rejects_duplicate_ids(tmp_path: Path) -> None:
 
     with pytest.raises(FixtureError, match="duplicate fixture id"):
         load_curation_fixtures(path)
+
+
+# --- load_extraction_fixtures (issue #15) -------------------------------------------
+#
+# Mirrors `load_curation_fixtures`'s own pre-#14 shape: no "loads the bundled
+# default set" test, since no real M9 run-row/event-stream data has been captured
+# yet to derive a committed `data/extraction_fixtures.jsonl` from (see
+# `heart.eval.fixtures`'s own module docstring) — every test below drives an
+# explicit `tmp_path` fixture file, plus one test proving the missing-bundled-file
+# path fails cleanly rather than with a raw traceback.
+
+_INTERVENTION_LINE = (
+    '{"job": "intervention", "id": "i1", '
+    '"candidates": [{"run_id": "r1", "status": "failed", "detail": "d"}], '
+    '"intake_paused": false, "recent_failed": 1, "recent_timeout": 0, '
+    '"recent_permission_denied": 0, "expected_action": "retry", '
+    '"expected_run_id": "r1"}'
+)
+_TITLE_LINE = (
+    '{"job": "title", "id": "t1", "prompt": "fix the bug", '
+    '"events": [{"sequence": 0, "raw_type": "text", "payload": "p"}], '
+    '"expected_title": "Fix the bug"}'
+)
+_FAILURE_LINE = (
+    '{"job": "failure_cause", "id": "f1", '
+    '"events": [{"sequence": 0, "raw_type": "text", "payload": "shell denied"}], '
+    '"expected_cause": "shell_denied", "expected_evidence_seq": 0}'
+)
+
+
+def test_load_extraction_fixtures_parses_an_intervention_fixture(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, _INTERVENTION_LINE + "\n")
+
+    fixtures = load_extraction_fixtures(path)
+
+    assert fixtures == (
+        InterventionExtractionFixture(
+            id="i1",
+            candidates=(
+                InterventionCandidateRun(run_id="r1", status="failed", detail="d"),
+            ),
+            intake_paused=False,
+            recent_failed=1,
+            recent_timeout=0,
+            recent_permission_denied=0,
+            expected_action=OpencodeAction.RETRY,
+            expected_run_id="r1",
+        ),
+    )
+
+
+def test_load_extraction_fixtures_parses_an_intervention_fixture_with_no_action(
+    tmp_path: Path,
+) -> None:
+    """`expected_action: null` is a real, valid ground truth (no intervention
+    needed) — not a missing-key error.
+    """
+    content = (
+        '{"job": "intervention", "id": "i1", '
+        '"candidates": [{"run_id": "r1", "status": "running", "detail": "d"}], '
+        '"intake_paused": false, "recent_failed": 0, "recent_timeout": 0, '
+        '"recent_permission_denied": 0, "expected_action": null, '
+        '"expected_run_id": null}\n'
+    )
+    path = _write(tmp_path, content)
+
+    fixtures = load_extraction_fixtures(path)
+
+    assert isinstance(fixtures[0], InterventionExtractionFixture)
+    assert fixtures[0].expected_action is None
+    assert fixtures[0].expected_run_id is None
+
+
+def test_load_extraction_fixtures_parses_a_title_fixture(tmp_path: Path) -> None:
+    path = _write(tmp_path, _TITLE_LINE + "\n")
+
+    fixtures = load_extraction_fixtures(path)
+
+    assert fixtures == (
+        TitleExtractionFixture(
+            id="t1",
+            prompt="fix the bug",
+            events=(CurationEvent(sequence=0, raw_type="text", payload="p"),),
+            expected_title="Fix the bug",
+        ),
+    )
+
+
+def test_load_extraction_fixtures_parses_a_failure_fixture(tmp_path: Path) -> None:
+    path = _write(tmp_path, _FAILURE_LINE + "\n")
+
+    fixtures = load_extraction_fixtures(path)
+
+    assert fixtures == (
+        FailureExtractionFixture(
+            id="f1",
+            events=(
+                CurationEvent(sequence=0, raw_type="text", payload="shell denied"),
+            ),
+            expected_cause=FailureCause.SHELL_DENIED,
+            expected_evidence_seq=0,
+        ),
+    )
+
+
+def test_load_extraction_fixtures_shares_one_id_namespace_across_jobs(
+    tmp_path: Path,
+) -> None:
+    content = _INTERVENTION_LINE + "\n" + _TITLE_LINE + "\n" + _FAILURE_LINE + "\n"
+    path = _write(tmp_path, content)
+
+    fixtures = load_extraction_fixtures(path)
+
+    assert [f.id for f in fixtures] == ["i1", "t1", "f1"]
+
+
+def test_load_extraction_fixtures_skips_blank_lines_and_comments(
+    tmp_path: Path,
+) -> None:
+    content = "# a comment\n\n" + _TITLE_LINE + "\n"
+    path = _write(tmp_path, content)
+
+    fixtures = load_extraction_fixtures(path)
+
+    assert [f.id for f in fixtures] == ["t1"]
+
+
+def test_load_extraction_fixtures_parses_tags_and_note(tmp_path: Path) -> None:
+    content = _TITLE_LINE[:-1] + ', "tags": ["real"], "note": "n"}\n'
+    path = _write(tmp_path, content)
+
+    fixtures = load_extraction_fixtures(path)
+
+    assert fixtures[0].tags == frozenset({"real"})
+    assert fixtures[0].note == "n"
+
+
+def test_load_extraction_fixtures_rejects_invalid_json(tmp_path: Path) -> None:
+    path = _write(tmp_path, "not json at all\n")
+
+    with pytest.raises(FixtureError, match="not valid JSON"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_a_missing_job(tmp_path: Path) -> None:
+    path = _write(tmp_path, '{"id": "a"}\n')
+
+    with pytest.raises(FixtureError, match="is not a valid extraction job"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_unknown_job(tmp_path: Path) -> None:
+    path = _write(tmp_path, '{"job": "bogus", "id": "a"}\n')
+
+    with pytest.raises(FixtureError, match="is not a valid extraction job"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_a_missing_required_key(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, '{"job": "intervention", "id": "i1"}\n')
+
+    with pytest.raises(FixtureError, match="missing required key"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_a_missing_required_key_in_a_title(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, '{"job": "title", "id": "t1"}\n')
+
+    with pytest.raises(FixtureError, match="missing required key"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_a_missing_required_key_in_a_failure(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, '{"job": "failure_cause", "id": "f1"}\n')
+
+    with pytest.raises(FixtureError, match="missing required key"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_empty_candidates(tmp_path: Path) -> None:
+    content = (
+        '{"job": "intervention", "id": "i1", "candidates": [], '
+        '"intake_paused": false, "recent_failed": 0, "recent_timeout": 0, '
+        '"recent_permission_denied": 0, "expected_action": null, '
+        '"expected_run_id": null}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="has no candidates"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_invalid_expected_action(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"job": "intervention", "id": "i1", '
+        '"candidates": [{"run_id": "r1", "status": "failed", "detail": "d"}], '
+        '"intake_paused": false, "recent_failed": 0, "recent_timeout": 0, '
+        '"recent_permission_denied": 0, "expected_action": "bogus", '
+        '"expected_run_id": null}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="not a valid OpencodeAction"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_expected_run_id_outside_candidates(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"job": "intervention", "id": "i1", '
+        '"candidates": [{"run_id": "r1", "status": "failed", "detail": "d"}], '
+        '"intake_paused": false, "recent_failed": 0, "recent_timeout": 0, '
+        '"recent_permission_denied": 0, "expected_action": "retry", '
+        '"expected_run_id": "nope"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="not present among its own candidates"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_empty_prompt(tmp_path: Path) -> None:
+    content = (
+        '{"job": "title", "id": "t1", "prompt": "  ", '
+        '"events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"expected_title": "a title"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="empty prompt"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_empty_expected_title(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"job": "title", "id": "t1", "prompt": "do it", '
+        '"events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"expected_title": "   "}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="empty expected_title"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_duplicate_event_sequences_in_a_title(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"job": "title", "id": "t1", "prompt": "do it", '
+        '"events": ['
+        '{"sequence": 0, "raw_type": "t", "payload": "p"}, '
+        '{"sequence": 0, "raw_type": "t", "payload": "p2"}'
+        '], "expected_title": "a title"}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="duplicate event sequence numbers"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_invalid_expected_cause(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"job": "failure_cause", "id": "f1", '
+        '"events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"expected_cause": "bogus", "expected_evidence_seq": 0}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="not a valid FailureCause"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_evidence_seq_outside_events(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"job": "failure_cause", "id": "f1", '
+        '"events": [{"sequence": 0, "raw_type": "t", "payload": "p"}], '
+        '"expected_cause": "shell_denied", "expected_evidence_seq": 7}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="not present among its own events"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_empty_events_in_a_failure_fixture(
+    tmp_path: Path,
+) -> None:
+    content = (
+        '{"job": "failure_cause", "id": "f1", "events": [], '
+        '"expected_cause": "shell_denied", "expected_evidence_seq": 0}\n'
+    )
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="has no events"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_an_empty_file(tmp_path: Path) -> None:
+    path = _write(tmp_path, "")
+
+    with pytest.raises(FixtureError, match="no fixtures found"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_a_file_of_only_comments(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, "# just a comment\n\n")
+
+    with pytest.raises(FixtureError, match="no fixtures found"):
+        load_extraction_fixtures(path)
+
+
+def test_load_extraction_fixtures_rejects_a_missing_custom_path(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "does-not-exist.jsonl"
+
+    with pytest.raises(FixtureError, match="fixture file not found"):
+        load_extraction_fixtures(missing)
+
+
+def test_load_extraction_fixtures_rejects_a_missing_bundled_file() -> None:
+    """`data/extraction_fixtures.jsonl` is deliberately not shipped yet (see
+    `heart.eval.fixtures`'s own module docstring) — calling with no override must
+    fail cleanly (`FixtureError`), never a raw traceback, until real M9 data lands
+    it (the same gap `load_curation_fixtures` had before issue #14's own capture).
+    """
+    with pytest.raises(FixtureError, match="fixture file not found"):
+        load_extraction_fixtures()
+
+
+def test_load_extraction_fixtures_rejects_duplicate_ids(tmp_path: Path) -> None:
+    content = _TITLE_LINE + "\n" + _TITLE_LINE + "\n"
+    path = _write(tmp_path, content)
+
+    with pytest.raises(FixtureError, match="duplicate fixture id"):
+        load_extraction_fixtures(path)

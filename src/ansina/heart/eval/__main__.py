@@ -12,15 +12,17 @@ Reads `[heart]`/`[heart.tick]` from the normal `load_settings()` layering;
 `--model-repo` and `--max-output-tokens` override those two fields for this run only,
 via `Settings.model_copy`, without touching `ansina.toml` or the environment.
 
-`--suite {tick,triage,curation}` (default `tick`) picks which bench runs — issue
-#13's own request-triage experiment, and issue #14's own context-curation
-experiment, both reuse this entry point, the runtime lifecycle, provenance
-resolution, and the upload hook rather than duplicating any of them; only the fixture
-loader, the prompt-variant map, and the report renderer differ per suite, each kept in
-`_run_tick_suite`/`_run_triage_suite`/`_run_curation_suite` below. The curation suite
-is the one genuinely **async** branch — it drives real `BrainProvider.stream()` calls
-— isolated inside its own `asyncio.run(...)` call so the tick/triage branches stay
-fully synchronous and unaffected.
+`--suite {tick,triage,curation,extraction}` (default `tick`) picks which bench runs —
+issue #13's own request-triage experiment, issue #14's own context-curation
+experiment, and issue #15's own structured-extraction experiment all reuse this entry
+point, the runtime lifecycle, provenance resolution, and the upload hook rather than
+duplicating any of them; only the fixture loader, the prompt-variant map, and the
+report renderer differ per suite, each kept in `_run_tick_suite`/`_run_triage_suite`/
+`_run_curation_suite`/`_run_extraction_suite` below. The curation suite is the one
+genuinely **async** branch — it drives real `BrainProvider.stream()` calls — isolated
+inside its own `asyncio.run(...)` call so the tick/triage/extraction branches stay
+fully synchronous and unaffected (extraction's own three jobs are all graded against
+a fixture's own ground truth, never a live Brain round trip).
 """
 
 from __future__ import annotations
@@ -48,11 +50,21 @@ from ansina.heart.eval.curation_runner import (
     DEFAULT_BUDGET_FRACTION,
     run_curation_bench,
 )
+from ansina.heart.eval.extraction_report import (
+    extraction_report_to_json,
+    extraction_report_to_markdown,
+    failure_gate_result,
+    intervention_gate_result,
+    title_gate_result,
+)
+from ansina.heart.eval.extraction_runner import run_extraction_bench
 from ansina.heart.eval.fixtures import (
     CurationFixture,
+    ExtractionFixture,
     TickFixture,
     TriageFixture,
     load_curation_fixtures,
+    load_extraction_fixtures,
     load_fixtures,
     load_triage_fixtures,
 )
@@ -70,6 +82,11 @@ from ansina.heart.eval.triage_report import (
     triage_report_to_markdown,
 )
 from ansina.heart.eval.triage_runner import run_triage_bench
+from ansina.heart.extraction import (
+    DEFAULT_EXTRACTION_VARIANT,
+    EXTRACTION_PROMPT_VARIANTS,
+    HeartStructuredExtractor,
+)
 from ansina.heart.runtime import HeartRuntime
 from ansina.heart.selection import build_heart_runtime
 from ansina.heart.tick.prompts import DEFAULT_PROMPT_VARIANT, PROMPT_VARIANTS
@@ -85,9 +102,14 @@ _DEFAULT_OUT_DIR = Path("docs/heart/bench")
 # The union of every suite's variant names, purely for `argparse`'s own `--help`
 # rendering — the actual choice is validated against the *selected* suite's map in
 # `main()`, since the suites don't share a prompt-variant namespace (e.g. issue #13's
-# own "strict" is an unrelated template from the tick suite's "strict").
+# own "strict" is an unrelated template from the tick suite's "strict"). Issue #15's
+# own `EXTRACTION_PROMPT_VARIANTS` is a *nested* map (variant name -> per-job
+# template); only its outer keys (the variant names) join this union.
 _ALL_PROMPT_VARIANTS = sorted(
-    set(PROMPT_VARIANTS) | set(TRIAGE_PROMPT_VARIANTS) | set(CURATION_PROMPT_VARIANTS)
+    set(PROMPT_VARIANTS)
+    | set(TRIAGE_PROMPT_VARIANTS)
+    | set(CURATION_PROMPT_VARIANTS)
+    | set(EXTRACTION_PROMPT_VARIANTS)
 )
 
 
@@ -98,14 +120,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--suite",
-        choices=("tick", "triage", "curation"),
+        choices=("tick", "triage", "curation", "extraction"),
         default="tick",
         help=(
             "Which bench to run: 'tick' (issue #53, the shipped autonomic-loop "
             "decision), 'triage' (issue #13, the gated request-triage "
-            "experiment), or 'curation' (issue #14, the gated context-curation "
-            "experiment — needs a real [brain] configured). The two experiment "
-            "suites are wired into nothing beyond this bench. Default: tick."
+            "experiment), 'curation' (issue #14, the gated context-curation "
+            "experiment -- needs a real [brain] configured), or 'extraction' "
+            "(issue #15, the gated structured-extraction experiment). The three "
+            "experiment suites are wired into nothing beyond this bench. "
+            "Default: tick."
         ),
     )
     parser.add_argument(
@@ -121,7 +145,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "Named prompt template. Validated against the selected --suite's own "
             "variant map (ansina.heart.tick.prompts.PROMPT_VARIANTS for 'tick', "
             "ansina.heart.triage.TRIAGE_PROMPT_VARIANTS for 'triage', "
-            "ansina.heart.curation.CURATION_PROMPT_VARIANTS for 'curation'); "
+            "ansina.heart.curation.CURATION_PROMPT_VARIANTS for 'curation', "
+            "ansina.heart.extraction.EXTRACTION_PROMPT_VARIANTS for 'extraction'); "
             "defaults to that suite's own default variant when omitted."
         ),
     )
@@ -271,6 +296,69 @@ def _run_triage_suite(
     )
 
 
+def _run_extraction_suite(
+    runtime: HeartRuntime,
+    settings: Settings,
+    *,
+    fixtures: tuple[ExtractionFixture, ...],
+    prompt_variant: str,
+    provenance: Provenance,
+) -> tuple[str, str, str, bool]:
+    """Run the structured-extraction bench (issue #15, the gated experiment — wired
+    into nothing beyond this bench) and return `(stem, markdown, json, gate_passed)`.
+    `runtime` must already be loaded, same discipline as `_run_tick_suite`/
+    `_run_triage_suite`. No `BrainProvider` dependency — every one of the three jobs
+    is graded against a fixture's own ground truth, never a live Brain round trip,
+    so this stays synchronous like `_run_tick_suite`/`_run_triage_suite`.
+
+    `gate_passed` reflects `intervention_gate_result` alone — the one gate that
+    actually licenses a policy swap, per the issue's own "gated separately"
+    instruction (see `heart.eval.extraction_report`'s own module docstring); the
+    title/failure-cause gates are rendered into the report for context but never
+    flip this function's own return value.
+    """
+    templates = EXTRACTION_PROMPT_VARIANTS[prompt_variant]
+    extractor = HeartStructuredExtractor(
+        runtime,
+        templates=templates,
+        max_output_tokens=settings.heart.max_output_tokens,
+    )
+    report = run_extraction_bench(
+        extractor,
+        fixtures,
+        model_repo=settings.heart.model_repo,
+        prompt_variant=prompt_variant,
+        max_output_tokens=settings.heart.max_output_tokens,
+        chat_template=settings.heart.apply_chat_template,
+        commit=provenance.commit,
+        branch=provenance.branch,
+    )
+    intervention_gate = intervention_gate_result(report)
+    title_gate = title_gate_result(report)
+    failure_gate = failure_gate_result(report)
+
+    date = report.generated_at[:10]
+    model_slug = settings.heart.model_repo.rsplit("/", 1)[-1]
+    template_suffix = "" if settings.heart.apply_chat_template else "-notemplate"
+    stem = f"{date}-{model_slug}-extraction-{prompt_variant}{template_suffix}"
+    return (
+        stem,
+        extraction_report_to_markdown(
+            report,
+            intervention_gate=intervention_gate,
+            title_gate=title_gate,
+            failure_gate=failure_gate,
+        ),
+        extraction_report_to_json(
+            report,
+            intervention_gate=intervention_gate,
+            title_gate=title_gate,
+            failure_gate=failure_gate,
+        ),
+        intervention_gate.passed,
+    )
+
+
 async def _run_curation_suite(
     runtime: HeartRuntime,
     brain: BrainProvider,
@@ -356,14 +444,17 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.suite == "tick":
-        variant_map: dict[str, str] = dict(PROMPT_VARIANTS)
+        variant_map: dict[str, object] = dict(PROMPT_VARIANTS)
         default_variant = DEFAULT_PROMPT_VARIANT
     elif args.suite == "triage":
         variant_map = dict(TRIAGE_PROMPT_VARIANTS)
         default_variant = DEFAULT_TRIAGE_VARIANT
-    else:
+    elif args.suite == "curation":
         variant_map = dict(CURATION_PROMPT_VARIANTS)
         default_variant = DEFAULT_CURATION_VARIANT
+    else:
+        variant_map = dict(EXTRACTION_PROMPT_VARIANTS)
+        default_variant = DEFAULT_EXTRACTION_VARIANT
     prompt_variant = args.prompt_variant or default_variant
     if prompt_variant not in variant_map:
         print(
@@ -378,8 +469,10 @@ def main(argv: list[str] | None = None) -> int:
             tick_fixtures = load_fixtures(args.fixtures)
         elif args.suite == "triage":
             triage_fixtures = load_triage_fixtures(args.fixtures)
-        else:
+        elif args.suite == "curation":
             curation_fixtures = load_curation_fixtures(args.fixtures)
+        else:
+            extraction_fixtures = load_extraction_fixtures(args.fixtures)
     except AnsinaError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -434,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
                 prompt_variant=prompt_variant,
                 provenance=provenance,
             )
-        else:
+        elif args.suite == "curation":
             # Guaranteed non-`None` by the `args.suite == "curation"` branch above —
             # `main()`'s own control flow, not a runtime guess.
             assert brain is not None
@@ -447,6 +540,14 @@ def main(argv: list[str] | None = None) -> int:
                     prompt_variant=prompt_variant,
                     provenance=provenance,
                 )
+            )
+        else:
+            stem, markdown, json_text, passed = _run_extraction_suite(
+                runtime,
+                settings,
+                fixtures=extraction_fixtures,
+                prompt_variant=prompt_variant,
+                provenance=provenance,
             )
     finally:
         runtime.unload()

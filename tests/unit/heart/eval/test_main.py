@@ -73,6 +73,28 @@ def _curation_fixtures_file(tmp_path: Path) -> Path:
     return path
 
 
+def _extraction_fixtures_file(tmp_path: Path) -> Path:
+    """One fixture per job, in this exact order — `_FakeRuntime`'s own scripted
+    replies in the tests below line up with this order one-for-one, since each
+    fixture drives exactly one `generate()` call.
+    """
+    path = tmp_path / "extraction_fixtures.jsonl"
+    path.write_text(
+        '{"job": "intervention", "id": "i1", '
+        '"candidates": [{"run_id": "r1", "status": "failed", "detail": "d"}], '
+        '"intake_paused": false, "recent_failed": 1, "recent_timeout": 0, '
+        '"recent_permission_denied": 0, "expected_action": "retry", '
+        '"expected_run_id": "r1"}\n'
+        '{"job": "title", "id": "t1", "prompt": "fix the bug", '
+        '"events": [{"sequence": 0, "raw_type": "text", "payload": "p"}], '
+        '"expected_title": "Fix the bug"}\n'
+        '{"job": "failure_cause", "id": "f1", '
+        '"events": [{"sequence": 0, "raw_type": "text", "payload": "shell denied"}], '
+        '"expected_cause": "shell_denied", "expected_evidence_seq": 0}\n'
+    )
+    return path
+
+
 def _enable_brain(settings: Settings) -> Settings:
     return settings.model_copy(
         update={
@@ -613,6 +635,203 @@ def test_main_rejects_a_prompt_variant_not_in_the_curation_suites_map(
 
     assert code == 1
     assert "not a variant of the" in capsys.readouterr().err
+    assert runtime_calls == []
+
+
+# --- issue #15: the extraction suite --------------------------------------------------
+
+
+def test_main_runs_the_extraction_suite_when_selected(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One scripted reply per fixture, in file order (intervention, title,
+    failure_cause) — every one agrees with its fixture's own ground truth, so the
+    intervention gate (the one that drives `main()`'s own exit code) passes.
+    """
+    runtime = _FakeRuntime(
+        replies=[
+            '{"action": "retry", "run_id": "r1", "reason": "it failed"}',
+            "Fix the bug",
+            '{"cause": "shell_denied", "evidence_event_seq": 0}',
+        ]
+    )
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    code = heart_main.main(
+        [
+            "--suite",
+            "extraction",
+            "--fixtures",
+            str(_extraction_fixtures_file(tmp_path)),
+            "--out-dir",
+            str(out_dir),
+            "--model-repo",
+            "fake/model",
+        ]
+    )
+
+    assert code == 0
+    assert runtime.load_calls == 1
+    assert runtime.unload_calls == 1
+    md_files = list(out_dir.glob("*.md"))
+    assert len(md_files) == 1
+    assert "extraction" in md_files[0].name
+    assert "strict" in md_files[0].name
+    payload = json.loads(next(out_dir.glob("*.json")).read_text())
+    assert payload["gate"]["intervention"]["passed"] is True
+    assert payload["gate"]["title"]["passed"] is True
+    assert payload["gate"]["failure_cause"]["passed"] is True
+    assert "PASS" in capsys.readouterr().out
+
+
+def test_main_exit_code_reflects_only_the_intervention_gate_for_extraction(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A title/failure-cause failure must never flip the exit code — only the
+    intervention gate governs it (`heart.eval.extraction_report`'s own "gated
+    separately" instruction).
+    """
+    runtime = _FakeRuntime(
+        replies=[
+            '{"action": "retry", "run_id": "r1", "reason": "it failed"}',
+            "not a valid single-line title\nsecond line",
+            "not valid json at all",
+        ]
+    )
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    code = heart_main.main(
+        [
+            "--suite",
+            "extraction",
+            "--fixtures",
+            str(_extraction_fixtures_file(tmp_path)),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(next(out_dir.glob("*.json")).read_text())
+    assert payload["gate"]["intervention"]["passed"] is True
+    assert payload["gate"]["title"]["passed"] is False
+    assert payload["gate"]["failure_cause"]["passed"] is False
+    assert "PASS" in capsys.readouterr().out
+
+
+def test_main_returns_1_when_the_extraction_intervention_gate_fails(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = _FakeRuntime(
+        replies=[
+            "not valid json at all",
+            "Fix the bug",
+            '{"cause": "shell_denied", "evidence_event_seq": 0}',
+        ]
+    )
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    code = heart_main.main(
+        [
+            "--suite",
+            "extraction",
+            "--fixtures",
+            str(_extraction_fixtures_file(tmp_path)),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    assert code == 1
+    assert "FAIL" in capsys.readouterr().out
+
+
+def test_main_resolves_the_default_prompt_variant_for_extraction(
+    loaded_settings: Settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _FakeRuntime(
+        replies=[
+            '{"action": "retry", "run_id": "r1", "reason": "it failed"}',
+            "Fix the bug",
+            '{"cause": "shell_denied", "evidence_event_seq": 0}',
+        ]
+    )
+    _patch_common(monkeypatch, settings=loaded_settings, runtime=runtime)
+    out_dir = tmp_path / "bench"
+
+    heart_main.main(
+        [
+            "--suite",
+            "extraction",
+            "--fixtures",
+            str(_extraction_fixtures_file(tmp_path)),
+            "--out-dir",
+            str(out_dir),
+        ]
+    )
+
+    md_files = list(out_dir.glob("*.md"))
+    assert len(md_files) == 1
+    assert "-extraction-strict" in md_files[0].name
+
+
+def test_main_rejects_a_prompt_variant_not_in_the_extraction_suites_map(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`fewshot` is a real tick-suite variant but not an extraction one — rejected
+    at the suite-specific validation step, before fixtures are even loaded or the
+    Heart runtime is built.
+    """
+    runtime_calls = _patch_common(
+        monkeypatch, settings=loaded_settings, runtime=_FakeRuntime(replies=["{}"])
+    )
+
+    code = heart_main.main(
+        [
+            "--suite",
+            "extraction",
+            "--prompt-variant",
+            "fewshot",
+            "--fixtures",
+            str(_extraction_fixtures_file(tmp_path)),
+        ]
+    )
+
+    assert code == 1
+    assert "not a variant of the" in capsys.readouterr().err
+    assert runtime_calls == []
+
+
+def test_main_exits_1_on_an_extraction_fixture_error(
+    loaded_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_calls = _patch_common(
+        monkeypatch, settings=loaded_settings, runtime=_FakeRuntime(replies=["{}"])
+    )
+    missing = tmp_path / "does-not-exist.jsonl"
+
+    code = heart_main.main(["--suite", "extraction", "--fixtures", str(missing)])
+
+    assert code == 1
+    assert "fixture file not found" in capsys.readouterr().err
     assert runtime_calls == []
 
 
