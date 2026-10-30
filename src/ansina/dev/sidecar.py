@@ -2,86 +2,56 @@
 
 Not a plugin/sidecar framework — "design the preflight/spawn/supervise shape so a
 second occupant is a plausible future append, but do not build speculative
-generality for it now" is the issue's own instruction. `ProcessHandle`/`Spawner` are
-structural `Protocol`s (the same narrow-slice-of-the-stdlib pattern
-`heart.eval.provenance.GitRunner` already establishes) so the unit suite injects a
-fake with no real child process; `SupervisedProcess` is the one concrete lifecycle
-(`start`/`is_alive`/`stop`) `ansina.dev.vector`'s one real occupant builds on.
+generality for it now" is the issue's own instruction. `ProcessHandle`/`Spawner`
+(and their piped siblings) moved to `ansina.process.handles` as of issue #74, once
+a second subsystem (`ansina.opencode`) needed the identical primitives — imported
+back in here unchanged, so this module's own public surface (and every existing
+caller/test) stays byte-for-byte the same. `SupervisedProcess` is the one concrete
+lifecycle (`start`/`is_alive`/`stop`) `ansina.dev.vector`'s one real occupant
+builds on.
 
 This is also where the codebase's "the daemon itself never shells out"
 invariant (`heart.eval.provenance`'s own module docstring) is deliberately narrowed,
 not broken: `subprocess` is used here, but only ever reached via `ansina.dev`, and
 only ever constructed once, at boot, by `__main__.py` before uvicorn binds a port —
-never from `create_app()`, its lifespan, a route, or any periodic loop.
+never from `create_app()`, its lifespan, a route, or any periodic loop. (`ansina.
+opencode` narrows the same invariant differently, to runtime/repeated use — see
+`ansina.process.handles`'s own module docstring and `ansina.opencode`'s, issue #75.)
 """
 
 from __future__ import annotations
 
 import subprocess
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
 
 from ansina.logging import get_logger
+from ansina.process.handles import ProcessHandle, Sleeper, Spawner, spawn_subprocess
 
 logger = get_logger(__name__)
 
+# Explicit, not incidental: `mypy --strict` treats an *imported* name as
+# module-private unless re-exported explicitly (`--no-implicit-reexport`,
+# implied by `strict = true`) — a name this module *defines* itself (like
+# `SupervisedProcess` below) needs no such declaration, but `ProcessHandle`/
+# `Spawner`/`Sleeper`/`spawn_subprocess` are imports as of issue #74's move to
+# `ansina.process.handles`, so `tests/unit/dev/test_sidecar.py`'s own
+# `from ansina.dev.sidecar import ProcessHandle` needs this to keep resolving.
+__all__ = [
+    "ProcessHandle",
+    "Sleeper",
+    "Spawner",
+    "SupervisedProcess",
+    "spawn_subprocess",
+]
 
-class ProcessHandle(Protocol):
-    """The exact slice of `subprocess.Popen` this module calls — narrow enough that
-    a real `Popen` satisfies it with no wrapper, and the unit suite can inject a
-    fake with no real child process.
-    """
-
-    @property
-    def pid(self) -> int: ...
-
-    def poll(self) -> int | None: ...
-
-    def terminate(self) -> None: ...
-
-    def kill(self) -> None: ...
-
-    def wait(self, timeout: float | None = None) -> int: ...
-
-
-class Spawner(Protocol):
-    """`(argv, env, cwd) -> ProcessHandle` — the one seam `_spawn_subprocess` fills
-    in production; the unit suite injects a fake that never spawns a real process.
-    """
-
-    def __call__(
-        self, argv: Sequence[str], *, env: Mapping[str, str], cwd: Path | None
-    ) -> ProcessHandle: ...
-
-
-def _spawn_subprocess(
-    argv: Sequence[str], *, env: Mapping[str, str], cwd: Path | None
-) -> ProcessHandle:
-    """The one production `Spawner`. `start_new_session=True` is issue #62's own
-    AC — the child sits outside the daemon's own signal group, so a SIGTERM/SIGINT
-    to the daemon does not also hit it uncontrolled; the daemon terminates it
-    deliberately instead, via `SupervisedProcess.stop()`. `argv`/`env` are always
-    built by `ansina.dev.vector` from typed `Settings` fields, never from
-    unsanitized/shell-interpolated input.
-
-    `stdout`/`stderr` are left `None` — the child inherits the daemon's own file
-    descriptors, so Vector's own startup/connectivity diagnostics land wherever
-    the daemon's own stdout/stderr already goes (a real operator's terminal, or
-    whatever redirects it, e.g. `scripts/dev-mode-smoke.sh`'s `run.log`). Dev
-    Mode's whole point is visibility ("I need to understand what it does"), not a
-    silently detached child.
-    """
-    return subprocess.Popen(
-        list(argv),
-        env=dict(env),
-        cwd=cwd,
-        start_new_session=True,
-    )
-
-
-Sleeper = Callable[[float], None]
+# A private alias, not a new identity — `SupervisedProcess.__init__`'s own
+# `spawner: Spawner = _spawn_subprocess` default, and
+# `tests/unit/dev/test_sidecar.py`'s own `from ansina.dev.sidecar import
+# _spawn_subprocess`, both predate issue #74's move to `ansina.process.handles`
+# and are unaffected by it.
+_spawn_subprocess = spawn_subprocess
 
 
 class SupervisedProcess:

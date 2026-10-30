@@ -60,6 +60,12 @@ def test_openapi_schema_is_served_and_lists_all_routes(client: TestClient) -> No
         "/auth/oidc/login",
         "/auth/oidc/callback",
         "/auth/login",
+        "/opencode/runs",
+        "/opencode/runs/{run_id}",
+        "/opencode/runs/{run_id}/cancel",
+        "/opencode/status",
+        "/opencode/intake/pause",
+        "/opencode/intake/resume",
     }
 
 

@@ -209,6 +209,7 @@ def test_heart_factory_receives_real_heart_runtime(
         db: object,
         readiness: object,
         brain: object,
+        opencode: object,
     ) -> TickLoop:
         received.append(heart)
         return TickLoop(heart, interval_seconds=100, max_output_tokens=10)

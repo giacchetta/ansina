@@ -193,6 +193,44 @@ class TickSettings(BaseModel):
         default_factory=FaultInjectionSettings
     )
 
+    # Issue #78: `heart.tick.sources.opencode_state.OpencodeStateSource`'s two
+    # thresholds. `opencode_stall_seconds` is how long a `running` run may go with no
+    # new event (measured from `last_event_at`, falling back to `started_at` when no
+    # event has arrived yet) before that source reports it as stalled rather than
+    # merely long-running — a run that keeps producing events stays healthy no matter
+    # how long it's been running. `opencode_recent_window_minutes` bounds the window
+    # `recent_outcome_counts` scores failures/timeouts/permission-denials over, the
+    # same "recent, not lifetime" framing `TickLoop`'s own *consecutive* breaker
+    # gauges use for tick faults. Both are read even when `[opencode] enabled` is
+    # `false` (the field exists regardless) but have no effect then —
+    # `OpencodeStateSource` is only ever registered when `build_tick_loop` is handed
+    # a non-`None` probe.
+    opencode_stall_seconds: float = Field(default=300.0, gt=0)
+    opencode_recent_window_minutes: int = Field(default=15, ge=1)
+
+    # Issue #79: `heart.tick.opencode_intervention_handler
+    # .OpencodeInterventionHandler`'s own flag and three budgets — the Heart's
+    # bounded, deterministic interventions on the OpenCode executor (retry/nudge/
+    # compact/pause_intake/escalate_to_brain). `False` (the default) is the usual
+    # no-op shape: `build_tick_loop` never constructs the handler at all, leaving
+    # the exact pre-#79 object graph, the same verified-no-op discipline issue
+    # #64's `escalate_to_brain` already established.
+    opencode_interventions: bool = False
+    # Per-run ceiling on `OpencodeAction.RETRY`/`.NUDGE` attempts, read from the
+    # targeted run's own `intervention_count`.
+    opencode_max_retries_per_run: int = Field(default=2, ge=0)
+    # No two of `RETRY`/`NUDGE`/`PAUSE_INTAKE` within this many ticks of each
+    # other — `TickLoop.ticks_run`-based, never wall-clock. Does not gate
+    # `ESCALATE_TO_BRAIN`, which is the deliberate fallback once this cooldown is
+    # what's blocking the other three (see `DeterministicInterventionPolicy`'s own
+    # docstring).
+    opencode_intervention_cooldown_ticks: int = Field(default=5, ge=0)
+    # A hard, rolling, process-lifetime-only ceiling (wall-clock) across every
+    # `OpencodeAction` attempt, including `ESCALATE_TO_BRAIN` — the one budget
+    # that bounds all five actions together, so the escalate fallback can never
+    # itself become the feedback loop this ceiling exists to prevent.
+    opencode_max_interventions_per_hour: int = Field(default=6, ge=1)
+
 
 class JournalSettings(BaseModel):
     """The `heart_journal` table's bounded retention and replay size, consumed by
@@ -838,6 +876,375 @@ class DevSettings(BaseModel):
         return value.expanduser().resolve()
 
 
+_ANSINA_PROJECT_NAME = "ansina"
+
+
+def _project_name_at(pyproject_path: Path) -> str | None:
+    """`[project] name` from a `pyproject.toml`, or `None` on anything that
+    doesn't parse as one — a malformed/foreign TOML file at that path must never
+    raise out of a settings validator, only fail to match.
+    """
+    try:
+        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except OSError, UnicodeDecodeError, tomllib.TOMLDecodeError:
+        return None
+    project = data.get("project")
+    if isinstance(project, dict):
+        name = project.get("name")
+        if isinstance(name, str):
+            return name
+    return None
+
+
+def _repo_root_named(start: Path, name: str) -> Path | None:
+    """Walks `start` and every parent looking for a `pyproject.toml` whose
+    `[project] name` is exactly `name`, returning the directory that holds it —
+    or `None` once the walk reaches the filesystem root with no match. Bounded
+    (one `pyproject.toml` read per directory on the path to `/`), never an
+    unbounded subtree scan.
+    """
+    for candidate in (start, *start.parents):
+        pyproject = candidate / "pyproject.toml"
+        if pyproject.is_file() and _project_name_at(pyproject) == name:
+            return candidate
+    return None
+
+
+class OpencodePermissionSettings(BaseModel):
+    """`[opencode.permission]` — the deny-by-default permission block
+    `ansina.opencode.config` renders into OpencodeConfig's own `opencode.json`,
+    consumed by issue #74's `ansina.opencode.config`.
+
+    Ansina's own typed vocabulary, not OpenCode's: `edit`/`bash` are
+    `"deny"`/`"allow"`/one Ansina-defined confinement mode (`"workspace"`,
+    `"allowlist"`) rather than OpenCode's raw glob-map shape — `opencode.config`
+    is what translates this into OpenCode's own `{"*": ..., "<glob>": ...}`
+    object. Every other key is plain `"allow"`/`"deny"`. `"ask"` is
+    unrepresentable by construction anywhere in this model — a headless
+    `--auto` run has nobody to answer a prompt, so an `"ask"` value would hang
+    until the timeout rather than fail fast; `additional` (below) is typed the
+    same restrictive way for the identical reason.
+
+    `additional` reaches any of OpenCode's other documented permission keys
+    (`glob`, `grep`, `task`, `todowrite`, `skill`, `lsp`, `question`,
+    `doom_loop`, ...) this model doesn't name explicitly, without a code change
+    — forward-compatible with a new OpenCode permission kind the same way
+    `heart.triage`'s `other` event-type fallback is forward-compatible with a
+    new OpenCode *event* kind.
+    """
+
+    model_config = _MODEL_CONFIG
+
+    default: Literal["allow", "deny"] = "deny"
+    read: Literal["allow", "deny"] = "allow"
+    edit: Literal["deny", "allow", "workspace"] = "workspace"
+    bash: Literal["deny", "allow", "allowlist"] = "allowlist"
+    bash_allowlist: tuple[str, ...] = (
+        "git status*",
+        "git diff*",
+        "git log*",
+        "ls*",
+        "cat*",
+        "rg*",
+    )
+    bash_denylist: tuple[str, ...] = (
+        "rm *",
+        "sudo *",
+        "curl *",
+        "wget *",
+        "ssh *",
+        "git push*",
+    )
+    webfetch: Literal["allow", "deny"] = "deny"
+    websearch: Literal["allow", "deny"] = "deny"
+    external_directory: Literal["allow", "deny"] = "deny"
+    additional: Mapping[str, Literal["allow", "deny"]] = Field(default_factory=dict)
+
+
+# Refused in `inherit_env_names` below — Ansina's own settings-env namespace,
+# never meant to reach a child process under cover of an operator-named
+# allow-list entry.
+_INHERIT_ENV_FORBIDDEN_PREFIX = "ANSINA_"
+# Secret-shaped, regardless of namespace — the same credential-smell patterns
+# `ansina.logging.redaction` (naming, not pattern-matching) and
+# `ansina.dev.vector.build_vector_env`'s own hand-picked allow-list already treat
+# as sensitive. Matched case-insensitively against the *whole* name, not just a
+# prefix/suffix — `secrets.token_urlsafe` isn't the only way a name can carry a
+# credential.
+_INHERIT_ENV_SECRET_SHAPED_PATTERNS = (
+    re.compile(r"^AWS_", re.IGNORECASE),
+    re.compile(r"_API_KEY$", re.IGNORECASE),
+    re.compile(r"SECRET", re.IGNORECASE),
+    re.compile(r"TOKEN", re.IGNORECASE),
+)
+
+
+def _looks_unsafe_to_inherit(name: str) -> bool:
+    if name.upper().startswith(_INHERIT_ENV_FORBIDDEN_PREFIX):
+        return True
+    return any(pattern.search(name) for pattern in _INHERIT_ENV_SECRET_SHAPED_PATTERNS)
+
+
+class OpencodeSettings(BaseModel):
+    """`[opencode]` — the confined OpenCode workspace/config/env foundation for
+    M9's "Hands" executor, consumed by issue #74's `ansina.opencode`.
+
+    `enabled=False` (the default) is a byte-for-byte no-op: `ansina.opencode`'s
+    own `preflight`/`ensure_workspace`/`build_opencode_service` create no
+    directory, write no file, and log nothing — the same "`None`/no-op when
+    off" shape `[heart]`/`[brain]`/`[security.oidc]` already use. Issue #74
+    shipped this confinement foundation with no executor at all; issue #75's
+    `ansina.opencode.runner.OpencodeCliRunner` is the first thing that actually
+    spawns a real `opencode` child to do work, consuming `run_timeout_seconds`/
+    `shutdown_timeout_seconds`/`max_concurrent_runs`/`queue_max_depth`/
+    `max_prompt_chars`/`max_event_bytes`/`max_run_output_bytes`/`model`/`agent`/
+    `auto_approve` below — still wired into no route or tick-loop caller as of
+    that issue (see `ansina/opencode/`'s own module docstrings).
+
+    `workspace_dir` goes through the same `~`-expand-and-`.resolve()`
+    `field_validator` as `DatabaseSettings.path`/`TelemetrySettings.spool_dir`,
+    `validate_default=True` for the same reason those two document (the
+    *default* path must resolve too, not just an explicit one). A further
+    `model_validator` (`_validate_workspace_outside_ansina_checkout` below)
+    refuses a `workspace_dir` that is, is inside, or contains an ansina
+    checkout — OpenCode's own `bash`/`edit` reach inside this directory is
+    broad even under `[opencode.permission]`'s own confinement, so pointing it
+    at Ansina's own source would defeat every other control in this file.
+
+    `provider_api_key` is env-only, the same "`SecretStr` in TOML is a startup
+    error" rule every other Ansina secret follows (`_AnsinaTomlSource`/
+    `_walk_secret_paths` already enforce this generically — no new code is
+    needed for it here). `inherit_env_names` is validated the opposite
+    direction: it refuses an entry that could smuggle a secret into the
+    child's environment under cover of this allow-list (see
+    `_looks_unsafe_to_inherit` above).
+
+    See `Settings._refuse_unobserved_executor` for the cross-section rule this
+    model's own `enabled` flag participates in — `[opencode] enabled = true`
+    with `[telemetry] enabled = false` is refused at the `Settings` level, not
+    here, since this model alone can't see `[telemetry]`.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    enabled: bool = False
+    binary: str = "opencode"
+    # Empty means "accept whatever `opencode --version` reports" — set this to
+    # pin a known-good release the way `[dev].vector_binary`'s own docstring
+    # pins Vector to 0.45.x after finding a real incompatibility the hard way.
+    # Ansina targets OpenCode v2, not v1 (see `make opencode-install`/`docs/
+    # opencode.md`) — a raw-prefix match against the trimmed `--version`
+    # output, not a semver comparison, since the output's own shape is not
+    # stable across OpenCode major versions (v1 prints a bare `"1.19.3"`; v2
+    # prints `"opencode v2.1.1"`, with the binary name and a leading `v`).
+    # `"opencode v2."` is the expected shape once a v2 release is actually
+    # validated against Ansina; `ansina.opencode.preflight`'s own module
+    # docstring states the general rule plainly rather than assuming one
+    # shape, since a bare numeric prefix (e.g. `"2."`) would never match v2's
+    # own output.
+    required_version_prefix: str = ""
+    workspace_dir: Path = Path("~/.local/state/ansina/opencode")
+    # `True` redirects the child's own `HOME` into an isolated directory inside
+    # `workspace_dir` — see `ansina.opencode.env`'s own module docstring for why
+    # this matters beyond tidiness: OpenCode's global
+    # `~/.config/opencode/opencode.json` merges *under* project config, so an
+    # ambient operator-level config on the host could otherwise loosen this
+    # deny-by-default block for every key our own generated config doesn't
+    # explicitly name.
+    isolate_home: bool = True
+    # The env var name (inside the *child's* environment) that names the
+    # provider API key — e.g. "ANTHROPIC_API_KEY". Empty means "no key passed."
+    provider_api_key_env: str = ""
+    provider_api_key: SecretStr | None = Field(default=None)
+    # The base URL of an OpenAI-compatible endpoint for OpenCode's own driving
+    # model (issue #14) — a separate concern from `[brain] base_url`, which is
+    # Ansina's own remote reasoning target; the two may point at the same
+    # gateway but are configured independently. Empty (the default) means "emit
+    # no custom-provider block at all" — the same "empty means unset" shape
+    # `provider_api_key_env` already uses. `ansina.opencode.config.
+    # render_opencode_config` is what turns a non-empty value into OpenCode's
+    # own documented `provider.<id>.options.baseURL`/`.options.apiKey` shape
+    # (verified against the real opencode.ai docs, not assumed — see that
+    # module's own docstring) — never the raw secret itself, only
+    # `provider_api_key_env`'s *name*, referenced via OpenCode's own `{env:...}`
+    # templating syntax, so the generated `opencode.json` never contains a
+    # credential.
+    provider_base_url: str = ""
+    # Operator-named extra environment variables to forward verbatim from the
+    # daemon's own environment into the child's — empty by default, the same
+    # "explicit allow-list, never the daemon's own os.environ wholesale" shape
+    # `ansina.dev.vector.build_vector_env`'s `_INHERITED_ENV_NAMES` already
+    # uses. See `_looks_unsafe_to_inherit` above for what's refused outright.
+    inherit_env_names: tuple[str, ...] = ()
+    preflight_timeout_seconds: float = Field(default=30.0, gt=0)
+    # Issue #75 (`ansina.opencode.runner`) — a run's own wall-clock cap, and the
+    # terminate->kill grace window once it's hit. `shutdown_timeout_seconds`
+    # mirrors `[dev] shutdown_timeout_seconds`'s own name/shape (`ansina.dev.
+    # sidecar.SupervisedProcess.stop`) — same terminate-then-bounded-wait-then-
+    # kill discipline, applied to a per-run child instead of one long-lived
+    # sidecar.
+    run_timeout_seconds: float = Field(default=900.0, gt=0)
+    shutdown_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Issue #75 — `asyncio.Semaphore(max_concurrent_runs)` bounds how many
+    # `opencode` children may actually be running at once; `queue_max_depth`
+    # bounds the total number of `OpencodeCliRunner.run()` calls admitted
+    # (waiting on that semaphore, or already running) before a further call is
+    # refused outright (`OpencodeBusyError`) rather than queued unboundedly.
+    # `queue_max_depth >= max_concurrent_runs` is enforced below — a backlog
+    # smaller than the concurrency it's meant to queue behind would make no
+    # call ever actually wait, silently turning the queue into a no-op.
+    max_concurrent_runs: int = Field(default=1, ge=1)
+    queue_max_depth: int = Field(default=10, ge=1)
+    # Issue #75 — three independent size caps, each guarding a different
+    # resource: `max_prompt_chars` refuses an oversized request before any
+    # subprocess exists at all (`OpencodeRunFailedError`); `max_event_bytes`
+    # bounds what a single captured JSON line contributes to a `RunEvent`
+    # after truncation+redaction (`ansina.opencode.events.parse_run_event`);
+    # `max_run_output_bytes` bounds the whole run's own captured output.
+    # `max_event_bytes <= max_run_output_bytes` is enforced below — a single
+    # line allowed to exceed the whole-run cap would make that cap
+    # unenforceable on its very first oversized line.
+    max_prompt_chars: int = Field(default=100_000, gt=0)
+    max_event_bytes: int = Field(default=65_536, gt=0)
+    max_run_output_bytes: int = Field(default=10_485_760, gt=0)
+    # Issue #75 — per-run `--model`/`--agent` defaults; `""` omits the flag
+    # entirely (the same "empty means unset" shape `provider_api_key_env`
+    # above already uses), letting `opencode` fall back to its own configured
+    # default. `ansina.opencode.events.RunRequest.model`/`.agent` override
+    # these per call without changing this section's own configured default.
+    model: str = ""
+    agent: str = ""
+    # Issue #75 — maps to `opencode run --auto` ("auto-approve permissions
+    # that are not explicitly denied"). Defaults to `True`, not `False` like
+    # every other `[opencode]`/`[dev]`/`[telemetry]` `enabled` flag in this
+    # file: a headless, non-interactive run has nobody to answer a prompt
+    # `--auto` would otherwise leave standing — `ansina.opencode.preflight`'s
+    # own module docstring already reasons as if `--auto` is always passed
+    # ("a headless `--auto` run has nobody to answer a prompt, so even one
+    # surviving `'ask'` ... would hang a real run until its own timeout").
+    # The deny-by-default permission floor and the effective-permission
+    # preflight check are what actually confine the child; `--auto` only
+    # changes whether an already-resolved allow/deny needs a human to confirm
+    # it, which this deployment shape never has.
+    auto_approve: bool = True
+    permission: OpencodePermissionSettings = Field(
+        default_factory=OpencodePermissionSettings
+    )
+    # Issue #77 — `opencode_runs`' own bounded retention, the same two-cutoff
+    # shape `JournalSettings.max_entries`/`retention_days` already use for
+    # `heart_journal`: a row is swept once it's either outside the newest
+    # `max_runs_retained` or older than `run_retention_days`, whichever bound
+    # it fails first.
+    max_runs_retained: int = Field(default=2000, ge=1)
+    run_retention_days: int = Field(default=14, ge=1)
+    # Issue #77 — whether `OpencodeRunService` starts with intake paused
+    # (`POST /opencode/runs` refused with `ansina.opencode.intake_paused`
+    # until a `POST /opencode/intake/resume`). Independent of `enabled`
+    # above: an operator can have the service constructed and observable via
+    # `GET /opencode/status` while still deliberately not accepting new work
+    # from a cold boot.
+    intake_paused_on_boot: bool = False
+
+    @model_validator(mode="after")
+    def _validate_run_limits(self) -> OpencodeSettings:
+        """Two cross-field invariants, same `TelemetrySettings.max_file_bytes
+        <= max_spool_bytes` shape — each pairs a tighter-scoped cap with the
+        broader one it must never exceed, or the broader cap could never
+        actually bind.
+        """
+        if self.queue_max_depth < self.max_concurrent_runs:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "opencode.queue_max_depth: must be >= "
+                        "opencode.max_concurrent_runs (got "
+                        f"queue_max_depth={self.queue_max_depth}, "
+                        f"max_concurrent_runs={self.max_concurrent_runs})"
+                    ]
+                )
+            )
+        if self.max_event_bytes > self.max_run_output_bytes:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "opencode.max_event_bytes: must be <= "
+                        "opencode.max_run_output_bytes (got "
+                        f"max_event_bytes={self.max_event_bytes}, "
+                        f"max_run_output_bytes={self.max_run_output_bytes})"
+                    ]
+                )
+            )
+        return self
+
+    @field_validator("workspace_dir")
+    @classmethod
+    def _resolve_workspace_dir(cls, value: Path) -> Path:
+        """Same `~`-expand-and-anchor-to-CWD treatment as
+        `DatabaseSettings._resolve_path`/`TelemetrySettings._resolve_spool_dir`.
+        """
+        return value.expanduser().resolve()
+
+    @field_validator("inherit_env_names")
+    @classmethod
+    def _validate_inherit_env_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        rejected = [name for name in value if _looks_unsafe_to_inherit(name)]
+        if rejected:
+            raise ValueError(
+                "opencode.inherit_env_names must not include an ANSINA_-prefixed "
+                "or secret-shaped (AWS_*/*_API_KEY/*SECRET*/*TOKEN*) name — "
+                f"rejected: {', '.join(rejected)}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_workspace_outside_ansina_checkout(self) -> OpencodeSettings:
+        """`workspace_dir` is handed to a repeatedly-spawned external child with
+        broad `bash`/`edit` reach inside it — pointing it at (or around) this
+        very checkout would let that child read or modify Ansina's own source,
+        defeating every other confinement control in this file. Gated on
+        `enabled`: an unused default must never fail to load just because it
+        happens to sit near an unrelated checkout on this machine.
+
+        Two independent, bounded probes, never an unbounded subtree scan: (1)
+        does `workspace_dir` itself sit at or inside a directory that is an
+        ansina checkout (walking *up* from it)? (2) does this running code's
+        own checkout (walking up from this very file — deliberately not
+        `Path.cwd()`, which a test's own `monkeypatch.chdir` would otherwise
+        make this check silently miss, and which a real deployment's own
+        working directory need not be the checkout at all) sit inside
+        `workspace_dir`? Either direction is refused as a `ConfigError`
+        (model-level, no single field `loc` — the
+        `_validate_enabled_requires_schedule` pattern).
+        """
+        if not self.enabled:
+            return self
+        workspace = self.workspace_dir
+        if _repo_root_named(workspace, _ANSINA_PROJECT_NAME) is not None:
+            raise ConfigError(
+                _render_report(
+                    [
+                        f"opencode.workspace_dir: {workspace} is, or is inside, "
+                        "an ansina checkout — point it at a directory with no "
+                        "ansina source in it or above it"
+                    ]
+                )
+            )
+        this_repo_root = _repo_root_named(
+            Path(__file__).resolve(), _ANSINA_PROJECT_NAME
+        )
+        if this_repo_root is not None and this_repo_root.is_relative_to(workspace):
+            raise ConfigError(
+                _render_report(
+                    [
+                        f"opencode.workspace_dir: {workspace} contains this "
+                        f"running ansina checkout ({this_repo_root}) — point it "
+                        "at a directory with no ansina source in it or above it"
+                    ]
+                )
+            )
+        return self
+
+
 class SecuritySettings(BaseModel):
     """Auth material for issue #5, #24, and #28.
 
@@ -1118,6 +1525,7 @@ class Settings(BaseSettings):
     brain: BrainSettings = Field(default_factory=BrainSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
     dev: DevSettings = Field(default_factory=DevSettings)
+    opencode: OpencodeSettings = Field(default_factory=OpencodeSettings)
 
     @model_validator(mode="after")
     def _refuse_unsafe_bind(self) -> Settings:
@@ -1144,6 +1552,43 @@ class Settings(BaseSettings):
                         f"{self.server.host!r} (not loopback) with "
                         "security.enabled = false; set ANSINA_SECURITY__ENABLED=true "
                         "or bind [server] host back to 127.0.0.1"
+                    ]
+                )
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _refuse_unobserved_executor(self) -> Settings:
+        """`[opencode] enabled = true` with `[telemetry] enabled = false` must
+        never boot — the `OidcSettings`/`CorsSettings` fail-loudly posture,
+        deliberately **not** the `S3Settings`/`DevSettings` degrade-gracefully
+        one those two models' own docstrings document.
+
+        The difference in posture is deliberate, not an inconsistency: every
+        other "degrade gracefully" subsystem in this file (`[telemetry.s3]`,
+        `[dev]`) only ever *ships* something that was already captured — a
+        missing bucket or a dead sidecar means a bench/soak report or a
+        telemetry file sits unshipped, recoverable later (`heart-bench-
+        publish`'s whole job). An unobserved OpenCode run is different in kind:
+        every tool call, permission denial, and outcome it produces is
+        emitted *as telemetry or nothing at all* (issue #76) — there is no
+        local file sitting around to re-ship after the fact. A run that
+        happens with telemetry off is not merely unshipped, it never existed
+        anywhere Ansina can account for it, which is the one thing this
+        milestone refuses to allow for an executor with real `bash`/`edit`
+        reach. Raised as `ConfigError` directly (model-level, no single field
+        `loc`) — the same pattern `_refuse_unsafe_bind` above and
+        `OidcSettings`/`CorsSettings`'s own `enabled`-pairing checks use.
+        """
+        if self.opencode.enabled and not self.telemetry.enabled:
+            raise ConfigError(
+                _render_report(
+                    [
+                        "opencode.enabled: refusing to start — "
+                        "telemetry.enabled must be true whenever opencode.enabled "
+                        "is true (an executor Ansina cannot observe is refused "
+                        "outright); set ANSINA_TELEMETRY__ENABLED=true or leave "
+                        "opencode.enabled = false"
                     ]
                 )
             )

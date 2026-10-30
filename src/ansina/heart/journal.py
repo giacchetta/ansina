@@ -40,6 +40,7 @@ from ansina.storage.database import Database
 
 if TYPE_CHECKING:
     from ansina.heart.tick.decision import TickDecision
+    from ansina.opencode.interventions import OpencodeAction
 
 
 class BrainEscalationStatus(StrEnum):
@@ -56,6 +57,25 @@ class BrainEscalationStatus(StrEnum):
 
     CALLED = "called"
     DECLINED = "declined"
+    ERROR = "error"
+
+
+class OpencodeInterventionStatus(StrEnum):
+    """What happened when `heart.tick.opencode_intervention_handler
+    .OpencodeInterventionHandler` attempted an `OpencodeAction` against a run. See
+    issue #79.
+
+    Defined here, not in `ansina.opencode.interventions` (where `OpencodeAction`
+    itself lives): `heart_journal.opencode_outcome`'s own `CHECK` constraint is a
+    fact about *this table's* schema — the identical reasoning
+    `BrainEscalationStatus` above already documents for the same split (the action
+    lives downstack in the domain it acts on; the outcome enum lives here, next to
+    this table's other status enum, since both are facts about this schema).
+    """
+
+    APPLIED = "applied"
+    DECLINED = "declined"
+    UNSUPPORTED = "unsupported"
     ERROR = "error"
 
 
@@ -84,14 +104,26 @@ class JournalEntry:
     brain_detail: str = ""
     brain_prompt_tokens: int | None = None
     brain_completion_tokens: int | None = None
+    opencode_run_id: str | None = None
+    opencode_action: OpencodeAction | None = None
+    opencode_outcome: OpencodeInterventionStatus | None = None
+    opencode_detail: str = ""
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Self:
-        # Deferred import — see this module's own docstring for why `TickDecision`
-        # is never imported at module scope here.
+        # Deferred imports — see this module's own docstring for why `TickDecision`
+        # is never imported at module scope here; `OpencodeAction` follows the
+        # identical reasoning for the new, symmetric heart->opencode direction
+        # (issue #79): `ansina.opencode` imports nothing from `ansina.heart`, so
+        # there is no real import cycle here, but keeping both deferred imports in
+        # the same place/shape avoids a module-scope import of a package this
+        # module's own callers don't all need loaded.
         from ansina.heart.tick.decision import TickDecision
+        from ansina.opencode.interventions import OpencodeAction
 
         brain_status = row["brain_status"]
+        opencode_action = row["opencode_action"]
+        opencode_outcome = row["opencode_outcome"]
         return cls(
             id=row["id"],
             created_at=row["created_at"],
@@ -108,6 +140,16 @@ class JournalEntry:
             brain_detail=row["brain_detail"],
             brain_prompt_tokens=row["brain_prompt_tokens"],
             brain_completion_tokens=row["brain_completion_tokens"],
+            opencode_run_id=row["opencode_run_id"],
+            opencode_action=(
+                OpencodeAction(opencode_action) if opencode_action is not None else None
+            ),
+            opencode_outcome=(
+                OpencodeInterventionStatus(opencode_outcome)
+                if opencode_outcome is not None
+                else None
+            ),
+            opencode_detail=row["opencode_detail"],
         )
 
 
@@ -136,6 +178,10 @@ class HeartJournalRepository:
         brain_detail: str = "",
         brain_prompt_tokens: int | None = None,
         brain_completion_tokens: int | None = None,
+        opencode_run_id: str | None = None,
+        opencode_action: OpencodeAction | None = None,
+        opencode_outcome: OpencodeInterventionStatus | None = None,
+        opencode_detail: str = "",
     ) -> JournalEntry:
         """Inserts one row, then sweeps bounded retention as a documented side
         effect — the same "sweep on the already-writing path" shape
@@ -149,6 +195,17 @@ class HeartJournalRepository:
         repository is deliberately append-only — see the class docstring — so a second
         row, not an update to the first, is how a later-arriving Brain-call outcome is
         recorded).
+
+        `opencode_run_id`/`opencode_action`/`opencode_outcome`/`opencode_detail`
+        (issue #79) are the symmetric widening for a bounded Heart intervention on the
+        OpenCode executor — optional, keyword-only, defaulting to "no intervention."
+        `heart.tick.opencode_intervention_handler.OpencodeInterventionHandler` is the
+        one caller that passes them, appending its own second row the same way
+        `BrainEscalationHandler` does (sharing `tick_number`, `decision=
+        TickDecision.ACT`) — except for its `ESCALATE_TO_BRAIN` action, which
+        populates *both* this widening's columns and the `brain_*` ones above on one
+        shared second row, reusing the existing Brain-call journaling rather than
+        inventing a second one.
         """
         entry_id = uuid.uuid4().hex
         with self._db.transaction() as cursor:
@@ -157,8 +214,10 @@ class HeartJournalRepository:
                 INSERT INTO heart_journal
                     (id, created_at, tick_number, decision, note, prompt_tokens,
                      duration_seconds, brain_status, brain_detail,
-                     brain_prompt_tokens, brain_completion_tokens)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     brain_prompt_tokens, brain_completion_tokens,
+                     opencode_run_id, opencode_action, opencode_outcome,
+                     opencode_detail)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
@@ -172,6 +231,10 @@ class HeartJournalRepository:
                     brain_detail,
                     brain_prompt_tokens,
                     brain_completion_tokens,
+                    opencode_run_id,
+                    opencode_action.value if opencode_action is not None else None,
+                    opencode_outcome.value if opencode_outcome is not None else None,
+                    opencode_detail,
                 ),
             )
             row = cursor.execute(

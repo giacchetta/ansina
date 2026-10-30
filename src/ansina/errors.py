@@ -94,3 +94,73 @@ class TelemetryError(AnsinaError):
     """
 
     code: ClassVar[str] = "ansina.telemetry.error"
+
+
+class OpencodeError(AnsinaError):
+    """The OpenCode-hosted executor ("Hands") failed. See `ansina.opencode`
+    (issue #74's foundation, issue #75's `AgentRunner`/`OpencodeCliRunner`).
+    """
+
+    code: ClassVar[str] = "ansina.opencode.error"
+
+
+class OpencodeUnavailableError(OpencodeError):
+    """`OpencodeCliRunner.run()` was called on a runner with no resolved
+    `opencode_path` — in practice unreachable once `build_opencode_service`
+    (`ansina.opencode.preflight`) is the only real constructor, since it never
+    hands out a runner on a failed preflight; kept as a defensive, never-
+    silently-trust-the-caller guard rather than an assumption, the same
+    `ansina.opencode.preflight` posture already applies to its own checks.
+    """
+
+    code: ClassVar[str] = "ansina.opencode.unavailable"
+
+
+class OpencodeBusyError(OpencodeError):
+    """`[opencode] queue_max_depth` would be exceeded by admitting this call.
+    Raised synchronously at the top of `OpencodeCliRunner.run()`, before any
+    subprocess is spawned — the one case issue #75's own acceptance criteria
+    describe as refused "at the port," the explicit exception to `run()`'s
+    otherwise-never-raises-after-invocation rule. Issue #77's
+    `ansina.opencode.service.OpencodeRunService.submit()` raises this same
+    class at its own, earlier admission-control point (before a row is even
+    created in `opencode_runs`) when the service's own backlog
+    (`OpencodeRunRepository.count_active()`) is already at
+    `queue_max_depth` — mapped to a 429 `problem+json` response by
+    `api/problems.py`'s `_STATUS_BY_ERROR_TYPE`, issue #77's own route surface
+    being the first to exist to map it from.
+    """
+
+    code: ClassVar[str] = "ansina.opencode.busy"
+
+
+class OpencodeRunFailedError(OpencodeError):
+    """A run request was rejected before any subprocess was spawned — today,
+    only a `request.prompt` longer than `[opencode] max_prompt_chars`. Raised
+    synchronously at the top of `OpencodeCliRunner.run()`, the same
+    admission-control phase `OpencodeBusyError` occupies; once a subprocess is
+    actually spawned (or its spawn is attempted), every failure resolves into
+    a terminal `RunOutcome` instead (`ansina.opencode.events`), never a raise.
+    Issue #77's `OpencodeRunService.submit()` makes the identical
+    `max_prompt_chars` check itself, before ever constructing an
+    `opencode_runs` row, so a too-long prompt never gets a queued row that
+    would just sit there — `api/routes/opencode_runs.py` catches this one
+    explicitly and renders the shared `ansina.request.invalid` code (400)
+    rather than this class's own `ansina.opencode.run_failed`, matching the
+    issue's own AC.
+    """
+
+    code: ClassVar[str] = "ansina.opencode.run_failed"
+
+
+class OpencodeIntakePausedError(OpencodeError):
+    """`OpencodeRunService.submit()` was called while intake is paused — the
+    service-level kill switch (`POST /opencode/intake/pause`, or a later
+    issue's bounded Heart intervention) rather than anything to do with
+    `queue_max_depth`/`max_prompt_chars` above. Mapped to 409, not 503: the
+    service exists and is otherwise healthy, it is simply not currently
+    accepting new work — the same distinction a 503 `CODE_OPENCODE_DISABLED`
+    (the service doesn't exist at all) is not shaped to make. See issue #77.
+    """
+
+    code: ClassVar[str] = "ansina.opencode.intake_paused"

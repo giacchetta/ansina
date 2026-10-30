@@ -27,7 +27,12 @@ from ansina.heart.tick.snapshot import (
     build_prompt,
     collect_items,
 )
-from ansina.heart.tick.sources import DaemonStateSource, RecentJournalSource
+from ansina.heart.tick.sources import (
+    DaemonStateSource,
+    OpencodeStateProbe,
+    OpencodeStateSource,
+    RecentJournalSource,
+)
 
 __all__ = [
     "BrainEscalationHandler",
@@ -36,6 +41,8 @@ __all__ = [
     "DecisionHandler",
     "JournalDecisionHandler",
     "LoggingDecisionHandler",
+    "OpencodeStateProbe",
+    "OpencodeStateSource",
     "RecentJournalSource",
     "SnapshotItem",
     "StateSnapshotSource",

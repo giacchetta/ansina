@@ -7,8 +7,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ansina.auth.clock import iso
-from ansina.heart.journal import BrainEscalationStatus, HeartJournalRepository
+from ansina.heart.journal import (
+    BrainEscalationStatus,
+    HeartJournalRepository,
+    OpencodeInterventionStatus,
+)
 from ansina.heart.tick.decision import TickDecision
+from ansina.opencode.interventions import OpencodeAction
 
 _NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
 
@@ -117,6 +122,11 @@ def test_get_journal_entry_shape(app: FastAPI, client: TestClient) -> None:
     assert entry["brain_detail"] == ""
     assert entry["brain_prompt_tokens"] is None
     assert entry["brain_completion_tokens"] is None
+    # Issue #79: no OpenCode intervention on this row either.
+    assert entry["opencode_run_id"] is None
+    assert entry["opencode_action"] is None
+    assert entry["opencode_outcome"] is None
+    assert entry["opencode_detail"] == ""
 
 
 def test_get_journal_entry_shape_with_a_brain_outcome(
@@ -146,6 +156,37 @@ def test_get_journal_entry_shape_with_a_brain_outcome(
     assert entry["brain_status"] == "called"
     assert entry["brain_prompt_tokens"] == 10
     assert entry["brain_completion_tokens"] == 3
+
+
+def test_get_journal_entry_shape_with_an_opencode_outcome(
+    app: FastAPI, client: TestClient
+) -> None:
+    """Issue #79's four new fields, populated — the second row
+    `OpencodeInterventionHandler` appends after an `act` tick that attempted a
+    bounded intervention.
+    """
+    repository = HeartJournalRepository(app.state.db)
+    repository.append(
+        created_at=iso(_NOW),
+        tick_number=5,
+        decision=TickDecision.ACT,
+        note="",
+        prompt_tokens=42,
+        duration_seconds=0.2,
+        max_entries=100,
+        retention_days=30,
+        opencode_run_id="run-1",
+        opencode_action=OpencodeAction.RETRY,
+        opencode_outcome=OpencodeInterventionStatus.APPLIED,
+        opencode_detail="resubmitted as run-2",
+    )
+
+    entry = client.get("/heart/journal").json()["entries"][0]
+
+    assert entry["opencode_run_id"] == "run-1"
+    assert entry["opencode_action"] == "retry"
+    assert entry["opencode_outcome"] == "applied"
+    assert entry["opencode_detail"] == "resubmitted as run-2"
 
 
 def test_get_journal_respects_limit(app: FastAPI, client: TestClient) -> None:

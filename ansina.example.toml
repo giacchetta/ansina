@@ -99,6 +99,36 @@ auto_pause_enabled = true
 # 8-hour soak found zero false escalates, so no dedup/cooldown rung gates this.
 escalate_to_brain = false
 
+# OpencodeStateSource (issue #78): how long a running OpenCode run may go with no
+# new event (from last_event_at, falling back to started_at) before it's reported
+# as stalled rather than merely long-running — a run that keeps producing events
+# never counts as stalled no matter how long it's been running.
+opencode_stall_seconds = 300.0
+
+# The window OpencodeStateSource's recent-outcomes item scores failed/timed-out/
+# permission-denied OpenCode runs over.
+opencode_recent_window_minutes = 15
+
+# The Heart's bounded, deterministic interventions on the OpenCode executor
+# (issue #79): retry a failed/timed-out run, nudge a stalled session, pause
+# intake on repeated failures, or escalate to the Brain as a last resort. false
+# (the default) is a byte-for-byte no-op — build_tick_loop never constructs the
+# handler at all.
+opencode_interventions = false
+
+# Per-run ceiling on retry/nudge attempts, read from the run's own intervention
+# count.
+opencode_max_retries_per_run = 2
+
+# No two of retry/nudge/pause_intake within this many ticks of each other.
+# Does NOT gate escalate_to_brain, which is the deliberate fallback once this
+# cooldown is itself what's blocking the other three.
+opencode_intervention_cooldown_ticks = 5
+
+# A hard, rolling, process-lifetime-only ceiling (wall-clock) across every
+# opencode intervention attempt, including escalate_to_brain.
+opencode_max_interventions_per_hour = 6
+
 [heart.tick.fault_injection]
 # A soak/dev-only mode (issue #72) that forces real, scheduled tick faults — a
 # readiness check failing, consecutive tick failures, or consecutive tick overruns
@@ -459,3 +489,198 @@ shutdown_timeout_seconds = 5.0
 # Bounds the one-time `vector validate` preflight call -- never touches the
 # network itself (healthchecks are skipped), just config parsing.
 validate_timeout_seconds = 30.0
+
+[opencode]
+# M9's "Hands": OpenCode as a confined, subprocess-driven executor. Issue #74
+# shipped the foundation -- workspace provisioning, generated per-run config,
+# an allow-list child environment, and a logged-skip preflight. Issue #75's
+# OpencodeCliRunner (ansina.opencode.runner) is the first thing that actually
+# spawns a real `opencode` child to do work, consuming every key below from
+# run_timeout_seconds onward -- still wired into no route or tick-loop caller
+# as of that issue (see docs/opencode.md's "Verifying it" for how to drive a
+# real run by hand). false (the default) is a byte-for-byte no-op -- no
+# directory is created, no file is written, nothing is logged, nothing is
+# spawned.
+#
+# enabled = true REQUIRES [telemetry] enabled = true below, unlike every other
+# `[section] enabled` flag in this file: an executor Ansina cannot observe is
+# refused outright at boot (a ConfigError, not a logged skip) -- every run's
+# full lifecycle is meant to be captured as telemetry, so there is no local
+# file to re-ship later the way a missed bench/soak report can be.
+enabled = false
+
+# Resolved via a PATH lookup at preflight time (a bare name, the common case)
+# or used as-is if already absolute -- the same `[dev] vector_binary` shape.
+binary = "opencode"
+
+# Pin a known-good release the way `[dev] vector_binary`'s own docstring pins
+# Vector to 0.45.x after finding a real incompatibility the hard way. Ansina
+# targets OpenCode v2, not v1 -- install it via `make opencode-install
+# ARGS='--version <v>'` (see docs/opencode.md). A RAW-PREFIX match against
+# the trimmed `opencode --version` output, not a semver comparison -- that
+# output's own shape is not stable across OpenCode major versions (v1 prints
+# a bare "1.19.3"; v2 prints "opencode v2.1.1", with the binary name and a
+# leading "v"), so the expected v2 shape is e.g. "opencode v2." -- a bare
+# "2." would never match it. Empty (the default) skips the check entirely,
+# and stays that way until a real v2 release has actually been validated
+# against Ansina.
+required_version_prefix = ""
+
+# The confined directory OpenCode runs in -- resolved the same way [database]
+# path/[heart] cache_dir are (`~` expanded, relative paths anchored to the
+# CWD, once, at load time). Refused at boot if it is, is inside, or contains
+# this ansina checkout itself (a concrete check: does a `pyproject.toml`
+# naming "ansina" sit at or above this path, in either direction?) -- OpenCode's
+# own `bash`/`edit` reach inside this directory is broad even under
+# [opencode.permission]'s own confinement below, so pointing it at Ansina's own
+# source would defeat every other control in this section.
+workspace_dir = "~/.local/state/ansina/opencode"
+
+# Redirects the child's own HOME into an isolated directory inside
+# workspace_dir. true (the default) for a real security reason, not just
+# tidiness: OpenCode's own documented config precedence MERGES every config
+# source together rather than replacing one with another, with the global
+# ~/.config/opencode/opencode.json merging in *under* project config -- so an
+# ambient operator-level config on this host could otherwise silently loosen
+# this section's own deny-by-default block for any permission key the
+# generated opencode.json doesn't explicitly name. Redirecting HOME removes
+# that one file from the merge chain entirely.
+isolate_home = true
+
+# The env var name (inside the CHILD's own environment, not this file) that
+# carries the provider API key -- e.g. "ANTHROPIC_API_KEY". Empty (the
+# default) means no key is passed at all.
+provider_api_key_env = ""
+
+# provider_api_key, like every secret, is env-only -- setting it in this file
+# is a hard startup error:
+#   ANSINA_OPENCODE__PROVIDER_API_KEY=...
+
+# The base URL of an OpenAI-compatible endpoint for OpenCode's OWN driving
+# model (issue #14) -- a separate concern from [brain].base_url, which is
+# Ansina's own remote reasoning target; the two may point at the same gateway
+# but are configured independently. Empty (the default) means no custom
+# provider block is emitted into the generated opencode.json at all. When set,
+# combine with provider_api_key_env/provider_api_key above and point `model`
+# below at "ansina/<model-id>" -- "ansina" is this feature's one fixed,
+# built-in provider id, not itself a setting.
+provider_base_url = ""
+
+# Operator-named extra environment variables to forward verbatim from the
+# daemon's own environment into the child's -- empty (the default) is the
+# usual "explicit allow-list, never os.environ wholesale" shape every other
+# Dev-Mode-adjacent child env builder in this codebase uses. Refused outright
+# at boot if any entry is ANSINA_-prefixed or secret-shaped (AWS_*,
+# *_API_KEY, *SECRET*, *TOKEN*, case-insensitive) -- this allow-list can never
+# be used to smuggle a secret into the child's environment under cover of a
+# legitimate-looking name.
+inherit_env_names = []
+
+# Bounds every real call out to the `opencode` binary this section's own
+# preflight makes (--version, debug config) -- never touches the network
+# itself.
+preflight_timeout_seconds = 30.0
+
+# The rest of this section (issue #75) is read by OpencodeCliRunner itself,
+# not by preflight() -- each one bounds a different resource a repeatedly-
+# spawned, request-triggered child could otherwise exhaust.
+
+# A run's own wall-clock cap, and the terminate->kill grace window once it's
+# hit -- shutdown_timeout_seconds mirrors [dev] shutdown_timeout_seconds's own
+# name/shape, applied here to a per-run child instead of one long-lived
+# sidecar.
+run_timeout_seconds = 900.0
+shutdown_timeout_seconds = 10.0
+
+# How many `opencode` children may actually be running at once
+# (max_concurrent_runs), and how many OpencodeCliRunner.run() calls may be
+# admitted in total -- waiting on that concurrency limit, or already running
+# -- before a further call is refused outright with OpencodeBusyError rather
+# than queued unboundedly (queue_max_depth). Must have queue_max_depth >=
+# max_concurrent_runs, or the backlog could never actually bind.
+max_concurrent_runs = 1
+queue_max_depth = 10
+
+# Three independent size caps: max_prompt_chars refuses an oversized request
+# before any subprocess exists at all (OpencodeRunFailedError); max_event_bytes
+# bounds what a single captured JSON line contributes to a classified event,
+# after truncation and redaction; max_run_output_bytes bounds the whole run's
+# own captured output. Must have max_event_bytes <= max_run_output_bytes, or a
+# single oversized line could make the whole-run cap unenforceable.
+max_prompt_chars = 100000
+max_event_bytes = 65536
+max_run_output_bytes = 10485760
+
+# Per-run `--model`/`--agent` defaults -- empty (the default for each) omits
+# the flag entirely, letting `opencode` fall back to its own configured
+# default. A RunRequest's own model/agent fields override these per call
+# without changing this section's own configured default.
+model = ""
+agent = ""
+
+# Maps to `opencode run --auto` ("auto-approve permissions that are not
+# explicitly denied"). true (the default) -- not false, unlike every other
+# `[section] enabled`-shaped flag in this file -- because a headless,
+# non-interactive run has nobody to answer a prompt --auto would otherwise
+# leave standing. The deny-by-default permission floor below and the
+# effective-permission preflight check are what actually confine the child;
+# --auto only changes whether an already-resolved allow/deny needs a human to
+# confirm it, which this deployment shape never has.
+auto_approve = true
+
+# Issue #77 -- `opencode_runs`' own bounded retention, the same two-cutoff
+# shape [heart.journal] max_entries/retention_days already use: a row is
+# swept once it's either outside the newest max_runs_retained or older than
+# run_retention_days, whichever bound it fails first.
+max_runs_retained = 2000
+run_retention_days = 14
+
+# Issue #77 -- whether OpencodeRunService starts with intake paused
+# (POST /opencode/runs refused with ansina.opencode.intake_paused until a
+# POST /opencode/intake/resume). Independent of `enabled` above -- an
+# operator can have the service constructed and observable via
+# GET /opencode/status while still deliberately not accepting new work from
+# a cold boot.
+intake_paused_on_boot = false
+
+[opencode.permission]
+# The deny-by-default permission block rendered into the generated
+# opencode.json (and, as defense in depth, into the OPENCODE_CONFIG_CONTENT
+# env var above project config in OpenCode's own merge order). Every value
+# below is Ansina's OWN typed vocabulary, not OpenCode's raw glob-map shape --
+# `ansina.opencode.config` is what translates it. "ask" is unrepresentable
+# anywhere here by construction: a headless --auto run has nobody to answer a
+# prompt, so an "ask" value would hang a real run until its own timeout.
+
+# The floor for every permission key this section doesn't otherwise mention
+# explicitly (OpenCode's own "*" key) -- allow|deny.
+default = "deny"
+
+# Reading files -- allow|deny.
+read = "allow"
+
+# Editing files -- deny|allow|workspace. "workspace" (the default) confines
+# edits to inside workspace_dir above and nowhere else.
+edit = "workspace"
+
+# Running shell commands -- deny|allow|allowlist. "allowlist" (the default)
+# renders the deny floor, then every bash_allowlist glob below, then every
+# bash_denylist glob LAST -- OpenCode's own documented bash/edit glob-map
+# precedence is "last matching rule wins," so a denylist glob always beats an
+# overlapping allowlist one, never the reverse.
+bash = "allowlist"
+bash_allowlist = ["git status*", "git diff*", "git log*", "ls*", "cat*", "rg*"]
+bash_denylist = ["rm *", "sudo *", "curl *", "wget *", "ssh *", "git push*"]
+
+# Fetching/searching the web, and reaching outside workspace_dir -- each
+# allow|deny.
+webfetch = "deny"
+websearch = "deny"
+external_directory = "deny"
+
+# Reaches any other OpenCode permission key this section doesn't name
+# explicitly (e.g. glob, grep, task, todowrite, skill, lsp, question,
+# doom_loop) with no code change -- each value must still be allow|deny,
+# never ask, same reasoning as above. Appended after every named key above,
+# so an operator-named key here is never silently overridden by one of them.
+additional = {}

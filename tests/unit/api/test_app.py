@@ -190,6 +190,7 @@ def test_tick_loop_factory_not_called_when_heart_disabled(
         db: object,
         readiness: object,
         brain: object,
+        opencode: object,
     ) -> TickController:
         pytest.fail("tick_loop_factory must not be called when heart.enabled is False")
 
@@ -211,6 +212,7 @@ def test_tick_loop_factory_not_called_when_tick_disabled(
         db: object,
         readiness: object,
         brain: object,
+        opencode: object,
     ) -> TickController:
         pytest.fail(
             "tick_loop_factory must not be called when heart.tick.enabled is False"
@@ -304,6 +306,7 @@ def test_tick_loop_factory_receives_the_apps_own_db_and_readiness(
         db: object,
         readiness: object,
         brain: object,
+        opencode: object,
     ) -> TickController:
         received["db"] = db
         received["readiness"] = readiness
@@ -340,6 +343,7 @@ def test_tick_loop_factory_receives_the_apps_own_brain(
         db: object,
         readiness: object,
         brain: object,
+        opencode: object,
     ) -> TickController:
         received["brain"] = brain
         return _StubTickLoop()
@@ -369,6 +373,7 @@ def test_tick_loop_factory_receives_none_brain_when_brain_disabled(
         db: object,
         readiness: object,
         brain: object,
+        opencode: object,
     ) -> TickController:
         received["brain"] = brain
         return _StubTickLoop()
@@ -516,6 +521,7 @@ def test_telemetry_factory_receives_the_real_tick_loop_when_heart_is_enabled(
         db: object,
         readiness: object,
         brain: object,
+        opencode: object,
     ) -> TickController:
         return _StubTickLoop()
 
@@ -665,7 +671,7 @@ def test_lifespan_migrates_and_closes_the_database(app: FastAPI) -> None:
             .execute("SELECT version FROM schema_version")
             .fetchall()
         )
-        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
     # Outside the `with` block, lifespan shutdown has run — the database is closed.
     with pytest.raises(StorageError, match="after close"):

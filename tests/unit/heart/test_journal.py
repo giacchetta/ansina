@@ -7,8 +7,10 @@ from ansina.heart.journal import (
     BrainEscalationStatus,
     HeartJournalRepository,
     JournalEntry,
+    OpencodeInterventionStatus,
 )
 from ansina.heart.tick.decision import TickDecision
+from ansina.opencode.interventions import OpencodeAction
 from ansina.storage.database import Database
 
 _NOW = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -59,6 +61,12 @@ def test_append_returns_a_fully_populated_entry(db: Database) -> None:
     assert entry.brain_detail == ""
     assert entry.brain_prompt_tokens is None
     assert entry.brain_completion_tokens is None
+    # No OpenCode intervention either — see the dedicated `opencode_*` tests
+    # below (issue #79).
+    assert entry.opencode_run_id is None
+    assert entry.opencode_action is None
+    assert entry.opencode_outcome is None
+    assert entry.opencode_detail == ""
 
 
 def test_append_with_brain_outcome_persists_and_reads_back(db: Database) -> None:
@@ -90,6 +98,62 @@ def test_append_with_brain_outcome_persists_and_reads_back(db: Database) -> None
     assert reloaded.brain_status is BrainEscalationStatus.CALLED
     assert reloaded.brain_prompt_tokens == 42
     assert reloaded.brain_completion_tokens == 7
+
+
+def test_append_with_opencode_outcome_persists_and_reads_back(db: Database) -> None:
+    """Issue #79's four new optional params — every pre-#79 caller is unaffected
+    by their defaults; this is the one test that exercises them (the symmetric
+    widening to `test_append_with_brain_outcome_persists_and_reads_back` above).
+    """
+    repository = HeartJournalRepository(db)
+
+    entry = repository.append(
+        created_at=iso(_NOW),
+        tick_number=9,
+        decision=TickDecision.ACT,
+        note="",
+        prompt_tokens=10,
+        duration_seconds=0.3,
+        max_entries=1000,
+        retention_days=365,
+        opencode_run_id="run-1",
+        opencode_action=OpencodeAction.RETRY,
+        opencode_outcome=OpencodeInterventionStatus.APPLIED,
+        opencode_detail="resubmitted as run-2",
+    )
+
+    assert entry.opencode_run_id == "run-1"
+    assert entry.opencode_action is OpencodeAction.RETRY
+    assert entry.opencode_outcome is OpencodeInterventionStatus.APPLIED
+    assert entry.opencode_detail == "resubmitted as run-2"
+
+    reloaded = repository.list_recent(limit=1)[0]
+    assert reloaded.opencode_run_id == "run-1"
+    assert reloaded.opencode_action is OpencodeAction.RETRY
+    assert reloaded.opencode_outcome is OpencodeInterventionStatus.APPLIED
+    assert reloaded.opencode_detail == "resubmitted as run-2"
+
+
+def test_append_with_opencode_outcome_and_no_run_id(db: Database) -> None:
+    """`OpencodeAction.PAUSE_INTAKE` has no single triggering run."""
+    repository = HeartJournalRepository(db)
+
+    entry = repository.append(
+        created_at=iso(_NOW),
+        tick_number=1,
+        decision=TickDecision.ACT,
+        note="",
+        prompt_tokens=10,
+        duration_seconds=0.1,
+        max_entries=1000,
+        retention_days=365,
+        opencode_action=OpencodeAction.PAUSE_INTAKE,
+        opencode_outcome=OpencodeInterventionStatus.APPLIED,
+        opencode_detail="intake paused",
+    )
+
+    assert entry.opencode_run_id is None
+    assert entry.opencode_action is OpencodeAction.PAUSE_INTAKE
 
 
 def test_append_generates_a_unique_id_per_row(db: Database) -> None:

@@ -33,7 +33,9 @@ itself enabled, `[telemetry.s3]` fully configured, `vector` resolving on `PATH`,
 never a crash — the daemon always boots regardless. Once spawned, Vector tails
 `[telemetry]`'s rotated files and uploads them to the same `[telemetry.s3]` bucket
 the report-bucket pipeline uses (see `docs/heart/bench.md`), under
-`kind=telemetry/`/`kind=runlog/`.
+`kind=telemetry/`/`kind=runlog/`/`kind=opencode/` — the last one (issue #76) is
+OpenCode's own event-driven run trace, not a generic daemon metric; see
+`docs/opencode.md`'s "Run telemetry" section for what its lines actually contain.
 
 ## Verifying it
 

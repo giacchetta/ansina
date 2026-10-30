@@ -1,6 +1,6 @@
 """Publishes the corpus contract's machine-readable mirror to the bucket. See issue
-#63, bumped to `schema_version: 2` by issue #67, and to `schema_version: 3` by
-issue #68.
+#63, bumped to `schema_version: 2` by issue #67, to `schema_version: 3` by issue
+#68, to `schema_version: 4` by issue #76, and to `schema_version: 5` by issue #79.
 
 `docs/ml/corpus-contract.md` is the authoritative, human-readable schema document;
 `docs/ml/corpus-schema-v<SCHEMA_VERSION>.json` is its hand-maintained, byte-for-byte
@@ -28,9 +28,21 @@ optional/nullable field on an existing family) and would not ordinarily bump thi
 it is bumped here regardless, per that issue's own explicit acceptance criterion,
 for discoverability of the fix to the documented 2:1 `last_decision`-undercounting
 gap — see `docs/ml/corpus-contract.md`'s own "Exact decision counts" section.
-`docs/ml/corpus-schema-v1.json`/`corpus-schema-v2.json` stay committed and are
-never re-uploaded by this module's own default — a prior version, once published,
-is never deleted or overwritten.
+Issue #76 bumps it again, to 4 — adding the new `kind=opencode/` family
+(`opencode_event`, produced by `ansina.opencode.telemetry.OpencodeTelemetryWriter`)
+is, by the stability promise's own text, a **minor**, non-breaking addition (a new
+artifact family) that would not on its own require a bump; it is bumped here
+regardless, the same discoverability reasoning issue #68 already established for
+its own additive change — see `docs/ml/corpus-contract.md`'s own changelog entry.
+Issue #79 bumps it again, to 5 — populating `opencode_event`'s own already-
+reserved `"intervention"` event (`action`/`outcome`/`detail` fields, the Heart's
+bounded interventions on the OpenCode executor) is, by the same stability
+promise, also non-breaking on its own (the event name was already documented as
+reserved in `schema_version: 4`); bumped anyway, the identical discoverability
+reasoning #68/#76 already established.
+`docs/ml/corpus-schema-v1.json`/`corpus-schema-v2.json`/`corpus-schema-v3.json`/
+`corpus-schema-v4.json` stay committed and are never re-uploaded by this module's
+own default — a prior version, once published, is never deleted or overwritten.
 """
 
 from __future__ import annotations
@@ -43,12 +55,12 @@ from ansina.heart.eval.storage import ReportStorage
 # removed/renamed), or — as of issue #68 — on an explicit acceptance criterion
 # calling for it even on an additive change; see docs/ml/corpus-contract.md's own
 # "stability promise" and this module's own docstring above.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 # The committed, hand-maintained machine-readable schema — relative to the
 # repository root, the same convention `heart/eval/publish.py`'s own
 # `_DEFAULT_BENCH_DIR`/`_DEFAULT_SOAK_DIR` already use.
-SCHEMA_PATH = Path("docs/ml/corpus-schema-v3.json")
+SCHEMA_PATH = Path("docs/ml/corpus-schema-v5.json")
 
 
 def contract_key(schema_version: int = SCHEMA_VERSION) -> str:

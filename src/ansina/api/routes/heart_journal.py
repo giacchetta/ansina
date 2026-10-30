@@ -26,8 +26,10 @@ from ansina.heart.journal import (
     BrainEscalationStatus,
     HeartJournalRepository,
     JournalEntry,
+    OpencodeInterventionStatus,
 )
 from ansina.heart.tick.decision import TickDecision
+from ansina.opencode.interventions import OpencodeAction
 
 if TYPE_CHECKING:
     from ansina.storage.database import Database
@@ -58,6 +60,14 @@ class JournalEntryOut(BaseModel):
     the Brain — they're only populated on the second row
     `BrainEscalationHandler` appends after an `escalate` tick's own row, sharing its
     `tick_number`.
+
+    `opencode_run_id`/`opencode_action`/`opencode_outcome`/`opencode_detail` (issue
+    #79) are the symmetric widening: `null`/`""` on every row with no bounded Heart
+    intervention on the OpenCode executor — populated only on the second row
+    `OpencodeInterventionHandler` appends after an `act` tick's own row, sharing
+    its `tick_number`. For `OpencodeAction.ESCALATE_TO_BRAIN` specifically, that
+    second row carries both this widening's fields and the `brain_*` ones above,
+    on the same row.
     """
 
     id: str
@@ -71,6 +81,10 @@ class JournalEntryOut(BaseModel):
     brain_detail: str
     brain_prompt_tokens: int | None
     brain_completion_tokens: int | None
+    opencode_run_id: str | None
+    opencode_action: OpencodeAction | None
+    opencode_outcome: OpencodeInterventionStatus | None
+    opencode_detail: str
 
     @classmethod
     def from_model(cls, entry: JournalEntry) -> JournalEntryOut:
@@ -86,6 +100,10 @@ class JournalEntryOut(BaseModel):
             brain_detail=entry.brain_detail,
             brain_prompt_tokens=entry.brain_prompt_tokens,
             brain_completion_tokens=entry.brain_completion_tokens,
+            opencode_run_id=entry.opencode_run_id,
+            opencode_action=entry.opencode_action,
+            opencode_outcome=entry.opencode_outcome,
+            opencode_detail=entry.opencode_detail,
         )
 
 
