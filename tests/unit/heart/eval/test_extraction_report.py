@@ -415,6 +415,45 @@ def test_extraction_report_to_json_renders_null_action_and_null_commit() -> None
     assert payload["intervention_results"][0]["actual_action"] is None
 
 
+def test_extraction_report_to_markdown_distinguishes_none_from_a_fallback() -> None:
+    """A schema-valid `"no action needed"` answer (`action=None` but
+    `schema_valid=True`) must render as `none`, never `(fallback)` — the latter
+    is reserved for a genuine parse failure (`schema_valid=False`), per a real
+    Mac Mini M4 bench run that found this exact rendering ambiguous.
+    """
+    fixture = InterventionExtractionFixture(
+        id="i1",
+        candidates=(
+            InterventionCandidateRun(run_id="r1", status="running", detail="d"),
+        ),
+        intake_paused=False,
+        recent_failed=0,
+        recent_timeout=0,
+        recent_permission_denied=0,
+        expected_action=None,
+        expected_run_id=None,
+    )
+    report = _report(
+        fixtures=[fixture],
+        extractor=_ScriptedExtractor(
+            intervention=InterventionExtraction(action=None, run_id=None, reason="")
+        ),
+    )
+    intervention_gate = intervention_gate_result(report)
+    title_gate = title_gate_result(report)
+    failure_gate = failure_gate_result(report)
+
+    text = extraction_report_to_markdown(
+        report,
+        intervention_gate=intervention_gate,
+        title_gate=title_gate,
+        failure_gate=failure_gate,
+    )
+
+    assert "| i1 | none/- | none/- | agree |" in text
+    assert "(fallback)" not in text
+
+
 def test_extraction_report_to_markdown_shows_pass_and_every_section() -> None:
     report = _report()
     intervention_gate = intervention_gate_result(report)

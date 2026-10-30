@@ -29,13 +29,19 @@ field and dispatched to one of `InterventionExtractionFixture`/`TitleExtractionF
 `FailureExtractionFixture` — all three live together in one JSONL file, sharing one
 id namespace (`_check_no_duplicate_ids`, global across the whole file), since the
 issue's own fixture set is one committed file covering all three jobs, not three
-separate files. **Not yet shipped** — the identical gap `load_curation_fixtures()`
-had before issue #14's own real session capture landed `data/curation_fixtures
-.jsonl`: no real `opencode_runs` row data or titled/classified session data exists
-yet to derive a committed fixture set from, so `data/extraction_fixtures.jsonl` is
-deliberately absent, and `_resolve_text()`'s existing "missing bundled resource ->
-`FixtureError`, not a raw traceback" behavior (added for that exact reason) already
-covers this new loader with no further change.
+separate files. `data/extraction_fixtures.jsonl` is real, captured M9 data from the
+Mac Mini M4 (2026-10-30): real `OpencodeRun` rows (job 1 — a deliberately named
+nonexistent model is the real, fast, honest way to provoke a genuine process-level
+`opencode` failure, with `expected_action`/`expected_run_id` being the real,
+unmodified output of `DeterministicInterventionPolicy.decide()` run directly
+against each captured row), real OpenCode sessions (job 2), and the already-
+committed real curation captures (issue #14) reused directly for job 3 — see each
+fixture's own `note` field for the full labelling rationale. Mirrors
+`load_curation_fixtures()`'s own precedent exactly: before this capture landed,
+`data/extraction_fixtures.jsonl` was deliberately absent and `_resolve_text()`'s
+"missing bundled resource -> `FixtureError`, not a raw traceback" behavior covered
+the gap with no further code change — now closed the same way issue #14's own gap
+was.
 
 All four loaders read via `importlib.resources`, not `Path(__file__)` — the same
 pattern `auth/password_policy.py`'s `_common_passwords()` uses to load `auth/data/

@@ -55,7 +55,10 @@ from __future__ import annotations
 
 import json
 
-from ansina.heart.eval.extraction_runner import ExtractionReport
+from ansina.heart.eval.extraction_runner import (
+    ExtractionReport,
+    InterventionFixtureResult,
+)
 from ansina.heart.eval.report import GateResult
 
 MAX_MORE_CONSERVATIVE_RATE = 0.20
@@ -262,6 +265,20 @@ def extraction_report_to_json(
     return json.dumps(payload, indent=2, sort_keys=False) + "\n"
 
 
+def _render_actual_action(result: InterventionFixtureResult) -> str:
+    """`result.actual_action is None` is ambiguous on its own — it means either a
+    real, schema-valid "no action needed" answer (`schema_valid=True`) or a parse
+    fallback (`schema_valid=False`); `"(fallback)"` must render only the latter,
+    never the former, or a reader would misread a correct "none" verdict as a
+    failed reply.
+    """
+    if result.actual_action is not None:
+        return result.actual_action.value
+    if result.schema_valid:
+        return "none"
+    return "(fallback)"
+
+
 def _render_gate_section(title: str, gate: GateResult) -> list[str]:
     lines = [
         f"## {title}: {'PASS' if gate.passed else 'FAIL'}",
@@ -344,7 +361,7 @@ def extraction_report_to_markdown(
         f"| {r.fixture_id} | "
         f"{r.expected_action.value if r.expected_action is not None else 'none'}"
         f"/{r.expected_run_id or '-'} | "
-        f"{r.actual_action.value if r.actual_action is not None else '(fallback)'}"
+        f"{_render_actual_action(r)}"
         f"/{r.actual_run_id or '-'} | {r.direction or '-'} | {r.prompt_tokens} |"
         for r in report.intervention_results
     )

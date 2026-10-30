@@ -864,14 +864,24 @@ def test_load_extraction_fixtures_rejects_a_missing_custom_path(
         load_extraction_fixtures(missing)
 
 
-def test_load_extraction_fixtures_rejects_a_missing_bundled_file() -> None:
-    """`data/extraction_fixtures.jsonl` is deliberately not shipped yet (see
-    `heart.eval.fixtures`'s own module docstring) — calling with no override must
-    fail cleanly (`FixtureError`), never a raw traceback, until real M9 data lands
-    it (the same gap `load_curation_fixtures` had before issue #14's own capture).
+def test_load_extraction_fixtures_loads_the_bundled_default_set() -> None:
+    """`data/extraction_fixtures.jsonl` is real, captured M9 data — real
+    `OpencodeRun` rows from the Mac Mini M4 (job 1), real OpenCode sessions
+    (job 2), and the already-committed real curation captures reused for job 3
+    (issue #14's own corpus) — calling with no `--fixtures` override must load
+    it cleanly (the same "ships once real data lands" gap `load_curation_fixtures`
+    had before issue #14's own capture, now closed for this loader too).
     """
-    with pytest.raises(FixtureError, match="fixture file not found"):
-        load_extraction_fixtures()
+    fixtures = load_extraction_fixtures()
+
+    assert len(fixtures) >= 4
+    ids = [f.id for f in fixtures]
+    assert len(ids) == len(set(ids))
+    assert any(isinstance(f, InterventionExtractionFixture) for f in fixtures)
+    assert any(isinstance(f, TitleExtractionFixture) for f in fixtures)
+    assert any(isinstance(f, FailureExtractionFixture) for f in fixtures)
+    for fixture in fixtures:
+        assert fixture.note.strip(), f"{fixture.id} has no labelling rationale"
 
 
 def test_load_extraction_fixtures_rejects_duplicate_ids(tmp_path: Path) -> None:
