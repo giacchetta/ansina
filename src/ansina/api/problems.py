@@ -41,7 +41,12 @@ from ansina.auth.repositories import (
     UnknownSubjectError,
 )
 from ansina.auth.sudo import StepUpUnavailableError, SudoLockedOutError
-from ansina.errors import AnsinaError, ConfigurationError
+from ansina.errors import (
+    AnsinaError,
+    ConfigurationError,
+    OpencodeBusyError,
+    OpencodeIntakePausedError,
+)
 from ansina.logging import get_request_id
 
 PROBLEM_MEDIA_TYPE = "application/problem+json"
@@ -54,6 +59,7 @@ CODE_INTERNAL_ERROR = "ansina.internal_error"
 CODE_NOT_READY = "ansina.not_ready"
 CODE_UNAUTHORIZED = "ansina.unauthorized"
 CODE_HEART_DISABLED = "ansina.heart.disabled"
+CODE_OPENCODE_DISABLED = "ansina.opencode.disabled"
 CODE_OIDC_DISABLED = "ansina.auth.oidc_disabled"
 CODE_FORBIDDEN = ForbiddenError.code
 CODE_SUDO_REQUIRED = SudoRequiredError.code
@@ -171,6 +177,16 @@ _STATUS_BY_ERROR_TYPE: dict[type[AnsinaError], int] = {
     # server-to-server failure Ansina has no control over, the standard "upstream
     # failed" status for a service acting as a client to another one.
     OidcProviderError: 502,
+    # 429, same family as `SudoLockedOutError`/`LoginThrottledError` above —
+    # `POST /opencode/runs` (issue #77) refused because `OpencodeRunService`'s own
+    # backlog (`[opencode] queue_max_depth`) is already full. Mapped generically
+    # here (no route-level try/except needed), the same mechanism those two use.
+    OpencodeBusyError: 429,
+    # 409: the service exists and is otherwise healthy (unlike `CODE_OPENCODE_
+    # DISABLED`'s 503, which means the service doesn't exist at all) — it is simply
+    # not currently accepting new work, via `POST /opencode/intake/pause` or a later
+    # issue's bounded Heart intervention (issue #77).
+    OpencodeIntakePausedError: 409,
 }
 
 

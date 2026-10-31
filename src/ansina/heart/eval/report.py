@@ -15,7 +15,9 @@ from ansina.heart.eval.runner import BenchReport
 from ansina.heart.tick.decision import TickDecision
 
 _MIN_ACCURACY = 0.90
-_MAX_LATENCY_FRACTION_OF_INTERVAL = 0.20
+# Public (no leading underscore): issue #14's curation gate reuses this exact ceiling
+# rather than re-deriving its own — see `heart.eval.curation_report`'s own docstring.
+MAX_LATENCY_FRACTION_OF_INTERVAL = 0.20
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +33,7 @@ class GateResult:
 
 
 def gate_result(report: BenchReport, *, interval_seconds: float) -> GateResult:
-    latency_threshold = interval_seconds * _MAX_LATENCY_FRACTION_OF_INTERVAL
+    latency_threshold = interval_seconds * MAX_LATENCY_FRACTION_OF_INTERVAL
     checks = {
         "accuracy >= 0.90": report.accuracy >= _MIN_ACCURACY,
         "zero false act/escalate on obviously_idle fixtures": (

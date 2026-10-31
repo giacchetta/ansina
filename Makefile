@@ -149,6 +149,16 @@ heart-bench-publish: ## Upload every local bench/soak report not already in the 
 vector-validate: ## Validate deploy/vector.toml (requires the `vector` binary on PATH)
 	scripts/vector-validate.sh
 
+# Issue #74: installs OpenCode (v2) via the official installer for M9's
+# "Hands" — unlike Vector, never installed by CI (neither leg needs it to
+# pass), so this stays out of `check`/`check-all` the same reasoning as
+# `vector-validate` above. Requires an explicit --version/-v (or --binary/-b)
+# — see scripts/opencode-install.sh's own header for why "latest" is refused.
+# e.g. `make opencode-install ARGS='--version 2.1.1'`.
+.PHONY: opencode-install
+opencode-install: ## Install OpenCode v2 via the official installer (ARGS='--version <v>' required)
+	scripts/opencode-install.sh $(ARGS)
+
 # `make dev-mode-smoke` is the primary end-to-end verification for issue #62: boots
 # `ansina --dev` against a scratch database/spool dir with whatever real
 # [telemetry.s3] credentials this host already has (.envrc/ansina.toml), and
@@ -171,6 +181,31 @@ remote-dev-mode-tail: ## Tail the current/last remote dev-mode run's log
 .PHONY: remote-dev-mode-attach
 remote-dev-mode-attach: ## Attach to the live dev-mode tmux session on the Mac Mini (interactive)
 	scripts/remote-dev-mode.sh attach
+
+# `make opencode-smoke` is the primary hand-run verification for issue #77's
+# /opencode/runs submission API: boots a plain `ansina` daemon with [opencode]
+# enabled against a REAL, already-installed `opencode` binary (see
+# `make opencode-install`), submits one real run over HTTP, polls it to a
+# terminal status, and verifies the spooled kind=opencode/ telemetry file on
+# disk — never trusting the HTTP 202 alone. No Vector, no bucket, unlike
+# `dev-mode-smoke` above — this never ships anywhere. Needs `opencode` on
+# PATH, which neither CI leg installs, so it stays out of `check`/`check-all`
+# the same way `heart-bench`/`dev-mode-smoke` do.
+.PHONY: opencode-smoke
+opencode-smoke: ## Boot ansina with [opencode] enabled against a real opencode binary and submit a real run (requires opencode on PATH)
+	scripts/opencode-smoke.sh
+
+.PHONY: remote-opencode
+remote-opencode: ## [Remote host] Run the opencode smoke check on real target hardware (see .envrc)
+	scripts/remote-opencode.sh run $(ARGS)
+
+.PHONY: remote-opencode-tail
+remote-opencode-tail: ## Tail the current/last remote opencode smoke run's log
+	scripts/remote-opencode.sh tail
+
+.PHONY: remote-opencode-attach
+remote-opencode-attach: ## Attach to the live opencode smoke tmux session on the remote host (interactive)
+	scripts/remote-opencode.sh attach
 
 .PHONY: check
 check: lint format-check typecheck test ## Run everything the daemon's CI `check` job runs

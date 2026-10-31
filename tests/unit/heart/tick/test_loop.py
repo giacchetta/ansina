@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import threading
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +28,15 @@ from ansina.heart.tick.loop import (
     _next_tick_number,
     build_tick_loop,
 )
+from ansina.heart.tick.opencode_intervention_handler import OpencodeInterventionHandler
 from ansina.heart.tick.snapshot import TickPrompt
 from ansina.heart.tick.sources.daemon_state import DaemonStateSource
+from ansina.heart.tick.sources.opencode_state import (
+    OpencodeStateSource,
+    RunningRunState,
+)
 from ansina.heart.tick.sources.recent_journal import RecentJournalSource
+from ansina.opencode.repository import OpencodeRun
 from ansina.storage.database import Database
 
 
@@ -631,7 +639,9 @@ def test_build_tick_loop_wires_settings_into_the_loop(
     settings = load_settings()
     heart = _FakeHeart()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert loop._interval == 12.5
     assert loop._max_output_tokens == 77
@@ -646,7 +656,9 @@ def test_build_tick_loop_uses_journal_decision_handler_by_default(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, JournalDecisionHandler)
 
@@ -657,11 +669,124 @@ def test_build_tick_loop_registers_the_daemon_state_and_recent_journal_sources(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert len(loop._sources) == 2
     assert isinstance(loop._sources[0], DaemonStateSource)
     assert isinstance(loop._sources[1], RecentJournalSource)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _FakeOutcomeCounts:
+    failed: int = 0
+    timeout: int = 0
+    permission_denied: int = 0
+
+
+class _FakeOpencodeProbe:
+    """A minimal `OpencodeStateProbe` double — satisfies the Protocol structurally.
+    Declared return types reference the Protocols themselves
+    (`RunningRunState`/`OutcomeCounts`, both from `ansina.heart`), never a concrete
+    `ansina.opencode` type — this test file stays on the `ansina.heart` side of the
+    boundary, same as the probe's own module.
+
+    Issue #79 widens this with the three `OpencodeInterventionTarget`-only
+    methods (`recent_retryable_runs`/`apply_intervention`/
+    `record_intervention_telemetry`) — never called by any test exercising
+    `opencode_interventions = false` (the default), so adding them is purely
+    additive for the pre-#79 tests above.
+    """
+
+    intake_paused = False
+
+    def counts_by_status(self) -> dict[str, int]:
+        return {}
+
+    def running_runs(self) -> Sequence[RunningRunState]:
+        return []
+
+    def recent_outcome_counts(self, *, since: str) -> _FakeOutcomeCounts:
+        return _FakeOutcomeCounts()
+
+    def recent_retryable_runs(self, *, since: str) -> Sequence[OpencodeRun]:
+        return []
+
+    async def apply_intervention(
+        self, run_id: str | None, action: object
+    ) -> tuple[str, str]:
+        return ("applied", "fake")
+
+    def record_intervention_telemetry(
+        self,
+        run_id: str | None,
+        action: object,
+        outcome: str,
+        *,
+        detail: str,
+        session_id: str | None = None,
+    ) -> None:
+        pass
+
+
+def test_build_tick_loop_registers_no_opencode_source_when_hands_are_off(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    """AC: the Heart-on/Hands-off registered-source list must be unchanged — the
+    exact same two sources (`DaemonStateSource`/`RecentJournalSource`), not merely
+    an equivalent-looking three.
+    """
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
+
+    assert len(loop._sources) == 2
+
+
+def test_build_tick_loop_registers_the_opencode_state_source_when_hands_exist(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert len(loop._sources) == 3
+    assert isinstance(loop._sources[2], OpencodeStateSource)
+
+
+def test_build_tick_loop_wires_opencode_thresholds_from_settings(
+    clean_env: None, tmp_cwd: Path, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_STALL_SECONDS", "123")
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_RECENT_WINDOW_MINUTES", "7")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    source = loop._sources[2]
+    assert isinstance(source, OpencodeStateSource)
+    assert source._stall_seconds == 123.0
+    assert source._recent_window_minutes == 7
 
 
 # --- CompositeDecisionHandler (issue #64) -------------------------------------------
@@ -719,7 +844,9 @@ def test_build_tick_loop_escalate_to_brain_defaults_false_bare_journal_handler(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, JournalDecisionHandler)
     assert not isinstance(loop._handler, CompositeDecisionHandler)
@@ -732,7 +859,9 @@ def test_build_tick_loop_escalate_to_brain_true_composes_brain_handler(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, CompositeDecisionHandler)
 
@@ -761,6 +890,7 @@ async def test_escalate_to_brain_false_never_calls_the_brain_end_to_end(
         db=db,
         readiness=Readiness(),
         brain=_FailingBrainProvider(),  # type: ignore[arg-type]
+        opencode=None,
     )
 
     outcome = await loop.tick_once()
@@ -804,6 +934,7 @@ async def test_escalate_to_brain_true_journals_two_rows_and_never_trips_the_brea
         db=db,
         readiness=Readiness(),
         brain=_ErroringBrainProvider(),  # type: ignore[arg-type]
+        opencode=None,
     )
 
     outcome = await loop.tick_once()
@@ -818,6 +949,152 @@ async def test_escalate_to_brain_true_journals_two_rows_and_never_trips_the_brea
     assert loop.failures_total == 0
     assert loop.consecutive_failures == 0
     assert loop.paused is False
+
+
+# --- build_tick_loop: opencode_interventions gating (issue #79) --------------------
+
+
+def test_build_tick_loop_opencode_interventions_defaults_false_bare_journal_handler(
+    clean_env: None, tmp_cwd: Path, db: Database
+) -> None:
+    """`opencode_interventions = false` (the default) must leave `decision_handler`
+    as the exact `JournalDecisionHandler` instance this function has always
+    built — the same verified-no-op discipline `escalate_to_brain` already
+    established — even when a real `opencode` probe is supplied.
+    """
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, JournalDecisionHandler)
+    assert not isinstance(loop._handler, CompositeDecisionHandler)
+
+
+def test_build_tick_loop_opencode_interventions_true_with_no_opencode_is_still_a_noop(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    """The flag alone is not enough — `opencode is None` (the executor disabled
+    or its preflight failed) must still leave the bare `JournalDecisionHandler`.
+    """
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
+
+    assert isinstance(loop._handler, JournalDecisionHandler)
+    assert not isinstance(loop._handler, CompositeDecisionHandler)
+
+
+def test_build_tick_loop_opencode_interventions_true_composes_the_handler(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    assert any(
+        isinstance(handler, OpencodeInterventionHandler)
+        for handler in loop._handler._handlers
+    )
+
+
+def test_build_tick_loop_composes_journal_then_opencode_then_fault_injector(
+    clean_env: None,
+    tmp_cwd: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    db: Database,
+    tmp_path: Path,
+) -> None:
+    """The issue's own explicit composition instruction: journal (and brain
+    escalation, if enabled) first, the opencode intervention handler next,
+    `FaultInjector` last.
+    """
+
+    schedule_path = tmp_path / "schedule.json"
+    _write_schedule(
+        schedule_path,
+        [
+            {
+                "id": "w1",
+                "fault": "tick_failure",
+                "at_tick": 1,
+                "duration_ticks": 1,
+                "expected_decision": "idle",
+            }
+        ],
+    )
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    monkeypatch.setenv("ANSINA_HEART__TICK__FAULT_INJECTION__ENABLED", "true")
+    monkeypatch.setenv(
+        "ANSINA_HEART__TICK__FAULT_INJECTION__SCHEDULE_PATH", str(schedule_path)
+    )
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    types = [type(handler) for handler in loop._handler._handlers]
+    assert types == [JournalDecisionHandler, OpencodeInterventionHandler, FaultInjector]
+
+
+def test_build_tick_loop_binds_the_intervention_policy_to_the_loop(
+    clean_env: None, tmp_cwd: Path, monkeypatch: pytest.MonkeyPatch, db: Database
+) -> None:
+    """The chicken-and-egg fix `FaultInjector.bind()` already established — the
+    policy must be callable (not raise "bind() must be called before use") once
+    the loop it was composed into actually exists.
+    """
+
+    monkeypatch.setenv("ANSINA_HEART__TICK__OPENCODE_INTERVENTIONS", "true")
+    heart = _FakeHeart()
+    settings = load_settings()
+
+    loop = build_tick_loop(
+        settings,
+        heart,
+        db=db,
+        readiness=Readiness(),
+        brain=None,
+        opencode=_FakeOpencodeProbe(),
+    )
+
+    assert isinstance(loop._handler, CompositeDecisionHandler)
+    handler = next(
+        h for h in loop._handler._handlers if isinstance(h, OpencodeInterventionHandler)
+    )
+    # Must not raise — proves `bind(loop)` was actually called.
+    decision = handler._policy.decide(_FakeOpencodeProbe(), now=datetime.now(UTC))
+    assert decision is None
 
 
 # --- build_tick_loop: fault injection wiring (issue #72) ----------------------------
@@ -838,7 +1115,9 @@ def test_build_tick_loop_fault_injection_disabled_by_default_is_a_noop(
     settings = load_settings()
     readiness = Readiness()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=readiness, brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=readiness, brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, JournalDecisionHandler)
     assert not isinstance(loop._handler, CompositeDecisionHandler)
@@ -870,7 +1149,9 @@ def test_build_tick_loop_fault_injection_enabled_composes_injector(
     settings = load_settings()
     readiness = Readiness()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=readiness, brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=readiness, brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, CompositeDecisionHandler)
     assert len(loop._sources) == 3
@@ -897,7 +1178,9 @@ def test_build_tick_loop_fault_injection_composes_after_the_brain_handler(
     heart = _FakeHeart()
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
 
     assert isinstance(loop._handler, CompositeDecisionHandler)
     handlers = loop._handler._handlers
@@ -935,7 +1218,9 @@ def test_build_tick_loop_warns_when_a_fault_window_may_trip_the_breaker(
     settings = load_settings()
 
     with caplog.at_level(logging.WARNING):
-        build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+        build_tick_loop(
+            settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+        )
 
     assert any(
         "may trip the circuit breaker" in record.message for record in caplog.records
@@ -972,7 +1257,9 @@ def test_build_tick_loop_does_not_warn_when_auto_pause_is_disabled(
     settings = load_settings()
 
     with caplog.at_level(logging.WARNING):
-        build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+        build_tick_loop(
+            settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+        )
 
     assert not any(
         "may trip the circuit breaker" in record.message for record in caplog.records
@@ -1013,7 +1300,9 @@ async def test_fault_injection_end_to_end_prompt_reports_a_real_readiness_failur
     heart = _CapturingHeart(context_tokens=8192, max_output_tokens=512)
     settings = load_settings()
 
-    loop = build_tick_loop(settings, heart, db=db, readiness=Readiness(), brain=None)
+    loop = build_tick_loop(
+        settings, heart, db=db, readiness=Readiness(), brain=None, opencode=None
+    )
     await loop.tick_once()
 
     assert len(captured_prompts) == 1

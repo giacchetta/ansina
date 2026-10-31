@@ -44,6 +44,8 @@ def test_fresh_database_reaches_the_latest_version(db: Database) -> None:
         (9, "login_throttle"),
         (10, "heart_journal"),
         (11, "heart_journal_brain_outcome"),
+        (12, "opencode_runs"),
+        (13, "heart_journal_opencode_intervention"),
     ]
 
 
@@ -52,7 +54,7 @@ def test_second_run_is_idempotent(db: Database) -> None:
     run_migrations(db)
 
     rows = db.connection().execute("SELECT version FROM schema_version").fetchall()
-    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert [row[0] for row in rows] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
 
 def test_applies_only_pending_migrations(db: Database, tmp_path: Path) -> None:

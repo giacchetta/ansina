@@ -31,9 +31,9 @@ backlog migration build on):
 
 (The `_contract/` schema document itself is issue #63's own concern, published by that
 issue's code, not this module's — named here only so the layout reads as one piece.
-Likewise `kind=telemetry`/`kind=runlog`, issue #61/#62's partitions, are documented
-here purely so the layout is consistent end-to-end; nothing in this module writes
-them.)
+Likewise `kind=telemetry`/`kind=runlog` (issue #61/#62) and `kind=opencode` (issue
+#76), each a `host=<id>/`-prefixed partition, are documented here purely so the
+layout is consistent end-to-end; nothing in this module writes any of them.)
 
 Every key this module hands to or returns from `ReportStorage` is **prefix-free** —
 `key_prefix` is applied/stripped entirely inside `S3CompatibleStorage`, so no caller

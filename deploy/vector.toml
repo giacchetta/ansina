@@ -4,10 +4,12 @@
 # injects at spawn time (see `ansina.dev.vector.build_vector_env`), never written
 # to any file Vector reads.
 #
-# Two independent source/sink pairs, matching the hive-partitioned bucket layout
-# `src/ansina/heart/eval/storage.py`'s own module docstring already documents:
-#   samples*.jsonl -> host=<id>/kind=telemetry/dt=<date>/...
-#   log*.jsonl     -> host=<id>/kind=runlog/dt=<date>/...
+# Three independent source/sink pairs, matching the hive-partitioned bucket
+# layout `src/ansina/heart/eval/storage.py`'s own module docstring already
+# documents:
+#   samples*.jsonl  -> host=<id>/kind=telemetry/dt=<date>/...
+#   log*.jsonl      -> host=<id>/kind=runlog/dt=<date>/...
+#   opencode*.jsonl -> host=<id>/kind=opencode/dt=<date>/...  (issue #76)
 #
 # `host=<id>/` (issue #67) is what makes two deployments shipping to the same
 # bucket distinguishable — `<id>` is `ANSINA_TELEMETRY_HOST_ID`, resolved by
@@ -84,6 +86,38 @@ codec = "text"
 framing.method = "newline_delimited"
 
 [sinks.telemetry_log_s3.buffer]
+type = "disk"
+max_size = 268435488
+when_full = "block"
+
+# --- opencode*.jsonl -> kind=opencode/ -------------------------------------------
+# The third telemetry shape (issue #76): one JSON line per run-lifecycle event,
+# produced by `ansina.opencode.telemetry.OpencodeTelemetryWriter` through its own
+# `SpooledRotatingWriter(file_prefix="opencode")` family — same generic writer,
+# same budget knobs, as the two pairs above. No new env var: `ANSINA_TELEMETRY_
+# SPOOL_DIR`/`_S3_*`/`_HOST_ID` are already injected by `build_vector_env`.
+
+[sources.opencode_events]
+type = "file"
+include = ["${ANSINA_TELEMETRY_SPOOL_DIR}/opencode*.jsonl"]
+read_from = "beginning"
+
+[sinks.opencode_events_s3]
+type = "aws_s3"
+inputs = ["opencode_events"]
+bucket = "${ANSINA_TELEMETRY_S3_BUCKET}"
+region = "${ANSINA_TELEMETRY_S3_REGION}"
+endpoint = "${ANSINA_TELEMETRY_S3_ENDPOINT_URL}"
+key_prefix = "${ANSINA_TELEMETRY_S3_KEY_PREFIX}host=${ANSINA_TELEMETRY_HOST_ID}/kind=opencode/dt=%Y-%m-%d/"
+compression = "none"
+force_path_style = true
+batch.timeout_secs = 5
+
+[sinks.opencode_events_s3.encoding]
+codec = "text"
+framing.method = "newline_delimited"
+
+[sinks.opencode_events_s3.buffer]
 type = "disk"
 max_size = 268435488
 when_full = "block"

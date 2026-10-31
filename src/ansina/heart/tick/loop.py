@@ -31,6 +31,11 @@ from ansina.heart.tick.fault_injection import (
     load_fault_schedule,
 )
 from ansina.heart.tick.journal_handler import JournalDecisionHandler
+from ansina.heart.tick.opencode_intervention_handler import (
+    DeterministicInterventionPolicy,
+    OpencodeInterventionHandler,
+    OpencodeInterventionTarget,
+)
 from ansina.heart.tick.snapshot import (
     StateSnapshotSource,
     TickPrompt,
@@ -38,6 +43,7 @@ from ansina.heart.tick.snapshot import (
     collect_items,
 )
 from ansina.heart.tick.sources.daemon_state import DaemonStateSource, ReadinessRegistry
+from ansina.heart.tick.sources.opencode_state import OpencodeStateSource
 from ansina.heart.tick.sources.recent_journal import RecentJournalSource
 from ansina.logging import get_logger
 from ansina.storage.database import Database
@@ -148,7 +154,20 @@ class TickLoopFactory(Protocol):
     `build_tick_loop` needs `.register()`, not just `.snapshot()`, to add the
     fault-injection readiness check when `[heart.tick.fault_injection] enabled` is
     `True`. `create_app`'s own concrete `Readiness` already satisfies the wider
-    Protocol with no change to that module.
+    Protocol with no change to that module. Issue #78 widens this once more with
+    `opencode: OpencodeStateProbe | None` — the fourth parameter to follow this
+    exact pattern (`db`/`readiness`/`brain` each widened it before): `None` when
+    `[opencode] enabled` is `false` or its preflight failed (the same legitimate-
+    not-an-error meaning `brain: None` already carries), in which case
+    `build_tick_loop` registers no third source at all — "the executor exists" is
+    exactly what a non-`None` probe means, so there is no separate flag to check.
+    Issue #79 widens the `opencode` parameter's own type once more, from
+    `OpencodeStateProbe` to `OpencodeInterventionTarget` (that Protocol's own
+    inheritance-widened superset — the `TickController(TickLifecycle, Protocol)`
+    precedent) — the concrete `OpencodeRunService` `create_app` already builds
+    satisfies the wider Protocol with no code change there, since this issue adds
+    `apply_intervention`/`recent_retryable_runs`/`record_intervention_telemetry`
+    to the service itself.
     """
 
     def __call__(
@@ -160,6 +179,7 @@ class TickLoopFactory(Protocol):
         db: Database,
         readiness: ReadinessRegistry,
         brain: BrainProvider | None,
+        opencode: OpencodeInterventionTarget | None,
     ) -> TickController: ...
 
 
@@ -668,6 +688,7 @@ def build_tick_loop(
     db: Database,
     readiness: ReadinessRegistry,
     brain: BrainProvider | None,
+    opencode: OpencodeInterventionTarget | None,
 ) -> TickLoop:
     """The default `tick_loop_factory` for `create_app` — wires a `TickLoop` to
     `settings.heart.tick`, then registers its snapshot sources and the default
@@ -680,6 +701,12 @@ def build_tick_loop(
       .recent_entries` `heart_journal` rows, giving the Heart short-term memory of its
       own past decisions. Registered even when `recent_entries == 0`; the source
       itself stays silent in that case (see its own docstring).
+    - `OpencodeStateSource` (issue #78) — only when `opencode` is not `None` (the
+      executor exists and passed its own preflight): the OpenCode executor's own
+      live state (queued/running counts, stalled runs, recent failures/timeouts/
+      permission-denials, intake-paused). Observe-only, exactly like
+      `DaemonStateSource` was before issue #64 — no decision handler composed for it
+      here, that's a later, still-pending issue.
     - `FaultInjector` (issue #72) — only when `settings.heart.tick.fault_injection
       .enabled` is `True`; see that module's own docstring. Plays all three of its
       roles: a `StateSnapshotSource` (`add_source`, for `TICK_OVERRUN`), a
@@ -690,14 +717,20 @@ def build_tick_loop(
     `LoggingDecisionHandler`) as the default, writing one `heart_journal` row per
     completed tick via the same `HeartJournalRepository` the source above reads from.
     Issue #64: when `settings.heart.tick.escalate_to_brain` is `True`,
-    `BrainEscalationHandler` is composed alongside it; issue #72: when
-    `fault_injection.enabled` is `True`, the `FaultInjector` is composed last, so an
-    injected failure is always recorded as the tick's outcome, never evidence it never
-    happened. `CompositeDecisionHandler` only wraps `decision_handler` when more than
-    one handler is actually in play — with neither flag set, `decision_handler` stays
-    the bare `JournalDecisionHandler` instance, the exact object graph this function
-    has always built when both are off, not merely equivalent behavior, which is what
-    makes that combination a *verified* no-op rather than an assumed one.
+    `BrainEscalationHandler` is composed alongside it. Issue #79: when
+    `settings.heart.tick.opencode_interventions` is `True` **and** `opencode` is
+    not `None`, `OpencodeInterventionHandler` is composed next — after
+    `JournalDecisionHandler`/`BrainEscalationHandler` (if present), before
+    `FaultInjector` (if present), per that issue's own explicit composition
+    instruction ("`FaultInjector` stays composed last ... this handler slots
+    before it"). Issue #72: when `fault_injection.enabled` is `True`, the
+    `FaultInjector` is composed last, so an injected failure is always recorded as
+    the tick's outcome, never evidence it never happened. `CompositeDecisionHandler`
+    only wraps `decision_handler` when more than one handler is actually in play —
+    with every flag off, `decision_handler` stays the bare `JournalDecisionHandler`
+    instance, the exact object graph this function has always built when all three
+    are off, not merely equivalent behavior, which is what makes that combination a
+    *verified* no-op rather than an assumed one.
 
     `db`/`readiness` widen this signature beyond issue #11's original
     `(settings, heart)` — both already exist in `create_app` before the tick loop is
@@ -706,7 +739,8 @@ def build_tick_loop(
     own docstring for why that's not a layering violation. Issue #64 widens this once
     more with `brain` — see `TickLoopFactory`'s own docstring for that one too. Issue
     #72 widens `readiness` from `ReadinessProbe` to `ReadinessRegistry` — same
-    docstring, same reasoning.
+    docstring, same reasoning. Issue #78 widens this a fourth time with `opencode` —
+    same docstring, same reasoning again.
     """
     tick_settings = settings.heart.tick
     journal_settings = settings.heart.journal
@@ -722,6 +756,35 @@ def build_tick_loop(
             BrainEscalationHandler(
                 brain,
                 journal_repository,
+                model=settings.brain.model,
+                max_output_tokens=settings.brain.max_output_tokens,
+                max_entries=journal_settings.max_entries,
+                retention_days=journal_settings.retention_days,
+            )
+        )
+
+    # Issue #79: `DeterministicInterventionPolicy` needs a `TickCounter` (the
+    # `TickLoop` itself, for its cooldown budget) that does not exist yet at this
+    # point — the identical chicken-and-egg problem `FaultInjector` already solves
+    # via `bind()`, called below once `loop` exists. `opencode_intervention_policy`
+    # stays `None` when the flag is off (or `opencode is None`), the same
+    # `fault_injector: FaultInjector | None = None` shape just below.
+    opencode_intervention_policy: DeterministicInterventionPolicy | None = None
+    if tick_settings.opencode_interventions and opencode is not None:
+        opencode_intervention_policy = DeterministicInterventionPolicy(
+            max_retries_per_run=tick_settings.opencode_max_retries_per_run,
+            cooldown_ticks=tick_settings.opencode_intervention_cooldown_ticks,
+            max_interventions_per_hour=tick_settings.opencode_max_interventions_per_hour,
+            stall_seconds=tick_settings.opencode_stall_seconds,
+            recent_window_minutes=tick_settings.opencode_recent_window_minutes,
+        )
+        handlers.append(
+            OpencodeInterventionHandler(
+                opencode,
+                opencode_intervention_policy,
+                journal_repository,
+                brain=brain,
+                escalate_to_brain_enabled=tick_settings.escalate_to_brain,
                 model=settings.brain.model,
                 max_output_tokens=settings.brain.max_output_tokens,
                 max_entries=journal_settings.max_entries,
@@ -759,6 +822,16 @@ def build_tick_loop(
             journal_repository, recent_entries=journal_settings.recent_entries
         )
     )
+    if opencode is not None:
+        loop.add_source(
+            OpencodeStateSource(
+                opencode,
+                stall_seconds=tick_settings.opencode_stall_seconds,
+                recent_window_minutes=tick_settings.opencode_recent_window_minutes,
+            )
+        )
+    if opencode_intervention_policy is not None:
+        opencode_intervention_policy.bind(loop)
     if fault_injector is not None:
         fault_injector.bind(loop)
         loop.add_source(fault_injector)

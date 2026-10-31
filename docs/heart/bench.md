@@ -38,17 +38,22 @@ make remote-heart-tail                    # tail the live log
 make remote-heart-attach                  # attach to the tmux session interactively
 ```
 
-## Two suites
+## Four suites
 
 ```bash
-make remote-heart ARGS='--suite triage'   # bench the request-triage experiment instead
+make remote-heart ARGS='--suite triage'       # bench the request-triage experiment instead
+make remote-heart ARGS='--suite curation'     # bench the context-curation experiment (needs [brain])
+make remote-heart ARGS='--suite extraction'   # bench the structured-extraction experiment
 ```
 
-`--suite {tick,triage}` (default `tick`) picks which fixture set and gate runs.
-`triage` benches the gated request-triage experiment (`ansina.heart.triage`) — wired
-into no route or the tick loop, bench-only. Both suites share this harness, the
-`remote-heart` driver, and the report bucket's `kind=bench/` prefix below,
-distinguished there by a `suite` field.
+`--suite {tick,triage,curation,extraction}` (default `tick`) picks which fixture
+set and gate runs. `triage` (`ansina.heart.triage`), `curation`
+(`ansina.heart.curation` — the only suite that also drives real `BrainProvider`
+calls, so it needs a real `[brain]` configured), and `extraction`
+(`ansina.heart.extraction`) each bench a gated experiment — wired into no route or
+the tick loop, bench-only. All four suites share this harness, the `remote-heart`
+driver, and the report bucket's `kind=bench/` prefix below, distinguished there by
+a `suite` field.
 
 ## A related, separate check
 

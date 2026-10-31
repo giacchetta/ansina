@@ -1,21 +1,27 @@
-# Heart corpus contract — `schema_version: 3`
+# Heart corpus contract — `schema_version: 5`
 
 Issue [#63](https://github.com/giacchetta/ansina/issues/63), bumped to
 `schema_version: 2` by issue
 [#67](https://github.com/giacchetta/ansina/issues/67) (host attribution for the
-`kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below) and to
+`kind=telemetry/`/`kind=runlog/` key layout — see "Bucket key layout" below), to
 `schema_version: 3` by issue
 [#68](https://github.com/giacchetta/ansina/issues/68) (exact per-decision counts
-on the telemetry sample — see "Telemetry sample" below). This document is the
-single source of truth for the shape of every artifact Ansina writes to its
-S3-compatible report bucket (`[telemetry.s3]`, issue #59). The machine-readable
-mirror of this exact document is `corpus-schema-v3.json` in this same directory,
-published byte-for-byte to `_contract/corpus-schema-v3.json` in the bucket (see
-"Self-discovery" below) — the two are reviewed together in the same PR whenever
-either changes, so there is never a second, independently-maintained copy to drift
-out of sync. `corpus-schema-v1.json`/`corpus-schema-v2.json` stay committed,
-unmodified, per the stability promise below — neither is what this module
-re-uploads by default any longer.
+on the telemetry sample — see "Telemetry sample" below), to `schema_version: 4`
+by issue [#76](https://github.com/giacchetta/ansina/issues/76) (a new
+`kind=opencode/` family — see "Opencode run event" below), and to
+`schema_version: 5` by issue
+[#79](https://github.com/giacchetta/ansina/issues/79) (populating that family's
+own already-reserved `"intervention"` event — see "Opencode run event" below).
+This document is the single source of truth for the shape of every artifact
+Ansina writes to its S3-compatible report bucket (`[telemetry.s3]`, issue #59).
+The machine-readable mirror of this exact document is `corpus-schema-v5.json` in
+this same directory, published byte-for-byte to `_contract/corpus-schema-v5.json`
+in the bucket (see "Self-discovery" below) — the two are reviewed together in the
+same PR whenever either changes, so there is never a second, independently-
+maintained copy to drift out of sync.
+`corpus-schema-v1.json`/`corpus-schema-v2.json`/`corpus-schema-v3.json`/
+`corpus-schema-v4.json` stay committed, unmodified, per the stability promise
+below — none of them is what this module re-uploads by default any longer.
 
 ## Lifecycle: Ansina is a producer, nothing more
 
@@ -59,14 +65,14 @@ Every version of this contract that has ever shipped is published, unmodified, t
 as part of every `make heart-bench-publish` run — see that module's own docstring).
 A reader needs no access to this repository's source to learn the current schema:
 list `_contract/`, read the highest `<N>`, done. The *currently committed* `<N>` is
-whatever `corpus-schema-v<N>.json` is named in this directory — `v3` as of this
+whatever `corpus-schema-v<N>.json` is named in this directory — `v5` as of this
 writing.
 
 ## Bucket key layout
 
 Hive-partitioned (`key=value/` segments), so a query engine can read it with no ETL
-step. Four families actually land in the bucket; three key prefixes, since bench and
-soak share no prefix collision risk with telemetry/runlog:
+step. Five families actually land in the bucket; four key prefixes, since bench and
+soak share no prefix collision risk with telemetry/runlog/opencode:
 
 ```
 s3://<bucket>/<prefix>/kind=bench/dt=<date>/<stem>.{md,json}
@@ -74,18 +80,19 @@ s3://<bucket>/<prefix>/kind=soak/dt=<date>/<run_id>/{samples.jsonl,run.log,
     journal.json,soak-<date>.md,soak-<date>.json}
 s3://<bucket>/<prefix>/host=<id>/kind=telemetry/dt=<date>/<vector-assigned-filename>
 s3://<bucket>/<prefix>/host=<id>/kind=runlog/dt=<date>/<vector-assigned-filename>
+s3://<bucket>/<prefix>/host=<id>/kind=opencode/dt=<date>/<vector-assigned-filename>
 s3://<bucket>/<prefix>/_contract/corpus-schema-v<N>.json
 ```
 
 `<prefix>` is `[telemetry.s3] key_prefix`, applied/stripped entirely inside
 `ReportStorage`/Vector's own sink config — nothing above is prefix-aware.
 
-**`kind=telemetry/`/`kind=runlog/` are produced by Vector (issue #62), not by any
-Python code in this repo**, per `deploy/vector.toml`'s two `aws_s3` sink
-definitions. The filename under `dt=<date>/` is whatever Vector's own `aws_s3` sink
-assigns it (not a name this repo controls or documents) — contrast with
-`kind=bench/`/`kind=soak/`, where `ansina.heart.eval.storage`'s own `bench_key`/
-`soak_key` name the exact filename.
+**`kind=telemetry/`/`kind=runlog/`/`kind=opencode/` are produced by Vector (issue
+#62, extended by #76), not by any Python code in this repo**, per
+`deploy/vector.toml`'s three `aws_s3` sink definitions. The filename under
+`dt=<date>/` is whatever Vector's own `aws_s3` sink assigns it (not a name this
+repo controls or documents) — contrast with `kind=bench/`/`kind=soak/`, where
+`ansina.heart.eval.storage`'s own `bench_key`/`soak_key` name the exact filename.
 
 ### Host attribution: `host=<id>/` (issue #67)
 
@@ -94,11 +101,14 @@ assigns it (not a name this repo controls or documents) — contrast with
 `socket.gethostname()` — either way run through the same character-sanitization
 (`[A-Za-z0-9._-]`, anything else collapsed to `-`) before `ansina.dev.vector.
 build_vector_env` injects it as `ANSINA_TELEMETRY_HOST_ID`, which
-`deploy/vector.toml`'s two `key_prefix` values interpolate directly ahead of
-`kind=.../`. This is a key-prefix segment, not a field on either record below —
-`TelemetrySample`/the mirrored log line carry no `host` field themselves, so a
-reader attributes a sample/log line to its producing deployment purely by which
-`host=<id>/` partition it was read from.
+`deploy/vector.toml`'s three `key_prefix` values interpolate directly ahead of
+`kind=.../`. This is a key-prefix segment, not a field on any of the three
+records below — `TelemetrySample`/the mirrored log line/the opencode run event
+carry no `host` field themselves, so a reader attributes a line to its producing
+deployment purely by which `host=<id>/` partition it was read from.
+`kind=opencode/` (issue #76) ships host-attributed from birth — it never had a
+v1-style gap to resolve, since it reuses this same key-prefix segment from its
+first line.
 
 **v1's own documented gap is what this resolves**: neither `kind=telemetry/` nor
 `kind=runlog/` carried any partition or field identifying *which machine* produced
@@ -119,15 +129,20 @@ for those two families.
 
 ### 1. Bench report (`kind=bench/`)
 
-Two sub-families share this one key prefix, distinguished by the `suite` field below
-— the tick-decision bench (issue #53) and the request-triage bench (issue #13, a
-gated experiment whose port is wired into no route or the tick loop; see
-`ansina.heart.triage`). Both are JSON objects (`ansina.heart.eval.report.
-report_to_json` / `ansina.heart.eval.triage_report.triage_report_to_json`), the
-authoritative shape; each paired `.md` is a human-readable rendering of the same
-data, not independently schema'd. `suite` is additive (issue #13 — every report
-written before it has no such field, which a consumer should treat as `"tick"`,
-the only suite that existed then).
+Four sub-families share this one key prefix, distinguished by the `suite` field
+below — the tick-decision bench (issue #53), the request-triage bench (issue #13),
+the context-curation bench (issue #14), and the structured-extraction bench (issue
+#15) — the latter three all gated experiments whose ports are wired into no route
+or the tick loop; see `ansina.heart.triage`/`ansina.heart.curation`/
+`ansina.heart.extraction`. All four are JSON objects (`ansina.heart.eval.report.
+report_to_json` / `ansina.heart.eval.triage_report.triage_report_to_json` /
+`ansina.heart.eval.curation_report.curation_report_to_json` / `ansina.heart.eval.
+extraction_report.extraction_report_to_json`), the authoritative shape; each
+paired `.md` is a human-readable rendering of the same data, not independently
+schema'd. `suite` is additive (issue #13 — every report written before it has no
+such field, which a consumer should treat as `"tick"`, the only suite that existed
+then; issue #14 adds a third value, issue #15 a fourth, neither bumping the schema
+version, the same reasoning each time).
 
 #### 1a. Tick-decision bench report (`suite: "tick"`)
 
@@ -196,6 +211,96 @@ same types; `metrics.*`/`results[].*` differ:
 | `results[].latency_seconds` | float | |
 | `results[].prompt_tokens` | int | |
 | `results[].tags` | string[] | sorted |
+
+#### 1c. Context-curation bench report (`suite: "curation"`)
+
+Shares `model_repo`/`prompt_variant`/`chat_template`/`generated_at`/`host`/`commit`/
+`branch`/`mlx_lm_version`/`max_output_tokens`/`fixture_count`/`gate.*` with 1a/1b
+above, same types; `metrics.*`/`results[].*` differ. Unlike 1a/1b, this suite also
+carries `brain_model` and `budget_fraction` (there is no analogous "which remote
+model answered" or "what fraction of the transcript fit the budget" concept for the
+other two suites) and drives two real `BrainProvider.stream()` calls per fixture
+(issue #12) rather than only `HeartRuntime.generate()` calls:
+
+| Field | Type | Notes |
+|---|---|---|
+| `suite` | `"curation"` | |
+| `brain_model` | string | the Brain model both conditions were asked, per fixture |
+| `budget_fraction` | float (0–1) | each fixture's own token budget as a fraction of its full transcript's token count |
+| `metrics.must_keep_recall_rate` | float (0–1) | fraction of fixtures whose curated selection kept every labelled `must_keep` event — the gate's zero-tolerance clause |
+| `metrics.curated_identified_count` / `.truncated_identified_count` | int | how many fixtures' Brain answer, under each condition, matched the keyword-match proxy against the fixture's `failure_cause` label — a documented, coarse stand-in for a human judgment call, not a semantic judge (see `ansina.heart.eval.curation_runner`'s own module docstring) |
+| `metrics.parse_fallback_rate` | float (0–1) | |
+| `metrics.exceeded_budget_count` | int | how often the curator's own raw selection didn't fit the budget unassisted and had to be trimmed; reported, never gated |
+| `metrics.latency_p50_seconds` / `latency_p95_seconds` | float | the curator's own `curate()` call only — never the Brain round trips |
+| `metrics.prompt_tokens_min` / `_median` / `_max` | int / float / int | the curator's own Heart-side prompt, not the Brain's |
+| `metrics.peak_rss_bytes` | int | |
+| `results[].id` | string | fixture id |
+| `results[].must_keep` | int[] | sorted event sequence numbers |
+| `results[].selected_curated` / `.selected_truncated` | int[] | sorted event sequence numbers each condition kept |
+| `results[].curated_recall` / `.truncated_recall` | bool | whether that condition's selection kept every `must_keep` event |
+| `results[].parse_fallback` / `.exceeded_budget` | bool | |
+| `results[].curated_identified` / `.truncated_identified` | bool | the per-fixture keyword-match proxy verdict |
+| `results[].curated_answer` / `.truncated_answer` | string | the Brain's full free-text answer under each condition — unbounded length, same caveat as 1a/1b's `raw_output`; this is the human sanity-check surface for the keyword-match proxy above |
+| `results[].curation_latency_seconds` | float | |
+| `results[].prompt_tokens` | int | |
+| `results[].tags` | string[] | sorted |
+
+#### 1d. Structured-extraction bench report (`suite: "extraction"`)
+
+Shares `model_repo`/`prompt_variant`/`chat_template`/`generated_at`/`host`/`commit`/
+`branch`/`mlx_lm_version`/`max_output_tokens` with 1a/1b/1c above, same types.
+Unlike the other three, this suite covers **three distinct jobs in one report**
+(intervention selection, run titling, failure classification — see
+`ansina.heart.extraction`), each with its own result list and its own gate; there
+is no single `gate.passed`/`gate.checks` pair — only the `intervention` gate
+governs whether `DeterministicInterventionPolicy` could be swapped for a
+model-chosen one, per issue #15's own "gated separately" instruction. No
+`fixture_count` field either, since the three jobs' counts differ — each is
+reported as `metrics.<job>.fixture_count` instead.
+
+| Field | Type | Notes |
+|---|---|---|
+| `suite` | `"extraction"` | |
+| `metrics.latency_p50_seconds` / `latency_p95_seconds` | float | across every job's `generate()` call, pooled |
+| `metrics.prompt_tokens_min` / `_median` / `_max` | int / float / int | |
+| `metrics.peak_rss_bytes` | int | |
+| `metrics.intervention.fixture_count` | int | |
+| `metrics.intervention.schema_valid_rate` | float (0–1) | parsed and in-vocabulary; `1 - parse_fallback_rate` |
+| `metrics.intervention.hallucination_count` | int | a hallucinated `run_id`/out-of-vocabulary `action` — already refused upstream by the strict parser, so always 0 today; reported for discoverability if a future, looser parser ever makes it non-zero |
+| `metrics.intervention.agreement_rate` | float (0–1) | matches `DeterministicInterventionPolicy`'s own real choice exactly (action and, where applicable, run id) |
+| `metrics.intervention.more_conservative_count` / `.less_conservative_count` / `.wrong_run_count` | int | disagreement directions — see `ansina.heart.eval.extraction_runner`'s own module docstring for the conservativeness rank table; `less_conservative`/`wrong_run` are the zero-tolerance correctness-bug directions, `more_conservative` is tolerated up to a committed ceiling |
+| `metrics.intervention.parse_fallback_rate` | float (0–1) | |
+| `metrics.title.fixture_count` | int | |
+| `metrics.title.schema_valid_rate` | float (0–1) | single-line, non-empty, under the configured length bound — never a semantic quality judgment against the fixture's own `expected_title` |
+| `metrics.title.parse_fallback_rate` | float (0–1) | |
+| `metrics.failure_cause.fixture_count` | int | |
+| `metrics.failure_cause.schema_valid_rate` | float (0–1) | |
+| `metrics.failure_cause.cause_accuracy` / `.evidence_accuracy` | float (0–1) | against the fixture's own human-labelled `expected_cause`/`expected_evidence_seq` |
+| `metrics.failure_cause.parse_fallback_rate` | float (0–1) | |
+| `gate.intervention.passed` / `.checks` | bool / object (check name → bool) | the one gate that governs the policy-swap decision |
+| `gate.title.passed` / `.checks` | bool / object | reported, informational only |
+| `gate.failure_cause.passed` / `.checks` | bool / object | reported, informational only |
+| `intervention_results[].id` | string | fixture id |
+| `intervention_results[].expected_action` / `.actual_action` | string \| null | one of `OpencodeAction`'s five members, or `null` meaning "no intervention" — a real, schema-valid answer, not a parse failure |
+| `intervention_results[].expected_run_id` / `.actual_run_id` | string \| null | |
+| `intervention_results[].schema_valid` | bool | |
+| `intervention_results[].direction` | string \| null | `"agree"`/`"more_conservative"`/`"less_conservative"`/`"wrong_run"`, or `null` on a parse fallback |
+| `intervention_results[].raw_output` | string | unbounded length, same caveat as 1a/1b/1c's `raw_output` |
+| `intervention_results[].prompt_tokens` | int | |
+| `intervention_results[].tags` | string[] | sorted |
+| `title_results[].id` | string | fixture id |
+| `title_results[].expected_title` / `.actual_title` | string / string \| null | the human reference and the model's reply side by side — the human sanity-check surface, since title quality is never automatically graded |
+| `title_results[].schema_valid` | bool | |
+| `title_results[].raw_output` | string | |
+| `title_results[].prompt_tokens` | int | |
+| `title_results[].tags` | string[] | sorted |
+| `failure_results[].id` | string | fixture id |
+| `failure_results[].expected_cause` / `.actual_cause` | string / string \| null | one of `FailureCause`'s members |
+| `failure_results[].expected_evidence_seq` / `.actual_evidence_seq` | int / int \| null | |
+| `failure_results[].schema_valid` / `.cause_correct` / `.evidence_correct` | bool | |
+| `failure_results[].raw_output` | string | |
+| `failure_results[].prompt_tokens` | int | |
+| `failure_results[].tags` | string[] | sorted |
 
 ### 2. Soak run (`kind=soak/`)
 
@@ -319,6 +424,62 @@ key-prefix segment above (issue #67), not a field on this record either.
 | `extra` | object | present only when the log call passed `extra={...}`; every string leaf (recursively) is redacted |
 | `exception` | string | present only on an exception log, redacted |
 | `stack` | string | present only when stack info was captured, redacted |
+
+### 5. Opencode run event (`host=<id>/kind=opencode/`, issue #76, `intervention` populated by issue #79)
+
+One JSON object per line, written by
+`ansina.opencode.telemetry.OpencodeTelemetryWriter` — the third telemetry
+*shape* (event-driven, one line per run-lifecycle event) alongside family 3
+(interval) and family 4 (log mirror) above, through the same generic
+`SpooledRotatingWriter`, under its own `"opencode"` file-prefix family. Host
+attribution is via the `host=<id>/` key-prefix segment above (issue #67), not a
+field on this record either — shipped this way from birth, unlike
+`kind=telemetry/`/`kind=runlog/`'s own v1-to-v2 history.
+
+| Field | Type | Notes |
+|---|---|---|
+| `t` | float (unix timestamp) | |
+| `run_id` | string \| null | stable across every line for one run; `null` only for an `intervention` line whose action (`pause_intake`) has no single triggering run |
+| `session_id` | string \| null | the OpenCode session id, when known |
+| `seq` | int | **0-based, monotonic per `run_id`**, `0` with no running counter when `run_id` is `null` — see "Gap detection" below |
+| `event` | string | `"submitted"`\|`"started"`\|`"run_event"`\|`"completed"`\|`"failed"`\|`"timeout"`\|`"cancelled"`\|`"intervention"` |
+
+Event-specific fields, present only on the matching `event` value:
+
+| `event` | Additional fields |
+|---|---|
+| `submitted` | `prompt` (string, **truncated preview**, never the full unbounded prompt), `continue_last`/`fork` (bool), `model`/`agent` (string), `auto_approve` (bool \| null) |
+| `started` | none |
+| `run_event` | `raw_type` (string, redacted+truncated by the adapter), `payload` (string, the full redacted+truncated captured line — the lossless fallback), plus whichever of `tool`/`command`/`path` (a tool call), `permission`/`pattern`/`decision` (a permission denial), or `prompt_tokens`/`completion_tokens`/`cost` (a usage report) the payload happens to carry — a best-effort, forward-compatible passthrough, never a required classification (mirrors `ansina.opencode.events`' own intentionally-empty `RunEventType` lookup table) |
+| `completed`\|`failed`\|`timeout` | `exit_code` (int \| null), `duration_seconds` (float), `events_emitted`/`events_skipped` (int), `truncated` (bool), `error` (string \| null) |
+| `cancelled` | `duration_seconds` (float) — covers the one outcome `RunOutcome` cannot itself represent, since a cancelled run's own `asyncio.CancelledError` never resolves into one |
+| `intervention` | `action` (string — `"retry"`\|`"nudge"`\|`"compact"`\|`"pause_intake"`\|`"escalate_to_brain"`, the exact `ansina.opencode.interventions.OpencodeAction` values), `outcome` (string — `"applied"`\|`"declined"`\|`"unsupported"`\|`"error"`, the exact `ansina.heart.journal.OpencodeInterventionStatus` values), `detail` (string, short and code-generated — never model-authored text) |
+
+The Heart's bounded interventions on the OpenCode executor (issue #79,
+`ansina.heart.tick.opencode_intervention_handler.OpencodeInterventionHandler`,
+gated by `[heart.tick] opencode_interventions`, default `false`) are the first
+real emitter of `intervention` — every attempted action writes exactly one such
+line, whether it was applied, declined, unsupported, or errored. This is the
+**supervision** record; the opencode run's own execution events (`run_event`/
+the terminal statuses above) are unaffected by an intervention attempted
+against them — a `retry`/`nudge` is a *new* run with its own full event stream,
+linked back to the original only via `opencode_runs.retry_of` (not a field on
+this telemetry record).
+
+A line that would exceed the writer's own `max_line_bytes` cap (re-asserted
+independently of whatever truncation already happened at the adapter boundary)
+falls back to a minimal envelope — `t`/`run_id`/`session_id`/`seq`/`event` plus
+`truncated: true` — rather than a bare mid-JSON cut. Every line is also passed
+through `ansina.logging.redaction.redact` in full, uniformly, as the writer's
+own re-assertion of redaction — this is the first code path that redacts
+`RunRequest.prompt` at all; nothing upstream of this writer ever did.
+
+**Gap detection via `seq`**: for one `run_id`, `seq` must be a contiguous,
+0-based sequence (`0, 1, 2, ...`) with no value skipped — a reader detects a
+dropped line (e.g. an upload-side truncation, a crash mid-run) by finding a
+break in consecutive `seq` values within that `run_id`'s own lines. `seq` is
+scoped per `run_id`, not global across runs — two concurrent runs each start
+their own counter at `0`.
 
 ## `heart/eval`'s continued authority
 
